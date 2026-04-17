@@ -1,0 +1,16 @@
+fastapi>=0.110
+uvicorn[standard]>=0.29
+pydantic>=2.6
+python-dotenv>=1.0
+rdkit>=2023.9.5
+numpy>=1.26
+celery>=5.3
+redis>=5.0
+JPype1>=1.5
+# CASCADE (Paton-lab 3D GNN) — ported Keras 2.2 model runs on Keras 3
+# with the TF backend. CPU-only on Windows; TF dropped native GPU after
+# 2.10 and the model is small enough that CPU inference is fast anyway.
+tensorflow>=2.16
+keras>=3.0
+h5py>=3.0
+httpx>=0.27
