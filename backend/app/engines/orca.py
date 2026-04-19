@@ -1,46 +1,21 @@
-"""ORCA engine — DFT NMR chemical-shift prediction via subprocess.
-
-Runs the ORCA binary for each prediction. The current defaults target
-speed over accuracy:
-
-    ! PBE def2-SVP NMR TightSCF
-
-All of ``functional``, ``basis``, ``cpus``, ``ram_mb``, and the ORCA
-executable path are read from :mod:`app.config.settings` and can be
-overridden per-deployment via the ``ORCA_*`` environment variables.
-
-Conformer generation is selectable per request via
-``conformer_strategy`` (forwarded from :class:`PredictRequest`):
-
-* ``"fast"`` — RDKit ETKDG + MMFF; the lowest-energy of 50 conformers
-  is fed straight into the NMR calc. Sub-second overhead. Default.
-* ``"goat"`` — ORCA XTB2 GOAT global conformer search. Minutes of
-  overhead but finds the global minimum across rotatable bonds.
-
-Chemical shieldings are converted to δ ppm via TMS reference values
-computed automatically at the same (functional, basis) on first use
-and cached to ``{orca_work_dir}/tms_refs.json``. Subsequent predictions
-at the same level of theory read the cached value instead of rerunning
-TMS.
-
-All ORCA invocations go through a single-worker thread queue so
-concurrent ``/predict`` calls don't contend for the binary (each ORCA
-job already saturates CPUs via ``%pal``). The queue hands back a
-``concurrent.futures.Future`` — a hard per-job timeout can be bolted on
-later by passing ``timeout=`` to ``.result()`` (and killing the
-subprocess from the runner side).
-"""
+"""ORCA engine - DFT NMR chemical-shift prediction via subprocess."""
 from __future__ import annotations
 
 import json
 import logging
 import os
 import re
+import shutil
+import signal
 import subprocess
 import sys
+import tempfile
 import threading
+import time
 import uuid
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor, TimeoutError as FutureTimeoutError
+from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Dict, List, Optional
 
@@ -54,10 +29,6 @@ from app.schemas import AtomShift
 logger = logging.getLogger(__name__)
 
 
-# ---------------------------------------------------------------------
-# Exceptions and constants
-# ---------------------------------------------------------------------
-
 class OrcaEngineError(RuntimeError):
     """Raised on ORCA setup, subprocess, or output-parsing failures."""
 
@@ -66,28 +37,33 @@ _TMS_SMILES = "C[Si](C)(C)C"
 _NUCLEUS_TO_Z = {"1H": 1, "13C": 6}
 _NUCLEUS_TO_SYMBOL = {"1H": "H", "13C": "C"}
 
-
-# ---------------------------------------------------------------------
-# Single-worker job queue — all ORCA subprocess calls go through this.
-# ---------------------------------------------------------------------
-
 _job_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="orca-worker")
+_pending_request_slots = threading.BoundedSemaphore(
+    max(1, settings.orca_max_pending_requests)
+)
+
+
+@dataclass(frozen=True)
+class _OrcaJobResult:
+    job_dir: Path
+    out_path: Path
+    out_text: str
 
 
 def submit_orca_job(fn: Callable[[], object]) -> Future:
-    """Enqueue *fn* onto the shared single-worker ORCA executor.
-
-    Callers typically block on ``.result()``. To add a hard timeout
-    later, pass ``timeout=`` there — today the subprocess keeps running
-    even if the future is abandoned, so a real kill-switch in
-    :func:`_run_orca` would also be needed.
-    """
     return _job_executor.submit(fn)
 
 
-# ---------------------------------------------------------------------
-# ORCA subprocess runner
-# ---------------------------------------------------------------------
+@contextmanager
+def _orca_request_slot():
+    acquired = _pending_request_slots.acquire(blocking=False)
+    if not acquired:
+        raise OrcaEngineError("ORCA queue is full. Try again later.")
+    try:
+        yield
+    finally:
+        _pending_request_slots.release()
+
 
 def _orca_work_root() -> Path:
     root = Path(settings.orca_work_dir)
@@ -95,13 +71,73 @@ def _orca_work_root() -> Path:
     return root
 
 
-def _run_orca(inp_text: str, base: str, subdir: str) -> Path:
-    """Write *inp_text* into a fresh job directory and run ORCA there.
+def _orca_timeout_seconds() -> int:
+    return max(30, int(settings.orca_timeout_seconds))
 
-    Returns the path to the resulting ``.out`` file. Raises
-    :class:`OrcaEngineError` on a non-zero exit code or when ORCA did
-    not print the "TERMINATED NORMALLY" banner.
-    """
+
+def _clamped_orca_resources() -> tuple[int, int]:
+    host_cpus = os.cpu_count() or 1
+    cpus = max(1, min(int(settings.orca_cpus), host_cpus))
+    ram_ceiling = max(256, int(settings.orca_ram_ceiling_mb))
+    ram_mb = max(256, min(int(settings.orca_ram_mb), ram_ceiling))
+    return cpus, ram_mb
+
+
+def _prune_old_orca_job_dirs() -> None:
+    ttl_seconds = max(60, int(settings.orca_job_ttl_seconds))
+    cutoff = time.time() - ttl_seconds
+    root = _orca_work_root()
+    for path in root.iterdir():
+        if not path.is_dir():
+            continue
+        try:
+            if path.stat().st_mtime >= cutoff:
+                continue
+        except OSError:
+            continue
+        try:
+            shutil.rmtree(path, ignore_errors=True)
+        except OSError as exc:
+            logger.warning("Failed to prune ORCA work dir %s: %s", path, exc)
+
+
+def _cleanup_job_dir(job_dir: Path) -> None:
+    try:
+        shutil.rmtree(job_dir, ignore_errors=True)
+    except OSError as exc:
+        logger.warning("Failed to clean ORCA job dir %s: %s", job_dir, exc)
+
+
+def _terminate_process_tree(proc: subprocess.Popen) -> None:
+    if proc.poll() is not None:
+        return
+
+    if sys.platform == "win32":
+        creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        subprocess.run(
+            ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            creationflags=creationflags,
+        )
+    else:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        except OSError:
+            proc.kill()
+
+    try:
+        proc.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+
+
+def _run_orca(inp_text: str, base: str, subdir: str) -> _OrcaJobResult:
+    """Write *inp_text* into a fresh job directory and run ORCA there."""
+
     orca_exe = Path(settings.orca_exe)
     if not orca_exe.is_file():
         raise OrcaEngineError(
@@ -109,13 +145,14 @@ def _run_orca(inp_text: str, base: str, subdir: str) -> Path:
             "Set ORCA_EXE to a valid path to enable the ORCA engine."
         )
 
+    _prune_old_orca_job_dirs()
+
     job_dir = _orca_work_root() / subdir
     job_dir.mkdir(parents=True, exist_ok=True)
 
     inp_path = job_dir / f"{base}.inp"
     out_path = job_dir / f"{base}.out"
     err_path = job_dir / f"{base}.err"
-
     inp_path.write_text(inp_text, encoding="utf-8")
 
     env = os.environ.copy()
@@ -126,11 +163,19 @@ def _run_orca(inp_text: str, base: str, subdir: str) -> Path:
     env["TMP"] = str(tmpdir)
 
     creationflags = 0
+    popen_kwargs: dict[str, object] = {}
     if sys.platform == "win32":
-        creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        creationflags = (
+            getattr(subprocess, "CREATE_NO_WINDOW", 0)
+            | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        )
+    else:
+        popen_kwargs["start_new_session"] = True
 
+    timed_out = False
+    timeout_exc: subprocess.TimeoutExpired | None = None
     with out_path.open("wb") as fout, err_path.open("wb") as ferr:
-        proc = subprocess.run(
+        proc = subprocess.Popen(
             [str(orca_exe), inp_path.name],
             cwd=str(job_dir),
             stdout=fout,
@@ -138,9 +183,21 @@ def _run_orca(inp_text: str, base: str, subdir: str) -> Path:
             env=env,
             shell=False,
             creationflags=creationflags,
+            **popen_kwargs,
         )
+        try:
+            proc.wait(timeout=_orca_timeout_seconds())
+        except subprocess.TimeoutExpired as exc:
+            _terminate_process_tree(proc)
+            timed_out = True
+            timeout_exc = exc
 
-    # Fold stderr into .out for post-mortem inspection, then discard.
+    if timed_out:
+        _cleanup_job_dir(job_dir)
+        raise OrcaEngineError(
+            f"ORCA job {base!r} timed out after {_orca_timeout_seconds()} seconds"
+        ) from timeout_exc
+
     try:
         if err_path.exists() and err_path.stat().st_size > 0:
             with out_path.open("ab") as fout, err_path.open("rb") as ferr:
@@ -152,18 +209,18 @@ def _run_orca(inp_text: str, base: str, subdir: str) -> Path:
 
     out_text = out_path.read_text(errors="replace")
     if proc.returncode != 0 or "ORCA TERMINATED NORMALLY" not in out_text:
-        tail = "\n".join(out_text.splitlines()[-40:])
+        logger.warning(
+            "ORCA job %s failed rc=%s in %s",
+            base,
+            proc.returncode,
+            job_dir,
+        )
         raise OrcaEngineError(
-            f"ORCA job {base!r} failed (rc={proc.returncode}). "
-            f"Tail of {out_path}:\n{tail}"
+            f"ORCA job {base!r} failed with exit code {proc.returncode}."
         )
 
-    return out_path
+    return _OrcaJobResult(job_dir=job_dir, out_path=out_path, out_text=out_text)
 
-
-# ---------------------------------------------------------------------
-# ORCA input generation
-# ---------------------------------------------------------------------
 
 def _mol_xyz_block(mol: Chem.Mol, conf_id: int = -1) -> str:
     conf = mol.GetConformer(conf_id)
@@ -222,10 +279,6 @@ def _build_goat_input(
     ])
 
 
-# ---------------------------------------------------------------------
-# ORCA output parsing
-# ---------------------------------------------------------------------
-
 _NUCLEUS_HEADER_RE = re.compile(
     r"^\s*Nucleus\s*:?\s*(\d+)\s*([A-Z][a-z]?)\s*:?\s*$"
 )
@@ -238,26 +291,18 @@ _TABLE_ROW_RE = re.compile(
 
 
 def parse_shieldings(out_text: str) -> Dict[int, float]:
-    """Extract ``{atom_index: isotropic_shielding_ppm}`` from ORCA output.
-
-    ORCA prints chemical shieldings in two places: a per-atom block
-    ("Nucleus  0 C: ... isotropic shielding = ...") and a summary
-    table at the end of the section. This parser tries the per-atom
-    form first (most robust across versions) and falls back to the
-    table if nothing was matched. Atom indices are 0-based.
-    """
     shieldings: Dict[int, float] = {}
 
     current_idx: Optional[int] = None
     for line in out_text.splitlines():
-        m = _NUCLEUS_HEADER_RE.match(line)
-        if m:
-            current_idx = int(m.group(1))
+        match = _NUCLEUS_HEADER_RE.match(line)
+        if match:
+            current_idx = int(match.group(1))
             continue
         if current_idx is not None:
-            m = _ISOTROPIC_RE.match(line)
-            if m:
-                shieldings[current_idx] = float(m.group(1))
+            match = _ISOTROPIC_RE.match(line)
+            if match:
+                shieldings[current_idx] = float(match.group(1))
                 current_idx = None
 
     if shieldings:
@@ -270,9 +315,9 @@ def parse_shieldings(out_text: str) -> Dict[int, float]:
             in_nmr_section = True
             continue
         if in_nmr_section:
-            m = _TABLE_ROW_RE.match(line)
-            if m:
-                shieldings[int(m.group(1))] = float(m.group(3))
+            match = _TABLE_ROW_RE.match(line)
+            if match:
+                shieldings[int(match.group(1))] = float(match.group(3))
 
     return shieldings
 
@@ -294,10 +339,6 @@ def _parse_goat_globalmin_xyz(path: Path) -> str:
         )
     return "\n".join(coord_lines)
 
-
-# ---------------------------------------------------------------------
-# TMS reference (σ_TMS) computation + on-disk cache
-# ---------------------------------------------------------------------
 
 _tms_lock = threading.Lock()
 
@@ -323,8 +364,19 @@ def _load_tms_cache() -> dict:
 
 def _save_tms_cache(cache: dict) -> None:
     path = _tms_cache_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
     try:
-        path.write_text(json.dumps(cache, indent=2), encoding="utf-8")
+        with tempfile.NamedTemporaryFile(
+            "w",
+            encoding="utf-8",
+            dir=path.parent,
+            prefix="tms_refs.",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            json.dump(cache, handle, indent=2)
+            tmp_path = Path(handle.name)
+        os.replace(tmp_path, path)
     except OSError as exc:
         logger.warning("Failed to write TMS cache at %s: %s", path, exc)
 
@@ -344,28 +396,26 @@ def _build_tms_mol() -> Chem.Mol:
 
 
 def _compute_tms_reference(functional: str, basis: str) -> Dict[str, float]:
-    logger.info(
-        "Computing TMS reference at %s/%s (first-time)", functional, basis,
-    )
+    logger.info("Computing TMS reference at %s/%s (first-time)", functional, basis)
     mol = _build_tms_mol()
     xyz = _mol_xyz_block(mol)
+    cpus, ram_mb = _clamped_orca_resources()
     inp_text = _build_nmr_input(
         xyz,
         charge=0,
         multiplicity=1,
         functional=functional,
         basis=basis,
-        cpus=settings.orca_cpus,
-        ram_mb=settings.orca_ram_mb,
+        cpus=cpus,
+        ram_mb=ram_mb,
     )
     stamp = uuid.uuid4().hex[:8]
     safe_key = re.sub(r"[^A-Za-z0-9._-]+", "_", _tms_cache_key(functional, basis))
-    out_path = _run_orca(
-        inp_text,
-        base="tms",
-        subdir=f"tms_{safe_key}_{stamp}",
-    )
-    shieldings = parse_shieldings(out_path.read_text(errors="replace"))
+    job = _run_orca(inp_text, base="tms", subdir=f"tms_{safe_key}_{stamp}")
+    try:
+        shieldings = parse_shieldings(job.out_text)
+    finally:
+        _cleanup_job_dir(job.job_dir)
 
     h_vals: List[float] = []
     c_vals: List[float] = []
@@ -382,7 +432,7 @@ def _compute_tms_reference(functional: str, basis: str) -> Dict[str, float]:
     if not h_vals or not c_vals:
         raise OrcaEngineError(
             f"TMS reference calc returned incomplete shieldings "
-            f"(H={len(h_vals)}, C={len(c_vals)}). Check {out_path}."
+            f"(H={len(h_vals)}, C={len(c_vals)})"
         )
 
     return {
@@ -403,15 +453,7 @@ def _get_tms_reference(functional: str, basis: str) -> Dict[str, float]:
         return refs
 
 
-# ---------------------------------------------------------------------
-# Conformer strategies
-# ---------------------------------------------------------------------
-
 def _fast_conformer_xyz(mol: Chem.Mol) -> str:
-    """RDKit ETKDG (50 confs) + MMFF; return XYZ of the lowest-energy one.
-
-    The caller's mol is not mutated — a copy is embedded.
-    """
     work = Chem.Mol(mol)
     params = AllChem.ETKDGv3()
     params.randomSeed = 42
@@ -440,32 +482,41 @@ def _fast_conformer_xyz(mol: Chem.Mol) -> str:
     return _mol_xyz_block(work, conf_id=best_cid)
 
 
-def _goat_conformer_xyz(mol: Chem.Mol, charge: int, multiplicity: int) -> str:
-    """ORCA XTB2 GOAT global conformer search; return XYZ of the global min.
-
-    A fast RDKit geometry is used as the GOAT seed.
-    """
+def _goat_conformer_xyz(
+    mol: Chem.Mol,
+    charge: int,
+    multiplicity: int,
+    cpus: int,
+    ram_mb: int,
+) -> str:
     seed_xyz = _fast_conformer_xyz(mol)
     inp_text = _build_goat_input(
         seed_xyz,
         charge=charge,
         multiplicity=multiplicity,
-        cpus=settings.orca_cpus,
-        ram_mb=settings.orca_ram_mb,
+        cpus=cpus,
+        ram_mb=ram_mb,
     )
     stamp = uuid.uuid4().hex[:8]
-    out_path = _run_orca(inp_text, base="goat", subdir=f"goat_{stamp}")
-    gmin = out_path.parent / f"{out_path.stem}.globalminimum.xyz"
-    if not gmin.exists():
-        raise OrcaEngineError(
-            f"GOAT completed but no globalminimum.xyz was written in {out_path.parent}"
-        )
-    return _parse_goat_globalmin_xyz(gmin)
+    job = _run_orca(inp_text, base="goat", subdir=f"goat_{stamp}")
+    try:
+        gmin = job.out_path.parent / f"{job.out_path.stem}.globalminimum.xyz"
+        if not gmin.exists():
+            raise OrcaEngineError(
+                f"GOAT completed but no globalminimum.xyz was written in {job.out_path.parent}"
+            )
+        return _parse_goat_globalmin_xyz(gmin)
+    finally:
+        _cleanup_job_dir(job.job_dir)
 
 
-# ---------------------------------------------------------------------
-# Engine
-# ---------------------------------------------------------------------
+def _future_result(future: Future, label: str):
+    wait_seconds = _orca_timeout_seconds() + 30
+    try:
+        return future.result(timeout=wait_seconds)
+    except FutureTimeoutError as exc:
+        raise OrcaEngineError(f"Timed out waiting for ORCA {label} result") from exc
+
 
 class OrcaEngine(Engine):
     name = "orca"
@@ -479,9 +530,7 @@ class OrcaEngine(Engine):
             return False, f"ORCA binary not found: {exe}"
         return True, None
 
-    def predict(
-        self, mol: Chem.Mol, nucleus: str, **options
-    ) -> List[AtomShift]:
+    def predict(self, mol: Chem.Mol, nucleus: str, **options) -> List[AtomShift]:
         if nucleus not in _NUCLEUS_TO_Z:
             raise OrcaEngineError(f"Unsupported nucleus: {nucleus!r}")
 
@@ -494,42 +543,43 @@ class OrcaEngine(Engine):
         functional = settings.orca_functional
         basis = settings.orca_basis
         charge = Chem.GetFormalCharge(mol)
-        radicals = sum(a.GetNumRadicalElectrons() for a in mol.GetAtoms())
+        radicals = sum(atom.GetNumRadicalElectrons() for atom in mol.GetAtoms())
         multiplicity = radicals + 1
+        cpus, ram_mb = _clamped_orca_resources()
 
-        # Queue the TMS reference lookup first so the worker picks it up
-        # before the sample job. If the cache is warm, this returns fast.
-        tms_future = submit_orca_job(
-            lambda: _get_tms_reference(functional, basis)
-        )
+        with _orca_request_slot():
+            _prune_old_orca_job_dirs()
 
-        if strategy == "fast":
-            # Pure RDKit, no subprocess — run inline and save a queue hop.
-            xyz_block = _fast_conformer_xyz(mol)
-        else:
-            goat_future = submit_orca_job(
-                lambda: _goat_conformer_xyz(mol, charge, multiplicity)
-            )
-            xyz_block = goat_future.result()
+            tms_future = submit_orca_job(lambda: _get_tms_reference(functional, basis))
 
-        def _run_sample() -> Dict[int, float]:
-            inp_text = _build_nmr_input(
-                xyz_block,
-                charge=charge,
-                multiplicity=multiplicity,
-                functional=functional,
-                basis=basis,
-                cpus=settings.orca_cpus,
-                ram_mb=settings.orca_ram_mb,
-            )
-            stamp = uuid.uuid4().hex[:8]
-            out_path = _run_orca(inp_text, base="sample", subdir=f"sample_{stamp}")
-            return parse_shieldings(out_path.read_text(errors="replace"))
+            if strategy == "fast":
+                xyz_block = _fast_conformer_xyz(mol)
+            else:
+                goat_future = submit_orca_job(
+                    lambda: _goat_conformer_xyz(mol, charge, multiplicity, cpus, ram_mb)
+                )
+                xyz_block = _future_result(goat_future, "GOAT conformer")
 
-        sample_future = submit_orca_job(_run_sample)
+            def _run_sample() -> Dict[int, float]:
+                inp_text = _build_nmr_input(
+                    xyz_block,
+                    charge=charge,
+                    multiplicity=multiplicity,
+                    functional=functional,
+                    basis=basis,
+                    cpus=cpus,
+                    ram_mb=ram_mb,
+                )
+                stamp = uuid.uuid4().hex[:8]
+                job = _run_orca(inp_text, base="sample", subdir=f"sample_{stamp}")
+                try:
+                    return parse_shieldings(job.out_text)
+                finally:
+                    _cleanup_job_dir(job.job_dir)
 
-        tms_ref = tms_future.result()
-        shieldings = sample_future.result()
+            sample_future = submit_orca_job(_run_sample)
+            tms_ref = _future_result(tms_future, "TMS reference")
+            shieldings = _future_result(sample_future, "sample")
 
         target_z = _NUCLEUS_TO_Z[nucleus]
         target_sym = _NUCLEUS_TO_SYMBOL[nucleus]
@@ -542,15 +592,16 @@ class OrcaEngine(Engine):
             sigma = shieldings.get(idx)
             if sigma is None:
                 raise OrcaEngineError(
-                    f"ORCA did not emit an isotropic shielding for atom "
-                    f"{idx} ({target_sym})"
+                    f"ORCA did not emit an isotropic shielding for atom {idx} ({target_sym})"
                 )
-            shifts.append(AtomShift(
-                atom_index=idx,
-                symbol=target_sym,
-                shift_ppm=ref_sigma - sigma,
-                confidence=None,
-            ))
+            shifts.append(
+                AtomShift(
+                    atom_index=idx,
+                    symbol=target_sym,
+                    shift_ppm=ref_sigma - sigma,
+                    confidence=None,
+                )
+            )
         return shifts
 
 

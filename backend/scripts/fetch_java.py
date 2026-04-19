@@ -1,35 +1,37 @@
-"""Download and extract a portable Temurin Java runtime into backend/vendor/java.
-
-This avoids requiring an admin-installed JDK on Windows. JPype can load the
-bundled JVM directly from the extracted runtime, so the CDK engine works even
-when `java` and `JAVA_HOME` are missing globally.
-
-Usage::
-
-    python backend/scripts/fetch_java.py
-    python backend/scripts/fetch_java.py --force
-"""
+"""Download and extract a pinned Temurin Java runtime into ``backend/vendor/java``."""
 from __future__ import annotations
 
 import argparse
-import json
+import hashlib
 import shutil
 import sys
 import urllib.request
 import zipfile
 from pathlib import Path
 
-ADOPTIUM_API_URL = (
-    "https://api.adoptium.net/v3/assets/latest/17/hotspot"
-    "?architecture=x64&heap_size=normal&image_type=jre"
-    "&jvm_impl=hotspot&os=windows&vendor=eclipse"
+_DOWNLOAD_TIMEOUT_SECONDS = 30
+_HTTP_HEADERS = {
+    "User-Agent": "NMR-Predict-Bootstrap/1.0",
+    "Accept": "application/octet-stream",
+}
+
+_JAVA_ARCHIVE_URL = (
+    "https://github.com/adoptium/temurin17-binaries/releases/download/"
+    "jdk-17.0.18%2B8/OpenJDK17U-jre_x64_windows_hotspot_17.0.18_8.zip"
 )
+_JAVA_ARCHIVE_NAME = "OpenJDK17U-jre_x64_windows_hotspot_17.0.18_8.zip"
+_JAVA_ARCHIVE_SHA256 = "95c9ebe3ee16baab7239531757513d9a03799ca06483ef2f3b530e81e93e7b5b"
+_JAVA_HOME_DIRNAME = "jdk-17.0.18+8-jre"
 
 VENDOR_DIR = Path(__file__).resolve().parent.parent / "vendor" / "java"
-HTTP_HEADERS = {
-    "User-Agent": "NMR-Predict-Bootstrap/1.0",
-    "Accept": "application/json",
-}
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _existing_java_home() -> Path | None:
@@ -52,12 +54,35 @@ def _existing_java_home() -> Path | None:
     return None
 
 
-def _download(url: str, dest: Path) -> None:
-    print(f"  downloading {url}")
+def _verify_archive(path: Path) -> None:
+    actual_sha256 = _sha256_file(path)
+    if actual_sha256 != _JAVA_ARCHIVE_SHA256:
+        raise RuntimeError(
+            f"{path.name} checksum mismatch: expected {_JAVA_ARCHIVE_SHA256}, got {actual_sha256}"
+        )
+
+    try:
+        with zipfile.ZipFile(path) as archive:
+            members = archive.namelist()
+    except zipfile.BadZipFile as exc:
+        raise RuntimeError(f"{path.name} is not a valid ZIP archive") from exc
+
+    required = {
+        f"{_JAVA_HOME_DIRNAME}/bin/java.exe",
+        f"{_JAVA_HOME_DIRNAME}/bin/server/jvm.dll",
+        f"{_JAVA_HOME_DIRNAME}/release",
+    }
+    missing = sorted(required.difference(members))
+    if missing:
+        raise RuntimeError(f"{path.name} is missing required files: {missing}")
+
+
+def _download(dest: Path) -> Path:
+    print(f"  downloading {_JAVA_ARCHIVE_URL}")
     print(f"    -> {dest}")
     tmp = dest.with_suffix(dest.suffix + ".part")
-    request = urllib.request.Request(url, headers=HTTP_HEADERS)
-    with urllib.request.urlopen(request) as resp, open(tmp, "wb") as out:
+    request = urllib.request.Request(_JAVA_ARCHIVE_URL, headers=_HTTP_HEADERS)
+    with urllib.request.urlopen(request, timeout=_DOWNLOAD_TIMEOUT_SECONDS) as resp, tmp.open("wb") as out:
         total = int(resp.headers.get("Content-Length", 0))
         written = 0
         last_pct = -1
@@ -72,20 +97,9 @@ def _download(url: str, dest: Path) -> None:
                 pct = int((written / total) * 100)
                 if pct != last_pct and pct % 10 == 0:
                     last_pct = pct
-                    print(f"    {pct:3d}%  ({written/1e6:6.2f} MB)")
-    tmp.replace(dest)
+                    print(f"    {pct:3d}%  ({written / 1e6:6.2f} MB)")
     print("  done.")
-
-
-def _fetch_release_metadata() -> tuple[str, str]:
-    request = urllib.request.Request(ADOPTIUM_API_URL, headers=HTTP_HEADERS)
-    with urllib.request.urlopen(request) as resp:
-        data = json.load(resp)
-    if not data:
-        raise RuntimeError("Adoptium API returned no releases")
-
-    package = data[0]["binary"]["package"]
-    return package["link"], package["name"]
+    return tmp
 
 
 def _clean_previous_runtimes(keep: set[str]) -> None:
@@ -109,18 +123,18 @@ def main() -> int:
         print(f"[fetch_java] Java runtime already present at {existing_home}")
         return 0
 
+    archive_path = VENDOR_DIR / _JAVA_ARCHIVE_NAME
     try:
-        package_url, package_name = _fetch_release_metadata()
-    except Exception as exc:  # noqa: BLE001
-        print(f"[fetch_java] failed to query Adoptium API: {exc}", file=sys.stderr)
-        return 1
-
-    archive_path = VENDOR_DIR / package_name
-    try:
-        _download(package_url, archive_path)
+        tmp = _download(archive_path)
+        _verify_archive(tmp)
+        tmp.replace(archive_path)
     except Exception as exc:  # noqa: BLE001
         print(f"[fetch_java] failed to download Java runtime: {exc}", file=sys.stderr)
+        archive_path.unlink(missing_ok=True)
         return 1
+    finally:
+        tmp_path = archive_path.with_suffix(archive_path.suffix + ".part")
+        tmp_path.unlink(missing_ok=True)
 
     try:
         with zipfile.ZipFile(archive_path) as archive:

@@ -2,6 +2,7 @@ import pytest
 
 from app.chem.canonical import canonicalize, InvalidSmilesError
 from app.chem.conformer import generate_conformers
+from app.limits import MAX_HEAVY_ATOMS, MAX_SMILES_LENGTH
 
 
 def test_canonical_benzene_roundtrip():
@@ -18,6 +19,16 @@ def test_invalid_smiles_rejected():
 def test_valence_violation_rejected():
     with pytest.raises(InvalidSmilesError):
         canonicalize("C(C)(C)(C)(C)C")  # pentavalent carbon
+
+
+def test_overlong_smiles_rejected():
+    with pytest.raises(InvalidSmilesError, match="too long"):
+        canonicalize("C" * (MAX_SMILES_LENGTH + 1))
+
+
+def test_oversized_molecule_rejected():
+    with pytest.raises(InvalidSmilesError, match="too large"):
+        canonicalize("C" * (MAX_HEAVY_ATOMS + 1))
 
 
 def test_conformer_generation_ethanol():

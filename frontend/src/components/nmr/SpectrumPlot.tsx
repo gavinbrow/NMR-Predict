@@ -1,6 +1,7 @@
 import initNmriumCore from "@zakodium/nmrium-core-plugins";
 import { Check, EyeOff, Layers3 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
+import type { ReactNode } from "react";
 import { buildNmriumViewerModel, getEngineColorMap } from "@/lib/nmr/nmrium";
 import {
   deriveSignals,
@@ -75,7 +76,7 @@ function signalHoverScore(signal: DerivedSignal, ppm: number, nucleus: Nucleus) 
   return Math.min(lineDistance, centerDistance * 0.85) + boundaryDistance * 3;
 }
 
-function SummaryPill({ children }: { children: string }) {
+function SummaryPill({ children }: { children: ReactNode }) {
   return (
     <span className="rounded-full border border-border/70 bg-background/90 px-2.5 py-1 text-[11px] font-medium text-foreground">
       {children}

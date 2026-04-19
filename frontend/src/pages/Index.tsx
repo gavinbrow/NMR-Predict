@@ -6,7 +6,14 @@ import { ControlPanel } from "@/components/nmr/ControlPanel";
 import { MoleculeEditor } from "@/components/nmr/MoleculeEditor";
 import { SpectrumPlot } from "@/components/nmr/SpectrumPlot";
 import { useDebounced } from "@/hooks/use-debounced";
-import { getEngines, getHealth, getOptions, predict, validateSmiles } from "@/lib/nmr/api";
+import {
+  getEngines,
+  getHealth,
+  getOptions,
+  isRequestCanceled,
+  predict,
+  validateSmiles,
+} from "@/lib/nmr/api";
 import { deriveSignals } from "@/lib/nmr/signals";
 import { cn } from "@/lib/utils";
 import type {
@@ -44,6 +51,13 @@ function truncateSmiles(smiles: string, limit = 28) {
   return `${smiles.slice(0, limit - 1)}...`;
 }
 
+function formatElapsed(ms: number) {
+  const totalSeconds = Math.max(0, Math.floor(ms / 1000));
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `${minutes}:${seconds.toString().padStart(2, "0")}`;
+}
+
 const Index = () => {
   const [bootMessage, setBootMessage] = useState("Connecting to prediction service...");
   const [bootError, setBootError] = useState<string | null>(null);
@@ -63,6 +77,8 @@ const Index = () => {
   const [validation, setValidation] = useState<ValidateResponse | null>(null);
   const [validating, setValidating] = useState(false);
   const [predicting, setPredicting] = useState(false);
+  const [predictElapsedMs, setPredictElapsedMs] = useState(0);
+  const [predictStatus, setPredictStatus] = useState<string | null>(null);
   const [predictError, setPredictError] = useState<string | null>(null);
   const [predictionComponents, setPredictionComponents] = useState<PredictionComponent[]>([]);
   const [activeComponentId, setActiveComponentId] = useState<string | null>(null);
@@ -71,6 +87,7 @@ const Index = () => {
   const [hoveredAtomIndices, setHoveredAtomIndices] = useState<number[] | null>(null);
 
   const ketcherRef = useRef<Ketcher | null>(null);
+  const predictAbortRef = useRef<AbortController | null>(null);
 
   const activeComponent = useMemo(
     () =>
@@ -174,30 +191,48 @@ const Index = () => {
       return;
     }
 
-    let cancelled = false;
+    const controller = new AbortController();
     setValidating(true);
 
-    validateSmiles(debouncedSmiles)
+    validateSmiles(debouncedSmiles, { signal: controller.signal })
       .then((response) => {
-        if (!cancelled) {
-          setValidation(response.data);
-        }
+        setValidation(response.data);
       })
-      .catch(() => {
-        if (!cancelled) {
-          setValidation({ valid: false, error: "Validation request failed" });
+      .catch((error) => {
+        if (isRequestCanceled(error)) {
+          return;
         }
+        setValidation({ valid: false, error: "Validation request failed" });
       })
       .finally(() => {
-        if (!cancelled) {
+        if (!controller.signal.aborted) {
           setValidating(false);
         }
       });
 
-    return () => {
-      cancelled = true;
-    };
+    return () => controller.abort();
   }, [booted, debouncedSmiles]);
+
+  useEffect(() => {
+    if (!predicting) {
+      setPredictElapsedMs(0);
+      return;
+    }
+
+    const startedAt = Date.now();
+    setPredictElapsedMs(0);
+    const interval = window.setInterval(() => {
+      setPredictElapsedMs(Date.now() - startedAt);
+    }, 1000);
+    return () => window.clearInterval(interval);
+  }, [predicting]);
+
+  useEffect(
+    () => () => {
+      predictAbortRef.current?.abort();
+    },
+    [],
+  );
 
   const handleSmilesChange = useCallback(
     (nextSmiles: string) => {
@@ -217,22 +252,13 @@ const Index = () => {
     [editorLinkedComponentId, predictionComponents],
   );
 
-  const activateComponent = useCallback(async (component: PredictionComponent) => {
+  const activateComponent = useCallback((component: PredictionComponent) => {
     setActiveComponentId(component.id);
     setEditorLinkedComponentId(component.id);
     setSmiles(component.response.smiles);
     setValidation({ valid: true, canonical_smiles: component.response.smiles });
     setSelectedAtomIndex(null);
     setHoveredAtomIndices(null);
-
-    const ketcher = ketcherRef.current;
-    if (!ketcher) return;
-
-    try {
-      await ketcher.setMolecule(component.response.smiles);
-    } catch {
-      /* noop */
-    }
   }, []);
 
   useEffect(() => {
@@ -266,6 +292,10 @@ const Index = () => {
     setWeights((current) => ({ ...current, [name]: value }));
   }, []);
 
+  const cancelPrediction = useCallback(() => {
+    predictAbortRef.current?.abort();
+  }, []);
+
   const canPredict = booted && !!validation?.valid && selectedEngines.length > 0 && !predicting;
   const canAddPrediction =
     canPredict &&
@@ -292,7 +322,11 @@ const Index = () => {
       if (behavior === "replace" && !canPredict) return;
       if (behavior === "add" && !canAddPrediction) return;
 
+      const controller = new AbortController();
+      predictAbortRef.current?.abort();
+      predictAbortRef.current = controller;
       setPredicting(true);
+      setPredictElapsedMs(0);
       setPredictError(null);
 
       try {
@@ -310,8 +344,14 @@ const Index = () => {
               }
             : {}),
         };
+        const usesOrca = payload.engines.includes("orca");
+        setPredictStatus(
+          usesOrca
+            ? "ORCA calculation in progress. Larger molecules can take a while."
+            : "Prediction request in progress.",
+        );
 
-        const response = await predict(payload);
+        const response = await predict(payload, { signal: controller.signal });
         const componentId = crypto.randomUUID();
         const componentLabel =
           behavior === "replace"
@@ -337,19 +377,18 @@ const Index = () => {
         setValidation({ valid: true, canonical_smiles: decoratedResponse.smiles });
         setSelectedAtomIndex(null);
         setHoveredAtomIndices(null);
-
-        const ketcher = ketcherRef.current;
-        if (ketcher) {
-          try {
-            await ketcher.setMolecule(decoratedResponse.smiles);
-          } catch {
-            /* noop */
-          }
-        }
       } catch (error) {
+        if (isRequestCanceled(error)) {
+          setPredictError("Prediction canceled.");
+          return;
+        }
         const message = error instanceof Error ? error.message : "Prediction failed";
         setPredictError(message);
       } finally {
+        if (predictAbortRef.current === controller) {
+          predictAbortRef.current = null;
+        }
+        setPredictStatus(null);
         setPredicting(false);
       }
     },
@@ -439,15 +478,9 @@ const Index = () => {
                   )}
                 >
                   <MoleculeEditor
-                    onReady={async (ketcher) => {
+                    value={smiles}
+                    onReady={(ketcher) => {
                       ketcherRef.current = ketcher;
-
-                      if (!activeComponent) return;
-                      try {
-                        await ketcher.setMolecule(activeComponent.response.smiles);
-                      } catch {
-                        /* noop */
-                      }
                     }}
                     onSmilesChange={handleSmilesChange}
                     onAtomClick={(atomIndex) => {
@@ -511,6 +544,19 @@ const Index = () => {
                   {predicting ? "Predicting..." : "Replace and predict"}
                 </button>
 
+                {predicting ? (
+                  <button
+                    type="button"
+                    onClick={cancelPrediction}
+                    className={cn(
+                      "flex w-full items-center justify-center gap-2 rounded-xl border border-destructive/40 bg-destructive/5 px-4 py-3 text-sm font-semibold text-destructive transition-smooth",
+                      "hover:bg-destructive/10 active:scale-[0.99]",
+                    )}
+                  >
+                    Cancel current prediction
+                  </button>
+                ) : null}
+
                 <button
                   type="button"
                   onClick={() => void runPrediction("add")}
@@ -536,6 +582,11 @@ const Index = () => {
                   </p>
                 ) : null}
                 <p className="text-center text-xs text-muted-foreground">{addPredictionHint}</p>
+                {predicting && predictStatus ? (
+                  <p className="rounded-md bg-primary/5 px-3 py-2 text-xs text-primary">
+                    {predictStatus} Elapsed: {formatElapsed(predictElapsedMs)}.
+                  </p>
+                ) : null}
                 {predictError ? (
                   <p className="rounded-md bg-destructive/10 px-3 py-2 text-xs text-destructive">
                     {predictError}

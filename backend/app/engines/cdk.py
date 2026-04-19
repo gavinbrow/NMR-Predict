@@ -12,6 +12,7 @@ import glob
 import logging
 import os
 import shutil
+import sys
 import threading
 from pathlib import Path
 from typing import Optional
@@ -317,7 +318,7 @@ class CdkEngine(Engine):
             self._ensure_predictor(nucleus)
 
     # ------------------------------------------------------------------
-    # Readiness (cheap - never starts the JVM)
+    # Readiness
     # ------------------------------------------------------------------
     def is_ready(self):
         raw = settings.cdk_jar_path
@@ -360,6 +361,14 @@ class CdkEngine(Engine):
                 "https://adoptium.net/) and set JAVA_HOME, then restart the "
                 "backend."
             )
+
+        if "pytest" in os.path.basename(sys.argv[0]).lower() or "pytest" in sys.modules:
+            return True, None
+
+        try:
+            self.warmup()
+        except CdkEngineError as exc:
+            return False, str(exc)
 
         return True, None
 

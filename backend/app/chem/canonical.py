@@ -13,6 +13,8 @@ from typing import List, Optional
 from rdkit import Chem
 from rdkit.Chem import AllChem
 
+from app.limits import MAX_HEAVY_ATOMS, MAX_SMILES_LENGTH, MAX_TOTAL_ATOMS
+
 
 class InvalidSmilesError(ValueError):
     pass
@@ -39,6 +41,10 @@ def canonicalize(smiles: str, add_hs: bool = True) -> CanonicalMolecule:
     """
     if not smiles or not smiles.strip():
         raise InvalidSmilesError("SMILES is empty")
+    if len(smiles.strip()) > MAX_SMILES_LENGTH:
+        raise InvalidSmilesError(
+            f"SMILES is too long (max {MAX_SMILES_LENGTH} characters)"
+        )
 
     mol = Chem.MolFromSmiles(smiles.strip())
     if mol is None:
@@ -55,11 +61,21 @@ def canonicalize(smiles: str, add_hs: bool = True) -> CanonicalMolecule:
     if mol is None:
         raise InvalidSmilesError("Canonical SMILES failed to round-trip")
 
+    heavy = sum(1 for a in mol.GetAtoms() if a.GetAtomicNum() > 1)
+    if heavy > MAX_HEAVY_ATOMS:
+        raise InvalidSmilesError(
+            f"Molecule is too large ({heavy} heavy atoms; max {MAX_HEAVY_ATOMS})"
+        )
+
     if add_hs:
         mol = Chem.AddHs(mol)
+        if mol.GetNumAtoms() > MAX_TOTAL_ATOMS:
+            raise InvalidSmilesError(
+                f"Molecule is too large after adding hydrogens "
+                f"({mol.GetNumAtoms()} atoms; max {MAX_TOTAL_ATOMS})"
+            )
 
     symbols = [atom.GetSymbol() for atom in mol.GetAtoms()]
-    heavy = sum(1 for a in mol.GetAtoms() if a.GetAtomicNum() > 1)
 
     return CanonicalMolecule(
         input_smiles=smiles,

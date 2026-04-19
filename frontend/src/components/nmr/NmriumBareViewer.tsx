@@ -377,12 +377,17 @@ export function NmriumBareViewer({
 
   useEffect(() => {
     const settings = readSettings();
-    dispatchPreferences({
-      type: "INIT_PREFERENCES",
-      payload: {
-        currentWorkspace: settings?.currentWorkspace,
-      },
-    });
+    dispatchPreferences(
+      {
+        type: "INIT_PREFERENCES",
+        payload: {
+          preferences: undefined,
+          workspace: undefined,
+          customWorkspaces: undefined,
+          currentWorkspace: settings?.currentWorkspace,
+        },
+      } as Parameters<typeof dispatchPreferences>[0],
+    );
   }, []);
 
   return (
@@ -402,7 +407,11 @@ export function NmriumBareViewer({
                   <KeyModifiersProvider>
                     <ToasterProvider>
                       <SortSpectraProvider>
-                        <NMRiumStateProvider aggregator={aggregator} state={state}>
+                        <NMRiumStateProvider
+                          aggregator={aggregator}
+                          state={state}
+                          onChange={() => undefined}
+                        >
                           <TopicMoleculeProvider>
                             <DialogProvider>
                               <AlertProvider>

@@ -4,6 +4,12 @@ import warnings
 
 from pydantic import BaseModel
 
+from app.limits import (
+    DEFAULT_ORCA_JOB_TTL_SECONDS,
+    DEFAULT_ORCA_MAX_PENDING_REQUESTS,
+    DEFAULT_ORCA_RAM_CEILING_MB,
+)
+
 
 # TensorFlow is imported lazily by the CASCADE model builder. Set these before
 # Keras/TensorFlow loads so Windows startup stays quieter and deterministic.
@@ -60,8 +66,16 @@ class Settings(BaseModel):
         "ORCA_WORK_DIR",
         os.path.join(os.getcwd(), "_work", "orca"),
     )
-    # Reserved for a future hard timeout on ORCA jobs. Not enforced today.
-    orca_timeout_seconds: int = int(os.getenv("ORCA_TIMEOUT", "0"))
+    orca_timeout_seconds: int = int(os.getenv("ORCA_TIMEOUT", "600"))
+    orca_max_pending_requests: int = int(
+        os.getenv("ORCA_MAX_PENDING_REQUESTS", str(DEFAULT_ORCA_MAX_PENDING_REQUESTS))
+    )
+    orca_job_ttl_seconds: int = int(
+        os.getenv("ORCA_JOB_TTL_SECONDS", str(DEFAULT_ORCA_JOB_TTL_SECONDS))
+    )
+    orca_ram_ceiling_mb: int = int(
+        os.getenv("ORCA_RAM_CEILING_MB", str(DEFAULT_ORCA_RAM_CEILING_MB))
+    )
 
 
 settings = Settings()

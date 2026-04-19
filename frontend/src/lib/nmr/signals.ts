@@ -47,7 +47,7 @@ type MutableSignal = {
 
 const GROUP_TOLERANCE_PPM: Record<string, number> = {
   "1H": 0.14,
-  "13C": 0.8,
+  "13C": 0.25,
   "15N": 1.2,
   "19F": 0.8,
   "31P": 0.8,
@@ -117,6 +117,10 @@ function displayLinesForSignal(
 ): DerivedSignalLine[] {
   const baseHeight = lineHeightScale(nucleus, integration);
   if (nucleus !== "1H") {
+    return [{ shift: center, intensity: baseHeight }];
+  }
+
+  if (multiplicity === "s" || (couplingHz != null && Math.abs(couplingHz) < Number.EPSILON)) {
     return [{ shift: center, intensity: baseHeight }];
   }
 
@@ -221,9 +225,7 @@ export function deriveSignals(shifts: Shift[], nucleus: Nucleus, mode: Mode): De
     const engineKey = mode === "individual" ? (shift.engine ?? "engine") : "consensus";
     const sourceKey = shift.source_id ?? "default";
     const baseKey =
-      nucleus === "1H"
-        ? `${sourceKey}:${engineKey}:${shift.assignment_group ?? `atom:${shift.atom_index}`}`
-        : `${sourceKey}:${engineKey}:atom:${shift.atom_index}`;
+      `${sourceKey}:${engineKey}:${shift.assignment_group ?? `atom:${shift.atom_index}`}`;
 
     const bucket = grouped.get(baseKey) ?? [];
     const candidate =

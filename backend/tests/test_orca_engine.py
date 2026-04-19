@@ -1,14 +1,10 @@
-"""ORCA engine tests.
-
-Registry and unit-level parser tests always run; a live end-to-end
-prediction test is gated on ``RUN_ORCA_TESTS=1`` because a cold cache
-requires a TMS reference calculation plus a sample calculation, which
-together take several minutes even at the cheap PBE/def2-SVP defaults.
-"""
+"""ORCA engine tests."""
 from __future__ import annotations
 
 import json
 import os
+import subprocess
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -19,23 +15,18 @@ from app.engines import engine_is_implemented, get_engine
 from app.engines.orca import (
     OrcaEngine,
     OrcaEngineError,
-    _build_nmr_input,
     _build_goat_input,
+    _build_nmr_input,
+    _get_tms_reference,
+    _run_orca,
     _tms_cache_key,
     parse_shieldings,
 )
 
 
 def _orca_live_tests_enabled() -> bool:
-    return (
-        os.getenv("RUN_ORCA_TESTS") == "1"
-        and Path(settings.orca_exe).is_file()
-    )
+    return os.getenv("RUN_ORCA_TESTS") == "1" and Path(settings.orca_exe).is_file()
 
-
-# ---------------------------------------------------------------------
-# Registry + trivial guards
-# ---------------------------------------------------------------------
 
 def test_registry_lists_orca_as_implemented():
     assert engine_is_implemented("orca")
@@ -64,7 +55,6 @@ def test_orca_requires_binary(monkeypatch, tmp_path):
     monkeypatch.setattr(app_config.settings, "orca_exe", str(tmp_path / "no_orca_here.exe"))
     monkeypatch.setattr(app_config.settings, "orca_work_dir", str(tmp_path))
 
-    # Seed the TMS cache so we fail on the sample run, not the reference run.
     key = _tms_cache_key(app_config.settings.orca_functional, app_config.settings.orca_basis)
     (tmp_path / "tms_refs.json").write_text(
         json.dumps({key: {"1H": 31.8, "13C": 188.1}}),
@@ -76,10 +66,6 @@ def test_orca_requires_binary(monkeypatch, tmp_path):
     with pytest.raises(OrcaEngineError, match="ORCA binary not found"):
         engine.predict(canon.mol, "13C")
 
-
-# ---------------------------------------------------------------------
-# Input builders
-# ---------------------------------------------------------------------
 
 def test_build_nmr_input_shape():
     inp = _build_nmr_input(
@@ -111,10 +97,6 @@ def test_build_goat_input_includes_goat_block():
     assert "NWorkers 8" in inp
     assert "* xyz -1 2" in inp
 
-
-# ---------------------------------------------------------------------
-# Shielding parser — covers both per-atom block and summary-table formats
-# ---------------------------------------------------------------------
 
 _PER_ATOM_SAMPLE = """
 --------------------------------
@@ -167,9 +149,61 @@ def test_parse_shieldings_missing_returns_empty():
     assert result == {}
 
 
-# ---------------------------------------------------------------------
-# Live end-to-end — gated on RUN_ORCA_TESTS=1 because it's slow
-# ---------------------------------------------------------------------
+def test_run_orca_times_out_and_cleans_job_dir(monkeypatch, tmp_path):
+    from app import config as app_config
+
+    orca_exe = tmp_path / "orca.exe"
+    orca_exe.write_text("", encoding="utf-8")
+    monkeypatch.setattr(app_config.settings, "orca_exe", str(orca_exe))
+    monkeypatch.setattr(app_config.settings, "orca_work_dir", str(tmp_path))
+    monkeypatch.setattr(app_config.settings, "orca_timeout_seconds", 30)
+
+    class FakeTimedOutProcess:
+        pid = 1234
+        returncode = None
+
+        def wait(self, timeout):
+            raise subprocess.TimeoutExpired(cmd="orca", timeout=timeout)
+
+        def poll(self):
+            return None
+
+        def kill(self):
+            self.returncode = -9
+
+    monkeypatch.setattr("app.engines.orca.subprocess.Popen", lambda *args, **kwargs: FakeTimedOutProcess())
+    monkeypatch.setattr(
+        "app.engines.orca.subprocess.run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(args, 0),
+    )
+
+    job_dir = tmp_path / "job-timeout"
+    with pytest.raises(OrcaEngineError, match="timed out"):
+        _run_orca("! test", base="sample", subdir="job-timeout")
+
+    assert not job_dir.exists()
+
+
+def test_get_tms_reference_serializes_cache_updates(monkeypatch, tmp_path):
+    from app import config as app_config
+
+    monkeypatch.setattr(app_config.settings, "orca_work_dir", str(tmp_path))
+
+    def fake_compute(functional: str, basis: str):
+        return {"1H": float(len(functional)), "13C": float(len(basis))}
+
+    monkeypatch.setattr("app.engines.orca._compute_tms_reference", fake_compute)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        future_a = executor.submit(_get_tms_reference, "PBE", "def2-SVP")
+        future_b = executor.submit(_get_tms_reference, "B3LYP", "def2-TZVP")
+        assert future_a.result()["1H"] == 3.0
+        assert future_b.result()["13C"] == 9.0
+
+    cache = json.loads((tmp_path / "tms_refs.json").read_text(encoding="utf-8"))
+    assert cache[_tms_cache_key("PBE", "def2-SVP")] == {"1H": 3.0, "13C": 8.0}
+    assert cache[_tms_cache_key("B3LYP", "def2-TZVP")] == {"1H": 5.0, "13C": 9.0}
+
 
 @pytest.mark.skipif(
     not _orca_live_tests_enabled(),
@@ -180,8 +214,6 @@ def test_orca_predicts_methane_carbon_live():
     shifts = get_engine("orca").predict(canon.mol, "13C", conformer_strategy="fast")
     assert len(shifts) == 1
     delta = shifts[0].shift_ppm
-    # Methane δ(13C) is experimentally ≈ -2 ppm vs TMS; cheap DFT will
-    # drift but should still sit in this broad band.
     assert -30.0 < delta < 30.0, f"CH4 13C shift out of sane range: {delta}"
     assert shifts[0].symbol == "C"
     assert shifts[0].atom_index == 0

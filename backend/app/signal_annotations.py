@@ -27,6 +27,9 @@ def annotate_atom_shifts(mol: Mol, nucleus: str, shifts: List[AtomShift]) -> Lis
 
 
 def _annotate_proton_shift(mol: Mol, shift: AtomShift) -> AtomShift:
+    if shift.atom_index < 0 or shift.atom_index >= mol.GetNumAtoms():
+        return shift
+
     proton = mol.GetAtomWithIdx(shift.atom_index)
     if proton.GetAtomicNum() != 1:
         return shift

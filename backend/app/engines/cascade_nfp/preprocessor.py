@@ -1,33 +1,25 @@
-"""Ported `MolAPreprocessor` — converts RDKit mols into the feature
-dict CASCADE's graph model expects.
-
-This is a re-implementation of the upstream ``nfp.preprocessing``
-pipeline limited to what the DFTNN (``best_model.hdf5``) flavour
-actually needs. It carries the learned atom/bond vocabularies
-loaded from the shipped ``preprocessor.p`` pickle — the tokenizer
-dicts are pure-Python primitives so they unpickle cleanly.
-"""
+"""Ported `MolAPreprocessor` for CASCADE feature construction."""
 from __future__ import annotations
 
+import hashlib
+import pickle
 from dataclasses import dataclass
-from typing import Dict, Any, Sequence
+from pathlib import Path
+from typing import Any, Dict, Sequence
 
 import numpy as np
 from rdkit import Chem
 
+_EXPECTED_PREPROCESSOR_SHA256 = (
+    "e9160321e192de2a5ddf706be7b048a634b79e8d928feea6b1558151349bcb21"
+)
+
 
 def atom_features(atom: Chem.Atom) -> int:
-    """Atomic-number hash — CASCADE uses plain Z as the atom type key."""
     return atom.GetAtomicNum()
 
 
 def bond_features_v1(bond: Chem.Bond, flipped: bool = False) -> str:
-    """Bond feature string matching upstream ``nfp.features.bond_features_v1``.
-
-    The tuple is stringified exactly as the legacy code does so the
-    learned bond-tokenizer vocabulary (``rdkit.Chem.rdchem.BondType.X``
-    repr) keeps working. Modern RDKit keeps the same repr format.
-    """
     return str(
         (
             bond.GetBondType(),
@@ -45,14 +37,13 @@ def bond_features_v1(bond: Chem.Bond, flipped: bool = False) -> str:
 
 @dataclass
 class Tokenizer:
-    """Map feature keys → integer class ids. Out-of-vocab keys hit 'unk' (id 1)."""
+    """Map feature keys to integer class ids. OOV keys hit ``unk``."""
 
     data: Dict[Any, int]
     num_classes: int
 
     @classmethod
     def from_legacy(cls, legacy: Any) -> "Tokenizer":
-        # ``legacy`` is the unpickled shim with attributes _data + num_classes
         return cls(data=dict(legacy._data), num_classes=int(legacy.num_classes))
 
     def __call__(self, key) -> int:
@@ -63,12 +54,7 @@ class Tokenizer:
 
 
 class MolAPreprocessor:
-    """Re-implementation of upstream ``nfp.preprocessing.MolAPreprocessor``.
-
-    Given an RDKit mol (with explicit Hs and a 3D conformer) and an
-    array of atom indices to predict on, emit the numpy feature dict
-    consumed by the graph model.
-    """
+    """Re-implementation of upstream ``nfp.preprocessing.MolAPreprocessor``."""
 
     def __init__(
         self,
@@ -86,7 +72,6 @@ class MolAPreprocessor:
 
     @property
     def atom_classes(self) -> int:
-        # Matches upstream: one extra slot for the null-atom placeholder.
         return self.atom_tokenizer.num_classes + 1
 
     @property
@@ -98,12 +83,8 @@ class MolAPreprocessor:
 
         n_atom = mol.GetNumAtoms()
         n_pro = len(atom_index_array)
-
         distance_matrix = Chem.Get3DDistanceMatrix(mol)
 
-        # Count how many (non-self) neighbours fall inside the cutoff —
-        # this matches upstream's "MolAPreprocessor" which ignores the
-        # n_neighbors cap in favour of cutoff-only selection.
         n_bond = int(((distance_matrix < self.cutoff) & (distance_matrix != 0)).sum())
         if n_bond == 0:
             n_bond = 1
@@ -118,7 +99,6 @@ class MolAPreprocessor:
         for n, atom in enumerate(mol.GetAtoms()):
             atom_feature_matrix[n] = self.atom_tokenizer(atom_features(atom))
 
-            # If atom n is one of the targets, record which output slot it belongs to.
             match = np.where(atom_index_array == atom.GetIdx())[0]
             if match.size:
                 atom_index_matrix[n] = int(match[0])
@@ -126,8 +106,6 @@ class MolAPreprocessor:
             neighbor_end = min(self.n_neighbors + 1, n_atom)
             cutoff_end = int((distance_matrix[n] < self.cutoff).sum())
             end_index = min(neighbor_end, cutoff_end)
-
-            # Nearest-neighbour list excluding self (argsort[0] is self, distance 0).
             neighbor_inds = distance_matrix[n].argsort()[1:end_index]
             if len(neighbor_inds) == 0:
                 neighbor_inds = np.array([n], dtype=int)
@@ -158,72 +136,69 @@ class MolAPreprocessor:
         }
 
 
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def load_preprocessor_from_legacy_pickle(path: str) -> MolAPreprocessor:
-    """Read the upstream CASCADE ``preprocessor.p`` via a shim unpickler.
+    """Read the upstream CASCADE ``preprocessor.p`` via a restricted unpickler."""
 
-    The shipped pickle references ``nfp.preprocessing.*`` which pulls
-    in Keras 2's ``keras.engine`` on import — incompatible with Keras 3.
-    We stub out those modules so that ``pickle`` can resolve the class
-    names without triggering the imports, then lift the pure state
-    (tokenizers, n_neighbors, cutoff, explicit_hs) into our own class.
-    """
-    import pickle
-    import sys
-    import types
-
-    stub_names = (
-        "keras",
-        "keras.engine",
-        "keras.engine.base_layer",
-        "nfp",
-        "nfp.preprocessing",
-        "nfp.preprocessing.preprocessor",
-        "nfp.preprocessing.features",
-    )
-    created: list[str] = []
-    for name in stub_names:
-        if name not in sys.modules:
-            sys.modules[name] = types.ModuleType(name)
-            created.append(name)
+    pickle_path = Path(path)
+    actual_hash = _sha256_file(pickle_path)
+    if actual_hash != _EXPECTED_PREPROCESSOR_SHA256:
+        raise RuntimeError(
+            "CASCADE preprocessor hash mismatch. Refusing to load an untrusted "
+            f"pickle from {pickle_path}."
+        )
 
     class _ShimState:
         def __setstate__(self, state):
             if isinstance(state, dict):
                 self.__dict__.update(state)
 
-    for mod_name, cls_names in (
-        (
+    def _shim_class(module: str, name: str):
+        return type(name, (_ShimState,), {"__module__": module})
+
+    allowed_globals = {
+        ("nfp.preprocessing.preprocessor", "MolAPreprocessor"): _shim_class(
             "nfp.preprocessing.preprocessor",
-            ("MolAPreprocessor", "MolPreprocessor", "SmilesPreprocessor"),
+            "MolAPreprocessor",
         ),
-        ("nfp.preprocessing.features", ("Tokenizer",)),
-    ):
-        module = sys.modules[mod_name]
-        for cls_name in cls_names:
-            if not hasattr(module, cls_name):
-                setattr(module, cls_name, type(cls_name, (_ShimState,), {}))
+        ("nfp.preprocessing.preprocessor", "MolPreprocessor"): _shim_class(
+            "nfp.preprocessing.preprocessor",
+            "MolPreprocessor",
+        ),
+        ("nfp.preprocessing.preprocessor", "SmilesPreprocessor"): _shim_class(
+            "nfp.preprocessing.preprocessor",
+            "SmilesPreprocessor",
+        ),
+        ("nfp.preprocessing.features", "Tokenizer"): _shim_class(
+            "nfp.preprocessing.features",
+            "Tokenizer",
+        ),
+        ("nfp.preprocessing.features", "atom_features"): atom_features,
+        ("nfp.preprocessing.features", "bond_features_v1"): bond_features_v1,
+    }
 
-    class _ShimUnpickler(pickle.Unpickler):
+    class _RestrictedUnpickler(pickle.Unpickler):
         def find_class(self, module, name):
-            try:
-                return super().find_class(module, name)
-            except (ModuleNotFoundError, AttributeError):
-                stub = sys.modules.setdefault(module, types.ModuleType(module))
-                if not hasattr(stub, name):
-                    setattr(stub, name, type(name, (_ShimState,), {}))
-                return getattr(stub, name)
+            key = (module, name)
+            if key in allowed_globals:
+                return allowed_globals[key]
+            if module == "builtins":
+                return getattr(__import__("builtins"), name)
+            raise pickle.UnpicklingError(
+                f"CASCADE pickle references unexpected global {module}.{name}"
+            )
 
-    try:
-        with open(path, "rb") as f:
-            obj = _ShimUnpickler(f).load()
-    finally:
-        for name in created:
-            sys.modules.pop(name, None)
+    with pickle_path.open("rb") as handle:
+        obj = _RestrictedUnpickler(handle).load()
 
-    if isinstance(obj, dict) and "preprocessor" in obj:
-        legacy = obj["preprocessor"]
-    else:
-        legacy = obj
+    legacy = obj["preprocessor"] if isinstance(obj, dict) and "preprocessor" in obj else obj
 
     return MolAPreprocessor(
         atom_tokenizer=Tokenizer.from_legacy(legacy.atom_tokenizer),

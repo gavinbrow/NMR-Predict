@@ -74,7 +74,8 @@ Phase 2:
   (ORCA XTB2 GOAT global search). Chemical shieldings are converted to δ
   ppm via a TMS reference computed once at the same (functional, basis)
   and cached on disk. All ORCA calls funnel through a single-worker job
-  queue — a hard timeout hook is left open for later.
+  queue with an enforced timeout, bounded pending-request backpressure,
+  and automatic workdir cleanup/pruning.
 - Engine registry ([backend/app/engines/__init__.py](backend/app/engines/__init__.py))
   dispatches by name; missing/mis-configured engines return
   `status: "error"` rather than 500.
@@ -94,6 +95,10 @@ python -m venv .venv
 pip install -r requirements.txt
 uvicorn app.main:app --reload --port 8000
 ```
+
+`backend/requirements.txt` is now a compiled lockfile with exact versions
+and hashes. Edit [backend/requirements.in](backend/requirements.in) and
+re-run `pip-compile` when you intentionally change backend dependencies.
 
 Smoke tests:
 
@@ -211,6 +216,10 @@ Environment variables (all optional):
 | `ORCA_CPUS` | `4` | `%pal nprocs` for each ORCA job. |
 | `ORCA_RAM_MB` | `2000` | `%maxcore` per process, in MB. |
 | `ORCA_WORK_DIR` | `./\_work/orca` | Where job dirs and `tms_refs.json` live. |
+| `ORCA_TIMEOUT` | `600` | Hard timeout in seconds for each ORCA subprocess. |
+| `ORCA_MAX_PENDING_REQUESTS` | `2` | Reject new ORCA-backed requests when the single-worker queue is already backed up. |
+| `ORCA_JOB_TTL_SECONDS` | `3600` | Prune stale failed job directories older than this age. |
+| `ORCA_RAM_CEILING_MB` | `8192` | Clamp `%maxcore` to a sane upper ceiling before writing ORCA inputs. |
 
 Conformer strategy is picked per request (frontend-selectable later). Pass
 `conformer_strategy` in the body:
@@ -246,8 +255,10 @@ Notes:
 
 - All ORCA invocations are serialised through a single-worker thread
   queue so concurrent `/predict` calls don't trample each other (each
-  ORCA job already saturates CPU via `%pal`). A hard per-job timeout
-  hook is reserved (`ORCA_TIMEOUT`) but not enforced today.
+  ORCA job already saturates CPU via `%pal`). A hard per-job timeout is
+  enforced, stale job directories are pruned automatically, and the
+  pending-request queue is intentionally short so the service fails fast
+  under load instead of growing unbounded.
 - If `ORCA_EXE` is missing, the ORCA slot in `/predict` returns
   `status: "error"` with a path-specific message rather than failing
   the whole request.
@@ -263,11 +274,10 @@ Phase 3:
   deviation across contributing engines (spread proxy), and the list of
   engines that reported for that atom.
 - **`GET /engines`** — lists every registered engine with its
-  `default_weight`, whether it is implemented, and a cheap readiness
-  check (jar path present / CASCADE assets on disk / ORCA binary
-  resolvable). No JVM starts, no model loads. Lets the frontend
-  grey out engines whose prerequisites are missing before the user
-  submits.
+  `default_weight`, whether it is implemented, and readiness info the
+  frontend can use to grey out unavailable engines before submit. CDK
+  readiness now reflects a real warmup/import path rather than only file
+  presence.
 - **`GET /options`** — enumerates the valid values for `nuclei`,
   `modes`, `conformer_strategies`, and the set of engine names so the
   frontend can build dropdowns without hardcoding literals.
@@ -321,6 +331,9 @@ Phase 4:
 
 - **React + Vite frontend** ([frontend/](frontend/)) — TypeScript SPA
   served by Vite on `:8080`, talks to the FastAPI backend on `:8000`.
+- **Explicit demo mode** — the frontend no longer fabricates chemistry
+  responses when the backend is down. If you want demo data on purpose,
+  set `VITE_NMR_ENABLE_DEMO_MODE=1`.
 - **Ketcher molecule editor** ([frontend/src/components/nmr/MoleculeEditor.tsx](frontend/src/components/nmr/MoleculeEditor.tsx))
   — iframe-embedded Ketcher exposes a SMILES stream plus atom-click
   events that drive the highlight pipeline below.

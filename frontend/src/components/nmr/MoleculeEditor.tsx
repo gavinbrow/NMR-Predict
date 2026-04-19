@@ -3,6 +3,7 @@ import type { ComponentType } from "react";
 import type { Ketcher } from "ketcher-core";
 
 interface MoleculeEditorProps {
+  value?: string;
   onReady?: (ketcher: Ketcher) => void;
   onSmilesChange?: (smiles: string) => void;
   onAtomClick?: (atomIndex: number) => void;
@@ -21,7 +22,7 @@ type BrowserProcess = {
 };
 
 function ensureKetcherRuntimeGlobals() {
-  const runtime = globalThis as typeof globalThis & {
+  const runtime = globalThis as {
     global?: typeof globalThis;
     process?: BrowserProcess;
   };
@@ -38,13 +39,18 @@ function ensureKetcherRuntimeGlobals() {
  * If its bundle fails in this environment, keep the app usable with a
  * manual SMILES fallback instead of crashing the whole page.
  */
-export function MoleculeEditor({ onReady, onSmilesChange, onAtomClick }: MoleculeEditorProps) {
+export function MoleculeEditor({
+  value = "",
+  onReady,
+  onSmilesChange,
+  onAtomClick,
+}: MoleculeEditorProps) {
   const ketcherRef = useRef<Ketcher | null>(null);
   const hostRef = useRef<HTMLDivElement | null>(null);
+  const lastAppliedValueRef = useRef("");
   const [EditorComponent, setEditorComponent] = useState<RuntimeEditorComponent | null>(null);
   const [structServiceProvider, setStructServiceProvider] = useState<unknown>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
-  const [manualSmiles, setManualSmiles] = useState("");
 
   useEffect(() => {
     let active = true;
@@ -101,6 +107,21 @@ export function MoleculeEditor({ onReady, onSmilesChange, onAtomClick }: Molecul
     return () => host.removeEventListener("click", handler);
   }, [onAtomClick, EditorComponent]);
 
+  useEffect(() => {
+    const ketcher = ketcherRef.current;
+    if (!ketcher) return;
+    if (value === lastAppliedValueRef.current) return;
+
+    void (async () => {
+      try {
+        lastAppliedValueRef.current = value;
+        await ketcher.setMolecule(value);
+      } catch {
+        /* noop */
+      }
+    })();
+  }, [value]);
+
   if (loadError) {
     return (
       <div className="flex h-full w-full flex-col gap-3 bg-muted/20 p-4">
@@ -110,11 +131,9 @@ export function MoleculeEditor({ onReady, onSmilesChange, onAtomClick }: Molecul
         <label className="flex flex-1 flex-col gap-2">
           <span className="text-xs font-medium text-foreground">SMILES</span>
           <textarea
-            value={manualSmiles}
+            value={value}
             onChange={(event) => {
-              const value = event.target.value;
-              setManualSmiles(value);
-              onSmilesChange?.(value);
+              onSmilesChange?.(event.target.value);
             }}
             placeholder="Enter a SMILES string, e.g. CCO"
             className="min-h-[220px] flex-1 resize-none rounded-lg border border-input bg-background px-3 py-2 text-sm text-foreground outline-none transition-smooth placeholder:text-muted-foreground focus:ring-2 focus:ring-ring"
@@ -136,7 +155,7 @@ export function MoleculeEditor({ onReady, onSmilesChange, onAtomClick }: Molecul
   return (
     <div ref={hostRef} className="ketcher-host h-full w-full">
       <EditorComponent
-        staticResourcesUrl={import.meta.env.BASE_URL}
+        staticResourcesUrl="/"
         structServiceProvider={structServiceProvider}
         disableMacromoleculesEditor
         errorHandler={(message) => {
@@ -145,7 +164,12 @@ export function MoleculeEditor({ onReady, onSmilesChange, onAtomClick }: Molecul
         }}
         onInit={(ketcher: Ketcher) => {
           ketcherRef.current = ketcher;
+          lastAppliedValueRef.current = value;
           onReady?.(ketcher);
+
+          if (value) {
+            void ketcher.setMolecule(value).catch(() => undefined);
+          }
 
           // Hook structure changes to debounced SMILES extraction in parent.
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -153,8 +177,10 @@ export function MoleculeEditor({ onReady, onSmilesChange, onAtomClick }: Molecul
           editor?.subscribe?.("change", async () => {
             try {
               const smiles = await ketcher.getSmiles();
+              lastAppliedValueRef.current = smiles ?? "";
               onSmilesChange?.(smiles ?? "");
             } catch {
+              lastAppliedValueRef.current = "";
               onSmilesChange?.("");
             }
           });

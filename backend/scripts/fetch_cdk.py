@@ -1,42 +1,74 @@
-"""Download the CDK bundle and HOSE predictor jars into ``backend/vendor/cdk/``.
-
-The CDK bundle contains the Chemistry Development Kit core. The current
-nmrshiftdb distribution ships separate predictor jars for carbon and proton
-prediction, so both need to be present for the app's CDK engine.
-
-Usage::
-
-    python backend/scripts/fetch_cdk.py
-    python backend/scripts/fetch_cdk.py --force
-"""
+"""Download the pinned CDK bundle and predictor jars into ``backend/vendor/cdk/``."""
 from __future__ import annotations
 
 import argparse
+import hashlib
 import sys
 import urllib.request
+import zipfile
 from pathlib import Path
 
-# Pinned to CDK's 2.9 release on GitHub. 42 MB shaded jar, no auth, HTTPS.
-CDK_BUNDLE_URL = "https://github.com/cdk/cdk/releases/download/cdk-2.9/cdk-2.9.jar"
-CDK_BUNDLE_FILENAME = "cdk-2.9.jar"
-PREDICTOR_C_URL = "https://downloads.sourceforge.net/project/nmrshiftdb2/data/predictorc.jar"
-PREDICTOR_C_FILENAME = "predictorc.jar"
-PREDICTOR_H_URL = "https://downloads.sourceforge.net/project/nmrshiftdb2/data/predictorh.jar"
-PREDICTOR_H_FILENAME = "predictorh.jar"
-
-VENDOR_DIR = Path(__file__).resolve().parent.parent / "vendor" / "cdk"
+_DOWNLOAD_TIMEOUT_SECONDS = 30
 _REQUEST_HEADERS = {
     "User-Agent": "NMR-Predict-Bootstrap/1.0",
     "Accept": "*/*",
 }
 
+_ARTIFACTS = (
+    {
+        "label": "CDK bundle",
+        "url": "https://github.com/cdk/cdk/releases/download/cdk-2.9/cdk-2.9.jar",
+        "filename": "cdk-2.9.jar",
+        "sha256": "60710218b8f9fd206e6151122e630c281462e9588e4b7a279c49c1532a8aeffe",
+    },
+    {
+        "label": "13C predictor jar",
+        "url": "https://downloads.sourceforge.net/project/nmrshiftdb2/data/predictorc.jar",
+        "filename": "predictorc.jar",
+        "sha256": "e3c3365fb3ffdccd79bb1c39c457c2486e6170f88eeaca5f36c09587950a5090",
+    },
+    {
+        "label": "1H predictor jar",
+        "url": "https://downloads.sourceforge.net/project/nmrshiftdb2/data/predictorh.jar",
+        "filename": "predictorh.jar",
+        "sha256": "529e2c89279aaafcf63347460775693d0ff5120d17dae051e31b9e55f6d1e67d",
+    },
+)
 
-def _download(url: str, dest: Path) -> None:
+VENDOR_DIR = Path(__file__).resolve().parent.parent / "vendor" / "cdk"
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _verify_jar(path: Path, expected_sha256: str) -> None:
+    actual_sha256 = _sha256_file(path)
+    if actual_sha256 != expected_sha256:
+        raise RuntimeError(
+            f"{path.name} checksum mismatch: expected {expected_sha256}, got {actual_sha256}"
+        )
+
+    try:
+        with zipfile.ZipFile(path) as archive:
+            members = {name.upper() for name in archive.namelist()}
+    except zipfile.BadZipFile as exc:
+        raise RuntimeError(f"{path.name} is not a valid JAR archive") from exc
+
+    if "META-INF/MANIFEST.MF" not in members:
+        raise RuntimeError(f"{path.name} is missing META-INF/MANIFEST.MF")
+
+
+def _download(url: str, dest: Path) -> Path:
     print(f"  downloading {url}")
     print(f"    -> {dest}")
     tmp = dest.with_suffix(dest.suffix + ".part")
     request = urllib.request.Request(url, headers=_REQUEST_HEADERS)
-    with urllib.request.urlopen(request) as resp, open(tmp, "wb") as out:
+    with urllib.request.urlopen(request, timeout=_DOWNLOAD_TIMEOUT_SECONDS) as resp, tmp.open("wb") as out:
         total = int(resp.headers.get("Content-Length", 0))
         written = 0
         last_pct = -1
@@ -51,16 +83,26 @@ def _download(url: str, dest: Path) -> None:
                 pct = int((written / total) * 100)
                 if pct != last_pct and pct % 10 == 0:
                     last_pct = pct
-                    print(f"    {pct:3d}%  ({written/1e6:6.2f} MB)")
-    tmp.replace(dest)
+                    print(f"    {pct:3d}%  ({written / 1e6:6.2f} MB)")
     print("  done.")
+    return tmp
 
 
-def _download_if_missing(url: str, dest: Path, force: bool) -> bool:
+def _ensure_artifact(url: str, dest: Path, sha256: str, force: bool) -> bool:
     if dest.exists() and not force:
-        print(f"[fetch_cdk] {dest.name} already present. Use --force to re-download.")
-        return False
-    _download(url, dest)
+        try:
+            _verify_jar(dest, sha256)
+            print(f"[fetch_cdk] {dest.name} already present and verified.")
+            return False
+        except RuntimeError as exc:
+            print(f"[fetch_cdk] {dest.name} failed verification, re-downloading: {exc}")
+
+    tmp = _download(url, dest)
+    try:
+        _verify_jar(tmp, sha256)
+        tmp.replace(dest)
+    finally:
+        tmp.unlink(missing_ok=True)
     return True
 
 
@@ -72,20 +114,20 @@ def main() -> int:
     VENDOR_DIR.mkdir(parents=True, exist_ok=True)
 
     failed = False
-    downloads = (
-        (CDK_BUNDLE_URL, VENDOR_DIR / CDK_BUNDLE_FILENAME, "CDK bundle"),
-        (PREDICTOR_C_URL, VENDOR_DIR / PREDICTOR_C_FILENAME, "13C predictor jar"),
-        (PREDICTOR_H_URL, VENDOR_DIR / PREDICTOR_H_FILENAME, "1H predictor jar"),
-    )
-
-    for url, dest, label in downloads:
+    for artifact in _ARTIFACTS:
+        dest = VENDOR_DIR / artifact["filename"]
         try:
-            _download_if_missing(url, dest, force=args.force)
+            _ensure_artifact(
+                artifact["url"],
+                dest,
+                artifact["sha256"],
+                force=args.force,
+            )
         except Exception as exc:  # noqa: BLE001
-            print(f"[fetch_cdk] failed to download {label}: {exc}", file=sys.stderr)
+            print(f"[fetch_cdk] failed to install {artifact['label']}: {exc}", file=sys.stderr)
             failed = True
 
-    present = sorted(p.name for p in VENDOR_DIR.glob("*.jar"))
+    present = sorted(path.name for path in VENDOR_DIR.glob("*.jar"))
     print(f"[fetch_cdk] vendor/cdk contains: {present or '(empty)'}")
     if failed:
         return 1

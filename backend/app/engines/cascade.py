@@ -16,6 +16,7 @@ from __future__ import annotations
 import logging
 import math
 import os
+from hashlib import sha256
 from typing import Dict, List, Optional
 
 import numpy as np
@@ -40,6 +41,11 @@ _WEIGHTS_FILE = {
     "13C": "best_model.hdf5",
     "1H": "best_model_H_DFTNN.hdf5",
 }
+_EXPECTED_ASSET_HASHES = {
+    ("preprocessor.p",): "e9160321e192de2a5ddf706be7b048a634b79e8d928feea6b1558151349bcb21",
+    ("trained_model", "best_model.hdf5"): "056b2da63696eb4a8f319ed52c0a9f8e20a0971d5f471b9a89f8468ab9ee5180",
+    ("trained_model", "best_model_H_DFTNN.hdf5"): "256c7c334c386105aac0532a6d25d5ec14c7e28c2238a9308fc15ff6a3a80b01",
+}
 
 _TARGET_Z = {"13C": 6, "1H": 1}
 _TARGET_SYMBOL = {"13C": "C", "1H": "H"}
@@ -57,6 +63,22 @@ class CascadeEngine(Engine):
     # ------------------------------------------------------------------
     # Lazy asset loading
     # ------------------------------------------------------------------
+    def _verify_asset_hash(self, path: str, parts: tuple[str, ...]) -> None:
+        expected = _EXPECTED_ASSET_HASHES.get(parts)
+        if expected is None:
+            return
+
+        digest = sha256()
+        with open(path, "rb") as handle:
+            for chunk in iter(lambda: handle.read(1 << 20), b""):
+                digest.update(chunk)
+
+        actual = digest.hexdigest()
+        if actual != expected:
+            raise CascadeEngineError(
+                f"CASCADE asset hash mismatch for {path}. Refusing to load a tampered asset."
+            )
+
     def _resolve_asset(self, *parts: str) -> str:
         root = settings.cascade_path
         if not root:
@@ -70,6 +92,7 @@ class CascadeEngine(Engine):
                 f"CASCADE asset missing: {path}. "
                 "Clone patonlab/CASCADE into backend/vendor/ or set CASCADE_PATH."
             )
+        self._verify_asset_hash(path, tuple(parts))
         return path
 
     def _ensure_preprocessor(self):

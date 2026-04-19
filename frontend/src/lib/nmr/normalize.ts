@@ -63,6 +63,24 @@ function warningForEngine(name: string, result: BackendEngineResult) {
   return `${name}: ${result.message ?? `status ${result.status}`}`;
 }
 
+function hasValidAtomIndices(
+  shift: BackendAtomShift | BackendConsensusAtomShift,
+  atomCount: number,
+) {
+  if (!Number.isInteger(shift.atom_index) || shift.atom_index < 0 || shift.atom_index >= atomCount) {
+    return false;
+  }
+  if (
+    shift.attached_atom_index != null &&
+    (!Number.isInteger(shift.attached_atom_index) ||
+      shift.attached_atom_index < 0 ||
+      shift.attached_atom_index >= atomCount)
+  ) {
+    return false;
+  }
+  return true;
+}
+
 function toUiShift(
   shift: BackendAtomShift | BackendConsensusAtomShift,
   extras?: Partial<Pick<Shift, "engine" | "std">>,
@@ -100,7 +118,7 @@ export function normalizeEnginesResponse(
 ): Engine[] {
   return response.map((engine) => ({
     ...engine,
-    reason: engine.reason ?? engine.message ?? undefined,
+    reason: engine.reason ?? ("message" in engine ? engine.message ?? undefined : undefined),
   }));
 }
 
@@ -111,18 +129,30 @@ export function normalizePredictResponse(
   if (!isBackendPredictResponse(response)) return response;
 
   const engineEntries = Object.entries(response.engines ?? {});
+  const atomCount = response.atom_symbols.length;
   const warnings = engineEntries
     .map(([name, result]) => warningForEngine(name, result))
     .filter((warning): warning is string => Boolean(warning));
 
   const shifts =
     request.mode === "consensus"
-      ? (response.consensus?.shifts ?? []).map((shift) =>
-          toUiShift(shift, { std: shift.std_ppm ?? undefined }),
-        )
+      ? (response.consensus?.shifts ?? [])
+          .filter((shift) => hasValidAtomIndices(shift, atomCount))
+          .map((shift) => toUiShift(shift, { std: shift.std_ppm ?? undefined }))
       : engineEntries.flatMap(([name, result]) =>
-          (result.shifts ?? []).map((shift) => toUiShift(shift, { engine: name })),
+          (result.shifts ?? [])
+            .filter((shift) => hasValidAtomIndices(shift, atomCount))
+            .map((shift) => toUiShift(shift, { engine: name })),
         );
+
+  const droppedShiftCount =
+    (request.mode === "consensus" ? response.consensus?.shifts.length ?? 0 : engineEntries.reduce(
+      (sum, [, result]) => sum + (result.shifts?.length ?? 0),
+      0,
+    )) - shifts.length;
+  if (droppedShiftCount > 0) {
+    warnings.push(`Dropped ${droppedShiftCount} invalid engine assignment(s).`);
+  }
 
   const enginesUsed =
     request.mode === "consensus"

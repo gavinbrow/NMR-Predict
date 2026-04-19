@@ -1,16 +1,34 @@
-from typing import List, Literal, Optional, Dict
-from pydantic import BaseModel, Field
+from typing import Annotated, Dict, List, Literal, Optional
+
+from pydantic import BaseModel, ConfigDict, Field, NonNegativeFloat, StringConstraints
+
+from app.limits import MAX_SMILES_LENGTH
 
 
 EngineName = Literal["cascade", "cdk", "orca"]
 PredictionMode = Literal["individual", "consensus"]
 ConformerStrategy = Literal["fast", "goat"]
 Nucleus = Literal["1H", "13C"]
+SmilesText = Annotated[
+    str,
+    StringConstraints(min_length=1, max_length=MAX_SMILES_LENGTH),
+]
+
+class StrictRequestModel(BaseModel):
+    model_config = ConfigDict(extra="forbid")
 
 
-class PredictRequest(BaseModel):
-    smiles: str = Field(..., description="SMILES string from the editor")
-    engines: List[EngineName] = Field(default_factory=lambda: ["cdk"])
+class ValidationRequest(StrictRequestModel):
+    smiles: SmilesText = Field(..., description="SMILES string from the editor")
+
+
+class PredictRequest(StrictRequestModel):
+    smiles: SmilesText = Field(..., description="SMILES string from the editor")
+    engines: List[EngineName] = Field(
+        default_factory=lambda: ["cdk"],
+        min_length=1,
+        max_length=3,
+    )
     mode: PredictionMode = "individual"
     nucleus: Nucleus = "1H"
     conformer_strategy: ConformerStrategy = Field(
@@ -21,7 +39,7 @@ class PredictRequest(BaseModel):
             "XTB2 GOAT global conformer search."
         ),
     )
-    weights: Optional[Dict[EngineName, float]] = Field(
+    weights: Optional[Dict[EngineName, NonNegativeFloat]] = Field(
         default=None,
         description=(
             "Optional per-engine weight overrides for consensus mode. "

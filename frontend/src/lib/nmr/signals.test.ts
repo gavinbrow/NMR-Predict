@@ -85,6 +85,28 @@ describe("deriveSignals", () => {
     expect(signals).toHaveLength(2);
     expect(signals.map((signal) => signal.sourceId)).toEqual(["component-a", "component-b"]);
   });
+
+  it("renders zero-coupling multiplets as a single line", () => {
+    const signals = deriveSignals(
+      [
+        {
+          atom_index: 3,
+          shift: 1.24,
+          element: "H",
+          engine: "cdk",
+          assignment_group: "h@0",
+          attached_atom_index: 0,
+          multiplicity: "d",
+          coupling_hz: 0,
+        },
+      ],
+      "1H",
+      "individual",
+    );
+
+    expect(signals).toHaveLength(1);
+    expect(signals[0].lines).toEqual([{ shift: 1.24, intensity: expect.any(Number) }]);
+  });
 });
 
 describe("buildIntegralCurve", () => {

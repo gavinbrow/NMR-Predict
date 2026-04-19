@@ -48,6 +48,9 @@ export type NmriumViewerModel = {
   state: Partial<NmriumState>;
 };
 
+type NmriumDataState = NonNullable<NmriumState["data"]>;
+type NmriumViewState = NonNullable<NmriumState["view"]>;
+
 const ENGINE_COLOR_HINTS: Array<{ match: RegExp; color: string }> = [
   { match: /cdk/i, color: "#0ea5e9" },
   { match: /cascade/i, color: "#10b981" },
@@ -220,7 +223,7 @@ function createSyntheticSpectrum(
     },
     customInfo: {},
     filters: [],
-  } as Spectrum1DSource;
+  } as unknown as Spectrum1DSource;
 }
 
 export function buildNmriumViewerModel(
@@ -230,17 +233,19 @@ export function buildNmriumViewerModel(
   version: number,
 ): NmriumViewerModel {
   const aggregator = new FileCollection();
+  const schemaVersion = version as 16;
+  const emptyCorrelations = {} as NmriumDataState["correlations"];
 
   if (shifts.length === 0) {
     return {
       aggregator,
       state: {
-        version,
+        version: schemaVersion,
         data: {
           spectra: [],
           molecules: [],
-          correlations: {},
-        },
+          correlations: emptyCorrelations,
+        } as NmriumDataState,
       },
     };
   }
@@ -262,22 +267,24 @@ export function buildNmriumViewerModel(
           ),
         )
       : [createSyntheticSpectrum(shifts, nucleus, mode, "Consensus prediction", sharedDomain, "#0f172a")];
+  const nmriumSpectra = spectra as unknown as NmriumDataState["spectra"];
+  const spectraView = {
+    activeTab: nucleus,
+    showLegend: false,
+  } as unknown as NmriumViewState["spectra"];
 
   return {
     aggregator,
     state: {
-      version,
+      version: schemaVersion,
       data: {
-        spectra,
+        spectra: nmriumSpectra,
         molecules: [],
-        correlations: {},
-      },
+        correlations: emptyCorrelations,
+      } as NmriumDataState,
       view: {
-        spectra: {
-          activeTab: nucleus,
-          showLegend: false,
-        },
-      },
+        spectra: spectraView,
+      } as NmriumViewState,
     },
   };
 }

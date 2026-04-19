@@ -203,4 +203,36 @@ describe("normalizePredictResponse", () => {
       neighbor_count: 2,
     });
   });
+
+  it("drops shifts with out-of-range atom indices", () => {
+    const request: PredictRequest = {
+      smiles: "CCO",
+      engines: ["cdk"],
+      mode: "individual",
+      nucleus: "13C",
+      conformer_strategy: "fast",
+    };
+
+    const normalized = normalizePredictResponse(
+      {
+        canonical_smiles: "CCO",
+        atom_symbols: ["C", "C", "O"],
+        engines: {
+          cdk: {
+            engine: "cdk",
+            status: "ok",
+            shifts: [
+              { atom_index: 0, symbol: "C", shift_ppm: 58.2 },
+              { atom_index: 99, symbol: "C", shift_ppm: 18.4 },
+            ],
+          },
+        },
+        consensus: null,
+      },
+      request,
+    );
+
+    expect(normalized.shifts).toHaveLength(1);
+    expect(normalized.warnings).toContain("Dropped 1 invalid engine assignment(s).");
+  });
 });

@@ -35,6 +35,11 @@ describe("buildNmriumViewerModel", () => {
     expect(spectra).toHaveLength(2);
     expect(spectra.map((spectrum) => spectrum.info?.name)).toEqual(["cdk", "cascade"]);
     expect(model.state.view?.spectra?.showLegend).toBe(false);
-    expect(spectra.every((spectrum) => typeof spectrum.display?.color === "string")).toBe(true);
+    expect(
+      spectra.every(
+        (spectrum) =>
+          typeof (spectrum.display as { color?: string } | undefined)?.color === "string",
+      ),
+    ).toBe(true);
   });
 });

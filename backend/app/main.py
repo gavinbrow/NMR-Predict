@@ -1,6 +1,7 @@
 import logging
 import os
 import sys
+import uuid
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
@@ -8,13 +9,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from app.chem.canonical import canonicalize, InvalidSmilesError
-from app.consensus import DEFAULT_WEIGHTS, compute_consensus
+from app.chem.canonical import InvalidSmilesError, canonicalize
+from app.consensus import compute_consensus
 from app.engines import engine_is_implemented, get_engine, list_engines
 from app.engines.cascade import CascadeEngineError
 from app.engines.cdk import CdkEngineError, cdk_engine
 from app.engines.orca import OrcaEngineError
-from app.signal_annotations import annotate_atom_shifts
 from app.schemas import (
     AtomShift,
     EngineInfo,
@@ -23,8 +23,10 @@ from app.schemas import (
     OptionsResponse,
     PredictRequest,
     PredictResponse,
+    ValidationRequest,
     ValidationResponse,
 )
+from app.signal_annotations import annotate_atom_shifts
 
 logger = logging.getLogger(__name__)
 
@@ -42,9 +44,9 @@ app = FastAPI(title="NMR Predict", version="0.3.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=DEV_FRONTEND_ORIGINS,
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["Content-Type"],
 )
 
 
@@ -101,13 +103,40 @@ def options() -> OptionsResponse:
 
 @app.post("/api/validate", include_in_schema=False, response_model=ValidationResponse)
 @app.post("/validate", response_model=ValidationResponse)
-def validate(payload: dict) -> ValidationResponse:
-    smiles = payload.get("smiles", "")
+def validate(payload: ValidationRequest) -> ValidationResponse:
     try:
-        canon = canonicalize(smiles, add_hs=False)
+        canon = canonicalize(payload.smiles, add_hs=False)
     except InvalidSmilesError as exc:
         return ValidationResponse(valid=False, error=str(exc))
     return ValidationResponse(valid=True, canonical_smiles=canon.canonical_smiles)
+
+
+def _validate_atom_indices(engine_name: str, atom_count: int, shifts: list[AtomShift]) -> None:
+    for shift in shifts:
+        if not 0 <= shift.atom_index < atom_count:
+            raise ValueError(
+                f"{engine_name} returned atom_index={shift.atom_index} for a molecule "
+                f"with {atom_count} atoms"
+            )
+        if shift.attached_atom_index is not None and not 0 <= shift.attached_atom_index < atom_count:
+            raise ValueError(
+                f"{engine_name} returned attached_atom_index={shift.attached_atom_index} "
+                f"for a molecule with {atom_count} atoms"
+            )
+
+
+def _sanitized_engine_message(name: str, error_id: str) -> str:
+    return f"{name} prediction failed. Reference ID: {error_id}"
+
+
+def _resolve_frontend_candidate(frontend_root: Path, full_path: str) -> Path:
+    requested = full_path.replace("\\", "/").lstrip("/")
+    candidate = (frontend_root / requested).resolve(strict=False)
+    try:
+        candidate.relative_to(frontend_root)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail="Not found") from exc
+    return candidate
 
 
 def _run_engine(name: str, mol, nucleus: str, **options) -> EngineResult:
@@ -117,16 +146,30 @@ def _run_engine(name: str, mol, nucleus: str, **options) -> EngineResult:
             status="pending",
             message=f"{name} engine not yet wired up.",
         )
+
     engine = get_engine(name)
     try:
         shifts: list[AtomShift] = engine.predict(mol, nucleus, **options)
-    except (CdkEngineError, CascadeEngineError, OrcaEngineError) as exc:
-        logger.warning("%s engine error: %s", name, exc)
-        return EngineResult(engine=name, status="error", message=str(exc))
-    except Exception as exc:  # noqa: BLE001 — convert to JSON error per-engine
-        logger.exception("Unhandled engine failure for %s", name)
-        return EngineResult(engine=name, status="error", message=f"{type(exc).__name__}: {exc}")
-    shifts = annotate_atom_shifts(mol, nucleus, shifts)
+        _validate_atom_indices(name, mol.GetNumAtoms(), shifts)
+        shifts = annotate_atom_shifts(mol, nucleus, shifts)
+        _validate_atom_indices(name, mol.GetNumAtoms(), shifts)
+    except (CdkEngineError, CascadeEngineError, OrcaEngineError, ValueError):
+        error_id = uuid.uuid4().hex[:12]
+        logger.exception("%s engine failure [%s]", name, error_id)
+        return EngineResult(
+            engine=name,
+            status="error",
+            message=_sanitized_engine_message(name, error_id),
+        )
+    except Exception:  # noqa: BLE001
+        error_id = uuid.uuid4().hex[:12]
+        logger.exception("Unhandled engine failure for %s [%s]", name, error_id)
+        return EngineResult(
+            engine=name,
+            status="error",
+            message=_sanitized_engine_message(name, error_id),
+        )
+
     return EngineResult(engine=name, status="ok", shifts=shifts)
 
 
@@ -157,6 +200,8 @@ def predict(req: PredictRequest) -> PredictResponse:
 
 
 if FRONTEND_DIST.exists():
+    FRONTEND_ROOT = FRONTEND_DIST.resolve()
+
     assets_dir = FRONTEND_DIST / "assets"
     if assets_dir.exists():
         app.mount("/assets", StaticFiles(directory=assets_dir), name="frontend-assets")
@@ -167,14 +212,16 @@ if FRONTEND_DIST.exists():
 
     @app.get("/{full_path:path}", include_in_schema=False)
     async def serve_frontend_app(full_path: str):
-        if full_path.startswith("api/"):
+        normalized_path = full_path.replace("\\", "/").lstrip("/")
+        lowered_path = normalized_path.lower()
+        if lowered_path == "api" or lowered_path.startswith("api/"):
             raise HTTPException(status_code=404, detail="Not found")
 
-        candidate = FRONTEND_DIST / full_path
+        candidate = _resolve_frontend_candidate(FRONTEND_ROOT, normalized_path)
         if candidate.is_file():
             return FileResponse(candidate)
 
-        if "." in Path(full_path).name:
+        if "." in Path(normalized_path).name:
             raise HTTPException(status_code=404, detail="Asset not found")
 
         return FileResponse(FRONTEND_DIST / "index.html")

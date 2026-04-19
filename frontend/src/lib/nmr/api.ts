@@ -1,4 +1,5 @@
 import axios, { AxiosError } from "axios";
+
 import type {
   Engine,
   OptionsResponse,
@@ -16,6 +17,7 @@ import {
 const BASE_URL = (
   (import.meta.env.VITE_NMR_API_URL as string | undefined) ?? "/api"
 ).replace(/\/+$/, "");
+const DEMO_MODE_ENABLED = import.meta.env.VITE_NMR_ENABLE_DEMO_MODE === "1";
 
 export const api = axios.create({
   baseURL: BASE_URL,
@@ -23,25 +25,70 @@ export const api = axios.create({
   headers: { "Content-Type": "application/json" },
 });
 
-/** Wrap a request so a network/CORS failure transparently falls back to mock data. */
-async function withFallback<T>(label: string, real: () => Promise<T>, fake: () => T): Promise<{ data: T; mocked: boolean }> {
+export class NmrApiError extends Error {
+  status?: number;
+
+  constructor(message: string, status?: number) {
+    super(message);
+    this.name = "NmrApiError";
+    this.status = status;
+  }
+}
+
+export function isRequestCanceled(error: unknown) {
+  return axios.isCancel(error) || (error instanceof AxiosError && error.code === "ERR_CANCELED");
+}
+
+function toApiError(error: unknown, fallbackMessage: string): NmrApiError {
+  if (error instanceof AxiosError) {
+    const detail =
+      typeof error.response?.data === "object" &&
+      error.response?.data &&
+      "detail" in error.response.data
+        ? error.response.data.detail
+        : undefined;
+    const message =
+      typeof detail === "string"
+        ? detail
+        : error.response?.statusText || error.message || fallbackMessage;
+    return new NmrApiError(message, error.response?.status);
+  }
+  if (error instanceof Error) {
+    return new NmrApiError(error.message || fallbackMessage);
+  }
+  return new NmrApiError(fallbackMessage);
+}
+
+type RequestOptions = {
+  signal?: AbortSignal;
+};
+
+async function requestWithOptionalDemo<T>(
+  label: string,
+  real: () => Promise<T>,
+  fake: () => T,
+): Promise<{ data: T; mocked: boolean }> {
   try {
     const data = await real();
     return { data, mocked: false };
-  } catch (err) {
-    const ax = err as AxiosError;
-    // Only fall back on network-style errors, not on 4xx/5xx from a live backend.
+  } catch (error) {
+    if (isRequestCanceled(error)) {
+      throw error;
+    }
+    if (!DEMO_MODE_ENABLED) {
+      throw toApiError(error, `${label} failed`);
+    }
+    const ax = error as AxiosError;
     if (!ax.response) {
-      // eslint-disable-next-line no-console
-      console.warn(`[nmr-api] ${label} unreachable, using mock data:`, ax.message);
+      console.warn(`[nmr-api] ${label} unreachable, using demo data:`, ax.message);
       return { data: fake(), mocked: true };
     }
-    throw err;
+    throw toApiError(error, `${label} failed`);
   }
 }
 
 export async function getHealth() {
-  return withFallback(
+  return requestWithOptionalDemo(
     "GET /health",
     async () => (await api.get<{ status: string }>("/health")).data,
     () => ({ status: "ok" }),
@@ -49,7 +96,7 @@ export async function getHealth() {
 }
 
 export async function getOptions() {
-  return withFallback<OptionsResponse>(
+  return requestWithOptionalDemo<OptionsResponse>(
     "GET /options",
     async () => normalizeOptionsResponse((await api.get<OptionsResponse>("/options")).data),
     () => mockOptions,
@@ -57,7 +104,7 @@ export async function getOptions() {
 }
 
 export async function getEngines() {
-  return withFallback<Engine[]>(
+  return requestWithOptionalDemo<Engine[]>(
     "GET /engines",
     async () => {
       const res = await api.get<Engine[] | { engines: Engine[] }>("/engines");
@@ -67,18 +114,23 @@ export async function getEngines() {
   );
 }
 
-export async function validateSmiles(smiles: string) {
-  return withFallback<ValidateResponse>(
+export async function validateSmiles(smiles: string, options: RequestOptions = {}) {
+  return requestWithOptionalDemo<ValidateResponse>(
     "POST /validate",
-    async () => (await api.post<ValidateResponse>("/validate", { smiles })).data,
+    async () =>
+      (await api.post<ValidateResponse>("/validate", { smiles }, { signal: options.signal })).data,
     () => mockValidate(smiles),
   );
 }
 
-export async function predict(req: PredictRequest) {
-  return withFallback<PredictResponse>(
+export async function predict(req: PredictRequest, options: RequestOptions = {}) {
+  return requestWithOptionalDemo<PredictResponse>(
     "POST /predict",
-    async () => normalizePredictResponse((await api.post<PredictResponse>("/predict", req)).data, req),
+    async () =>
+      normalizePredictResponse(
+        (await api.post<PredictResponse>("/predict", req, { signal: options.signal })).data,
+        req,
+      ),
     () => mockPredict(req),
   );
 }
