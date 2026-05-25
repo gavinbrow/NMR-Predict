@@ -77,7 +77,7 @@ const NUCLEUS_RANGE: Record<string, [number, number]> = {
 };
 
 export function mockPredict(req: PredictRequest): PredictResponse {
-  const rand = seededRandom(`${req.smiles}|${req.nucleus}|${req.mode}`);
+  const rand = seededRandom(`${req.smiles}|${req.nucleus}`);
   const n = estimateAtoms(req.smiles, req.nucleus);
   const [lo, hi] = NUCLEUS_RANGE[req.nucleus] ?? [0, 200];
   const span = hi - lo;
@@ -89,30 +89,29 @@ export function mockPredict(req: PredictRequest): PredictResponse {
     base: lo + rand() * span,
   }));
 
-  const shifts =
-    req.mode === "individual"
-      ? req.engines.flatMap((engine) =>
-          baseShifts.map((b) => ({
-            atom_index: b.atom_index,
-            element: b.element,
-            shift: b.base + (rand() - 0.5) * span * 0.04,
-            intensity: 0.6 + rand() * 0.4,
-            engine,
-          })),
-        )
-      : baseShifts.map((b) => ({
-          atom_index: b.atom_index,
-          element: b.element,
-          shift: b.base + (rand() - 0.5) * span * 0.01,
-          intensity: 0.7 + rand() * 0.3,
-          std: rand() * span * 0.02,
-        }));
+  const shifts = req.engines.flatMap((engine) =>
+    baseShifts.map((b) => ({
+      atom_index: b.atom_index,
+      element: b.element,
+      shift: b.base + (rand() - 0.5) * span * 0.04,
+      intensity: 0.6 + rand() * 0.4,
+      engine,
+    })),
+  );
+
+  const consensusShifts = baseShifts.map((b) => ({
+    atom_index: b.atom_index,
+    element: b.element,
+    shift: b.base + (rand() - 0.5) * span * 0.01,
+    intensity: 0.7 + rand() * 0.3,
+    std: rand() * span * 0.02,
+  }));
 
   return {
     smiles: req.smiles,
     nucleus: req.nucleus,
-    mode: req.mode,
     shifts,
+    consensusShifts,
     engines_used: req.engines,
     warnings: [],
   };

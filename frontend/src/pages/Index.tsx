@@ -2,7 +2,9 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { Ketcher } from "ketcher-core";
 import { Atom, FlaskConical, Loader2, Play, Plus, Sparkles, WifiOff } from "lucide-react";
 import { BootSplash } from "@/components/nmr/BootSplash";
+import { CompoundsPanel, type ViewMode } from "@/components/nmr/CompoundsPanel";
 import { ControlPanel } from "@/components/nmr/ControlPanel";
+import { FloatingCompound } from "@/components/nmr/FloatingCompound";
 import { MoleculeEditor } from "@/components/nmr/MoleculeEditor";
 import { SpectrumPlot } from "@/components/nmr/SpectrumPlot";
 import { useDebounced } from "@/hooks/use-debounced";
@@ -18,9 +20,9 @@ import { deriveSignals } from "@/lib/nmr/signals";
 import { cn } from "@/lib/utils";
 import type {
   Engine,
-  Mode,
   OptionsResponse,
   PredictResponse,
+  Shift,
   ValidateResponse,
 } from "@/types/nmr";
 
@@ -28,6 +30,44 @@ interface PredictionComponent {
   id: string;
   label: string;
   response: PredictResponse;
+  visible: boolean;
+  imageDataUrl: string | null;
+  molfile: string | null;
+  intensityScale: number;
+}
+
+async function blobToDataUrl(blob: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(typeof reader.result === "string" ? reader.result : "");
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(blob);
+  });
+}
+
+async function generateCompoundImage(
+  ketcher: Ketcher | null,
+  smiles: string,
+): Promise<string | null> {
+  if (!ketcher) return null;
+  try {
+    const blob = await ketcher.generateImage(smiles, {
+      outputFormat: "png",
+      bondThickness: 1,
+    } as Parameters<Ketcher["generateImage"]>[1]);
+    return await blobToDataUrl(blob);
+  } catch {
+    return null;
+  }
+}
+
+function tagShifts(shifts: Shift[], componentId: string, componentLabel: string, smiles: string) {
+  return shifts.map((shift) => ({
+    ...shift,
+    source_id: componentId,
+    source_label: componentLabel,
+    source_smiles: smiles,
+  }));
 }
 
 function decoratePredictionResponse(
@@ -37,12 +77,8 @@ function decoratePredictionResponse(
 ): PredictResponse {
   return {
     ...response,
-    shifts: response.shifts.map((shift) => ({
-      ...shift,
-      source_id: componentId,
-      source_label: componentLabel,
-      source_smiles: response.smiles,
-    })),
+    shifts: tagShifts(response.shifts, componentId, componentLabel, response.smiles),
+    consensusShifts: tagShifts(response.consensusShifts, componentId, componentLabel, response.smiles),
   };
 }
 
@@ -69,10 +105,8 @@ const Index = () => {
 
   const [smiles, setSmiles] = useState("");
   const [nucleus, setNucleus] = useState("1H");
-  const [mode, setMode] = useState<Mode>("individual");
   const [conformerStrategy, setConformerStrategy] = useState("fast");
   const [selectedEngines, setSelectedEngines] = useState<string[]>([]);
-  const [weights, setWeights] = useState<Record<string, number>>({});
 
   const [validation, setValidation] = useState<ValidateResponse | null>(null);
   const [validating, setValidating] = useState(false);
@@ -85,6 +119,17 @@ const Index = () => {
   const [editorLinkedComponentId, setEditorLinkedComponentId] = useState<string | null>(null);
   const [selectedAtomIndex, setSelectedAtomIndex] = useState<number | null>(null);
   const [hoveredAtomIndices, setHoveredAtomIndices] = useState<number[] | null>(null);
+  const [hoveredSourceId, setHoveredSourceId] = useState<string | null>(null);
+  const [viewMode, setViewMode] = useState<ViewMode>("overlay");
+  const [floatingComponentIds, setFloatingComponentIds] = useState<string[]>([]);
+
+  const handleAtomHover = useCallback(
+    (atomIndices: number[] | null, sourceId?: string | null) => {
+      setHoveredAtomIndices(atomIndices);
+      setHoveredSourceId(atomIndices ? sourceId ?? null : null);
+    },
+    [],
+  );
 
   const ketcherRef = useRef<Ketcher | null>(null);
   const predictAbortRef = useRef<AbortController | null>(null);
@@ -97,6 +142,19 @@ const Index = () => {
     [activeComponentId, predictionComponents],
   );
 
+  const visibleComponents = useMemo(
+    () => predictionComponents.filter((component) => component.visible),
+    [predictionComponents],
+  );
+
+  const intensityScales = useMemo(() => {
+    const scales: Record<string, number> = {};
+    for (const component of predictionComponents) {
+      scales[component.id] = component.intensityScale;
+    }
+    return scales;
+  }, [predictionComponents]);
+
   const result = useMemo<PredictResponse | null>(() => {
     if (predictionComponents.length === 0) return null;
 
@@ -107,19 +165,23 @@ const Index = () => {
       ),
     );
 
+    const sourceComponents = visibleComponents.length > 0 ? visibleComponents : [];
+
     return {
       smiles: lead.smiles,
       nucleus: lead.nucleus,
-      mode: lead.mode,
-      shifts: predictionComponents.flatMap((component) => component.response.shifts),
+      shifts: sourceComponents.flatMap((component) => component.response.shifts),
+      consensusShifts: sourceComponents.flatMap(
+        (component) => component.response.consensusShifts,
+      ),
       engines_used: [
         ...new Set(
-          predictionComponents.flatMap((component) => component.response.engines_used),
+          sourceComponents.flatMap((component) => component.response.engines_used),
         ),
       ],
       warnings,
     };
-  }, [activeComponent, predictionComponents]);
+  }, [activeComponent, predictionComponents, visibleComponents]);
 
   const linkingEnabled =
     activeComponent != null &&
@@ -149,28 +211,16 @@ const Index = () => {
 
         const firstNucleus =
           opts.data.nuclei.includes("1H") ? "1H" : opts.data.nuclei[0] ?? "1H";
-        const firstMode =
-          opts.data.modes.includes("individual")
-            ? "individual"
-            : (opts.data.modes[0] as Mode) ?? "individual";
         const firstStrategy =
           opts.data.conformer_strategies.includes("fast")
             ? "fast"
             : opts.data.conformer_strategies[0] ?? "fast";
 
         setNucleus(firstNucleus);
-        setMode(firstMode);
         setConformerStrategy(firstStrategy);
 
         const ready = eng.data.filter((engine) => engine.ready);
-        const initiallySelected = ready.slice(0, 2).map((engine) => engine.name);
-        setSelectedEngines(initiallySelected);
-
-        const defaultWeights: Record<string, number> = {};
-        ready.forEach((engine) => {
-          defaultWeights[engine.name] = engine.default_weight ?? 0;
-        });
-        setWeights(defaultWeights);
+        setSelectedEngines(ready.map((engine) => engine.name));
         setBooted(true);
       } catch (error) {
         const message = error instanceof Error ? error.message : "Unknown error";
@@ -252,6 +302,32 @@ const Index = () => {
     [editorLinkedComponentId, predictionComponents],
   );
 
+  const toggleComponentVisible = useCallback((id: string) => {
+    setPredictionComponents((current) =>
+      current.map((component) =>
+        component.id === id ? { ...component, visible: !component.visible } : component,
+      ),
+    );
+  }, []);
+
+  const setComponentIntensity = useCallback((id: string, scale: number) => {
+    setPredictionComponents((current) =>
+      current.map((component) =>
+        component.id === id ? { ...component, intensityScale: scale } : component,
+      ),
+    );
+  }, []);
+
+  const toggleFloatingComponent = useCallback((id: string) => {
+    setFloatingComponentIds((current) =>
+      current.includes(id) ? current.filter((item) => item !== id) : [...current, id],
+    );
+  }, []);
+
+  const closeFloatingComponent = useCallback((id: string) => {
+    setFloatingComponentIds((current) => current.filter((item) => item !== id));
+  }, []);
+
   const activateComponent = useCallback((component: PredictionComponent) => {
     setActiveComponentId(component.id);
     setEditorLinkedComponentId(component.id);
@@ -265,8 +341,15 @@ const Index = () => {
     const ketcher = ketcherRef.current;
     if (!ketcher) return;
 
+    const hoverMatchesLinked =
+      hoveredAtomIndices != null &&
+      (hoveredSourceId == null || hoveredSourceId === editorLinkedComponentId);
     const atomIndices = linkingEnabled
-      ? hoveredAtomIndices ?? (selectedAtomIndex != null ? [selectedAtomIndex] : null)
+      ? hoverMatchesLinked
+        ? hoveredAtomIndices
+        : selectedAtomIndex != null
+          ? [selectedAtomIndex]
+          : null
       : null;
 
     try {
@@ -280,16 +363,12 @@ const Index = () => {
     } catch {
       /* noop */
     }
-  }, [hoveredAtomIndices, linkingEnabled, selectedAtomIndex]);
+  }, [editorLinkedComponentId, hoveredAtomIndices, hoveredSourceId, linkingEnabled, selectedAtomIndex]);
 
   const toggleEngine = useCallback((name: string) => {
     setSelectedEngines((current) =>
       current.includes(name) ? current.filter((engine) => engine !== name) : [...current, name],
     );
-  }, []);
-
-  const onWeightChange = useCallback((name: string, value: number) => {
-    setWeights((current) => ({ ...current, [name]: value }));
   }, []);
 
   const cancelPrediction = useCallback(() => {
@@ -300,8 +379,7 @@ const Index = () => {
   const canAddPrediction =
     canPredict &&
     predictionComponents.length > 0 &&
-    predictionComponents[0].response.nucleus === nucleus &&
-    predictionComponents[0].response.mode === mode;
+    predictionComponents[0].response.nucleus === nucleus;
 
   const addPredictionHint = useMemo(() => {
     if (predictionComponents.length === 0) {
@@ -309,12 +387,12 @@ const Index = () => {
     }
 
     const currentMix = predictionComponents[0].response;
-    if (currentMix.nucleus !== nucleus || currentMix.mode !== mode) {
-      return `Add prediction requires the same nucleus (${currentMix.nucleus}) and mode (${currentMix.mode}) as the current mix.`;
+    if (currentMix.nucleus !== nucleus) {
+      return `Add prediction requires the same nucleus (${currentMix.nucleus}) as the current mix.`;
     }
 
     return "Add prediction appends the current Ketcher structure to the plotted mixed spectrum.";
-  }, [mode, nucleus, predictionComponents]);
+  }, [nucleus, predictionComponents]);
 
   const runPrediction = useCallback(
     async (behavior: "replace" | "add") => {
@@ -333,16 +411,8 @@ const Index = () => {
         const payload = {
           smiles: validation.canonical_smiles ?? smiles,
           engines: selectedEngines,
-          mode,
           nucleus,
           conformer_strategy: conformerStrategy,
-          ...(mode === "consensus"
-            ? {
-                weights: Object.fromEntries(
-                  selectedEngines.map((name) => [name, weights[name] ?? 0]),
-                ),
-              }
-            : {}),
         };
         const usesOrca = payload.engines.includes("orca");
         setPredictStatus(
@@ -362,14 +432,31 @@ const Index = () => {
           componentId,
           componentLabel,
         );
+        const imageDataUrl = await generateCompoundImage(
+          ketcherRef.current,
+          decoratedResponse.smiles,
+        );
+        let molfile: string | null = null;
+        try {
+          molfile = (await ketcherRef.current?.getMolfile()) ?? null;
+        } catch {
+          molfile = null;
+        }
         const nextComponent: PredictionComponent = {
           id: componentId,
           label: componentLabel,
           response: decoratedResponse,
+          visible: true,
+          imageDataUrl,
+          molfile,
+          intensityScale: 1,
         };
 
         setPredictionComponents((current) =>
           behavior === "replace" ? [nextComponent] : [...current, nextComponent],
+        );
+        setFloatingComponentIds((current) =>
+          behavior === "replace" ? [componentId] : [...current, componentId],
         );
         setActiveComponentId(componentId);
         setEditorLinkedComponentId(componentId);
@@ -396,13 +483,11 @@ const Index = () => {
       canAddPrediction,
       canPredict,
       conformerStrategy,
-      mode,
       nucleus,
       predictionComponents.length,
       selectedEngines,
       smiles,
       validation,
-      weights,
     ],
   );
 
@@ -413,7 +498,7 @@ const Index = () => {
 
   const resultSignalCount = useMemo(() => {
     if (!result) return 0;
-    return deriveSignals(result.shifts, result.nucleus, result.mode).length;
+    return deriveSignals(result.shifts, result.nucleus, "individual").length;
   }, [result]);
 
   const activeComponentSummary = useMemo(() => {
@@ -513,15 +598,11 @@ const Index = () => {
                   options={options}
                   engines={engines}
                   nucleus={nucleus}
-                  mode={mode}
                   conformerStrategy={conformerStrategy}
                   selectedEngines={selectedEngines}
-                  weights={weights}
                   onNucleusChange={setNucleus}
-                  onModeChange={setMode}
                   onConformerChange={setConformerStrategy}
                   onToggleEngine={toggleEngine}
-                  onWeightChange={onWeightChange}
                 />
               </div>
 
@@ -594,69 +675,36 @@ const Index = () => {
                 ) : null}
               </div>
 
-              <div className="rounded-xl border bg-card p-4 shadow-card">
-                <div className="flex items-center justify-between gap-2">
-                  <h3 className="text-sm font-semibold tracking-tight">Prediction mix</h3>
-                  <span className="text-xs text-muted-foreground">
-                    {predictionComponents.length} component
-                    {predictionComponents.length === 1 ? "" : "s"}
-                  </span>
-                </div>
+              <CompoundsPanel
+                compounds={predictionComponents.map((component) => ({
+                  id: component.id,
+                  label: component.label,
+                  smiles: component.response.smiles,
+                  engines: component.response.engines_used,
+                  visible: component.visible,
+                  active: activeComponent?.id === component.id,
+                  linked: editorLinkedComponentId === component.id,
+                  floating: floatingComponentIds.includes(component.id),
+                  intensityScale: component.intensityScale,
+                }))}
+                viewMode={viewMode}
+                onViewModeChange={setViewMode}
+                onToggleVisible={toggleComponentVisible}
+                onActivate={(id) => {
+                  const target = predictionComponents.find((component) => component.id === id);
+                  if (target) activateComponent(target);
+                }}
+                onToggleFloating={toggleFloatingComponent}
+                onIntensityChange={setComponentIntensity}
+              />
 
-                {predictionComponents.length > 0 ? (
-                  <>
-                    <div className="mt-3 flex flex-wrap gap-2">
-                      {predictionComponents.map((component) => {
-                        const active = activeComponent?.id === component.id;
-                        const linked = editorLinkedComponentId === component.id;
-
-                        return (
-                          <button
-                            key={component.id}
-                            type="button"
-                            onClick={() => void activateComponent(component)}
-                            className={cn(
-                              "min-w-[124px] rounded-xl border px-3 py-2 text-left transition-smooth",
-                              active
-                                ? "border-primary/50 bg-primary/5 shadow-sm"
-                                : "border-border/70 bg-background hover:border-primary/30 hover:bg-muted/40",
-                            )}
-                          >
-                            <div className="flex items-center justify-between gap-2">
-                              <span className="text-xs font-semibold text-foreground">
-                                {component.label}
-                              </span>
-                              <span
-                                className={cn(
-                                  "rounded-full px-1.5 py-0.5 text-[10px] font-semibold",
-                                  linked
-                                    ? "bg-success/10 text-success"
-                                    : "bg-muted text-muted-foreground",
-                                )}
-                              >
-                                {linked ? "In editor" : "Stored"}
-                              </span>
-                            </div>
-                            <div className="mt-1 font-mono text-[10px] text-muted-foreground">
-                              {truncateSmiles(component.response.smiles)}
-                            </div>
-                          </button>
-                        );
-                      })}
-                    </div>
-
-                    <p className="mt-3 text-xs text-muted-foreground">
-                      {linkingEnabled && activeComponentSummary
-                        ? `Atom and peak highlighting are linked to ${activeComponentSummary}.`
-                        : "The editor currently contains a draft structure. Select a component to relink atom highlighting, or run a new prediction."}
-                    </p>
-                  </>
-                ) : (
-                  <p className="mt-3 text-xs text-muted-foreground">
-                    Replace clears the current spectrum and predicts the new structure. Add prediction appends another molecule to the same plotted mix.
-                  </p>
-                )}
-              </div>
+              {predictionComponents.length > 0 ? (
+                <p className="text-xs text-muted-foreground">
+                  {linkingEnabled && activeComponentSummary
+                    ? `Atom and peak highlighting are linked to ${activeComponentSummary}.`
+                    : "The editor currently contains a draft structure. Select a component to relink atom highlighting, or run a new prediction."}
+                </p>
+              ) : null}
 
               {result && result.warnings && result.warnings.length > 0 ? (
                 <div className="rounded-xl border border-warning/30 bg-warning/5 p-4 text-xs text-warning">
@@ -705,14 +753,16 @@ const Index = () => {
 
             {result ? (
               <SpectrumPlot
-                shifts={result.shifts}
+                individualShifts={result.shifts}
+                consensusShifts={result.consensusShifts}
                 nucleus={result.nucleus}
-                mode={result.mode}
                 selectedAtomIndex={linkingEnabled ? selectedAtomIndex : null}
                 activeSourceId={linkingEnabled ? activeComponent?.id ?? null : null}
                 activeSourceLabel={linkingEnabled ? activeComponent?.label ?? null : null}
                 linkingEnabled={linkingEnabled}
-                onAtomHover={setHoveredAtomIndices}
+                viewMode={viewMode}
+                intensityScales={intensityScales}
+                onAtomHover={handleAtomHover}
               />
             ) : (
               <div className="flex h-[460px] flex-col items-center justify-center gap-3 rounded-2xl border bg-card text-center text-sm text-muted-foreground shadow-card">
@@ -725,6 +775,31 @@ const Index = () => {
           </section>
         </div>
       </main>
+
+      {predictionComponents
+        .filter((component) => floatingComponentIds.includes(component.id))
+        .map((component, index) => {
+          const componentHighlights =
+            hoveredSourceId === component.id
+              ? hoveredAtomIndices
+              : selectedAtomIndex != null && editorLinkedComponentId === component.id
+                ? [selectedAtomIndex]
+                : null;
+          return (
+            <FloatingCompound
+              key={component.id}
+              id={component.id}
+              label={component.label}
+              smiles={component.response.smiles}
+              imageDataUrl={component.imageDataUrl}
+              molfile={component.molfile}
+              highlightedAtoms={componentHighlights}
+              initialX={24 + index * 36}
+              initialY={120 + index * 36}
+              onClose={() => closeFloatingComponent(component.id)}
+            />
+          );
+        })}
     </div>
   );
 };

@@ -171,6 +171,7 @@ function createSyntheticSpectrum(
   title: string,
   sharedDomain: [number, number],
   color?: string,
+  intensityScale = 1,
 ): Spectrum1DSource {
   const signals = deriveSignals(shifts, nucleus, mode);
   const points = SAMPLE_POINTS[nucleus] ?? 4096;
@@ -187,6 +188,12 @@ function createSyntheticSpectrum(
   }
 
   normalizeTrace(intensities);
+
+  if (intensityScale !== 1) {
+    for (let index = 0; index < intensities.length; index += 1) {
+      intensities[index] *= intensityScale;
+    }
+  }
 
   const frequency = BASE_FREQUENCY_MHZ[nucleus] ?? 100;
   const first = axis[0] ?? sharedDomain[1];
@@ -223,11 +230,27 @@ function createSyntheticSpectrum(
   } as unknown as Spectrum1DSource;
 }
 
+function groupShiftsBySource(shifts: Shift[]): Array<{ id: string; label: string; shifts: Shift[] }> {
+  const grouped = new Map<string, { id: string; label: string; shifts: Shift[] }>();
+  for (const shift of shifts) {
+    const id = shift.source_id ?? "__default__";
+    const label = shift.source_label ?? "Component";
+    const bucket = grouped.get(id) ?? { id, label, shifts: [] };
+    bucket.shifts.push(shift);
+    grouped.set(id, bucket);
+  }
+  return [...grouped.values()];
+}
+
 export function buildNmriumViewerModel(
   shifts: Shift[],
   nucleus: Nucleus,
   mode: Mode,
   version: number,
+  options: {
+    stackBySource?: boolean;
+    intensityScales?: Record<string, number>;
+  } = {},
 ): NmriumViewerModel {
   const aggregator = new FileCollection();
   const schemaVersion = version as 16;
@@ -251,24 +274,81 @@ export function buildNmriumViewerModel(
   const sharedDomain = getSharedDomain(allSignals, nucleus);
   const engineColors =
     mode === "individual" ? getEngineColorMap(groupShiftsByEngine(shifts).map(([engine]) => engine)) : {};
-  const spectra =
-    mode === "individual"
-      ? groupShiftsByEngine(shifts).map(([engine, engineShifts]) =>
+
+  const sources = options.stackBySource ? groupShiftsBySource(shifts) : null;
+  const intensityScales = options.intensityScales ?? {};
+  const scaleFor = (sourceId?: string) =>
+    (sourceId && intensityScales[sourceId] != null ? intensityScales[sourceId] : 1) || 1;
+
+  let spectra: Spectrum1DSource[];
+  if (sources && sources.length > 0) {
+    spectra = sources.flatMap((source) => {
+      const scale = scaleFor(source.id);
+      if (mode === "individual") {
+        return groupShiftsByEngine(source.shifts).map(([engine, engineShifts]) =>
           createSyntheticSpectrum(
             engineShifts,
             nucleus,
             mode,
-            engine,
+            `${source.label} - ${engine}`,
             sharedDomain,
             engineColors[engine],
+            scale,
           ),
-        )
-      : [createSyntheticSpectrum(shifts, nucleus, mode, "Consensus prediction", sharedDomain, "#0f172a")];
+        );
+      }
+      return [
+        createSyntheticSpectrum(
+          source.shifts,
+          nucleus,
+          mode,
+          `${source.label} consensus`,
+          sharedDomain,
+          "#0f172a",
+          scale,
+        ),
+      ];
+    });
+  } else {
+    const allSourceIds = [
+      ...new Set(shifts.map((shift) => shift.source_id).filter(Boolean) as string[]),
+    ];
+    const uniformScale =
+      allSourceIds.length === 1 ? scaleFor(allSourceIds[0]) : 1;
+    spectra =
+      mode === "individual"
+        ? groupShiftsByEngine(shifts).map(([engine, engineShifts]) =>
+            createSyntheticSpectrum(
+              engineShifts,
+              nucleus,
+              mode,
+              engine,
+              sharedDomain,
+              engineColors[engine],
+              uniformScale,
+            ),
+          )
+        : [
+            createSyntheticSpectrum(
+              shifts,
+              nucleus,
+              mode,
+              "Consensus prediction",
+              sharedDomain,
+              "#0f172a",
+              uniformScale,
+            ),
+          ];
+  }
   const nmriumSpectra = spectra as unknown as NmriumDataState["spectra"];
   const spectraView = {
     activeTab: nucleus,
     showLegend: false,
   } as unknown as NmriumViewState["spectra"];
+
+  const verticalAlign = options.stackBySource
+    ? ({ [nucleus]: "stack" } as unknown as NmriumViewState["verticalAlign"])
+    : undefined;
 
   return {
     aggregator,
@@ -281,6 +361,7 @@ export function buildNmriumViewerModel(
       } as NmriumDataState,
       view: {
         spectra: spectraView,
+        ...(verticalAlign ? { verticalAlign } : {}),
       } as NmriumViewState,
     },
   };

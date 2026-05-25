@@ -1,41 +1,72 @@
 # NMR Predict
 
-Local web app for NMR chemical-shift prediction. Users draw a molecule, pick
-one or more prediction pathways (CASCADE, CDK, ORCA), and view individual or
-consensus results.
+NMR Predict is a local web application for NMR chemical-shift prediction. It combines a FastAPI backend with a React frontend so you can draw or paste a molecule, validate its canonical SMILES, run one or more prediction engines, and inspect the resulting spectrum in an interactive viewer.
 
-## Status: Phase 4 complete — NMRIUM + Ketcher frontend
+The project currently supports `1H` and `13C` prediction with three engines:
 
-Phase 1 shipped the backend skeleton and RDKit canonicalization layer. Phase 2
-landed the three engines: **CDK** (HOSE-code lookup), **CASCADE** (3D graph
-neural network), and **ORCA** (DFT NMR via subprocess). Phase 3 added the
-consensus manager and rounded out the HTTP surface (`/engines`, `/options`).
-Phase 4 wires a React frontend with a Ketcher molecule editor and a bare
-NMRIUM spectrum viewer — draw a structure, pick engines, and get a rendered
-trace with bidirectional atom/peak highlighting.
+- `cdk`: HOSE-code lookup through CDK and the `nmrshiftdb2` predictor jars
+- `cascade`: the CASCADE 3D graph neural network
+- `orca`: DFT NMR prediction through the ORCA executable
 
-## Run the app
+## What It Does
 
-From the project root on Windows:
+- Draw molecules in Ketcher or paste SMILES directly.
+- Validate input with RDKit and convert it to canonical SMILES before prediction.
+- Run any combination of CDK, CASCADE, and ORCA.
+- View either:
+  - individual engine predictions as overlaid spectra
+  - a weighted consensus prediction
+- Inspect predicted signals in an NMRIUM-based viewer with:
+  - atom-to-peak highlighting
+  - per-engine overlays
+  - proton signal grouping and approximate multiplicity labels
+  - multi-molecule mixed spectra through the frontend "Add prediction" workflow
+
+## How It Works
+
+1. The backend parses the submitted SMILES with RDKit, sanitizes it, canonicalizes it, and uses that canonical atom ordering as the reference for all engines.
+2. The selected engines return per-atom shifts for the requested nucleus.
+3. For `1H`, the backend adds assignment metadata such as attached heavy atom, grouping, estimated multiplicity, neighbor count, and approximate `J` coupling.
+4. In consensus mode, the backend combines successful engine outputs with normalized weights. Engines that fail are dropped from the consensus instead of failing the whole request.
+5. The frontend normalizes the API response and renders synthetic spectra in NMRIUM from the predicted shift positions.
+
+Current backend guardrails:
+
+- SMILES length is limited to `256` characters.
+- Molecules are limited to `64` heavy atoms.
+- Molecules are limited to `192` total atoms after adding hydrogens.
+
+## Quick Start
+
+This repository is set up for a Windows-first local workflow. The simplest way to run it is from the project root:
 
 ```bat
 run-nmr.bat
 ```
 
-Modes:
+Available modes:
 
-```bat
-run-nmr.bat all
-run-nmr.bat backend
-run-nmr.bat frontend
-run-nmr.bat serve
-```
+| Command | What it does |
+| --- | --- |
+| `run-nmr.bat` | Starts backend and frontend dev servers in separate windows |
+| `run-nmr.bat all` | Same as the default command |
+| `run-nmr.bat backend` | Starts only the FastAPI backend on `http://127.0.0.1:7999` |
+| `run-nmr.bat frontend` | Starts only the Vite frontend on `http://127.0.0.1:8080` |
+| `run-nmr.bat serve` | Builds the frontend and serves both the SPA and the API from FastAPI on `http://127.0.0.1:7999` |
 
-- `all` starts backend and frontend dev servers in separate windows.
-- `backend` starts only FastAPI on `http://127.0.0.1:7999`.
-- `frontend` starts only Vite on `http://127.0.0.1:8080`.
-- `serve` builds the frontend and serves both the SPA and API from FastAPI on
-  `http://127.0.0.1:7999`.
+What `run-nmr.bat` handles automatically:
+
+- detects a usable backend Python interpreter
+- checks that backend dependencies are installed
+- downloads a portable Temurin 17 JRE into `backend/vendor/java/` if Java is missing
+- downloads `cdk-2.9.jar`, `predictorc.jar`, and `predictorh.jar` into `backend/vendor/cdk/` if they are missing
+- prevents startup when ports `7999` or `8080` are already occupied
+
+Prerequisites for the full app:
+
+- Python 3.10+ for the backend
+- Node.js and npm for the frontend
+- ORCA only if you want to use the ORCA engine
 
 ### Production / public hosting
 
@@ -58,344 +89,184 @@ close the window or press Ctrl+C to stop.
 > top of the script. The startup banner prints these notes and the firewall
 > command.
 
-Phase 1 (complete):
+## Manual Setup
 
-- FastAPI app ([backend/app/main.py](backend/app/main.py)) with `/health`,
-  `/validate`, `/predict` endpoints.
-- RDKit canonicalization
-  ([backend/app/chem/canonical.py](backend/app/chem/canonical.py)) — single
-  source of truth for atom ordering.
-- ETKDGv3 conformer ensemble generator
-  ([backend/app/chem/conformer.py](backend/app/chem/conformer.py)).
-- Pydantic request/response schemas
-  ([backend/app/schemas.py](backend/app/schemas.py)).
-- Engine interface stubs
-  ([backend/app/engines/base.py](backend/app/engines/base.py)).
+### Backend
 
-Phase 2:
-
-- **CDK engine** ([backend/app/engines/cdk.py](backend/app/engines/cdk.py)) —
-  JPype bridge into the nmrshiftdb2 HOSE-code predictor. Atom ordering is
-  anchored on RDKit's canonical SMILES and symbol-checked against CDK after
-  hydrogen addition, so every atom index in the response matches the RDKit
-  mol that canonicalization produced.
-- **CASCADE engine** ([backend/app/engines/cascade.py](backend/app/engines/cascade.py))
-  — the Paton-lab 3D graph neural network (DFTNN variant) ported from
-  Keras 2.2 / TF 1.12 to Keras 3 + TensorFlow. The shipped HDF5 weights load
-  by name against a rebuilt architecture; the `nfp` custom layers live in
-  [backend/app/engines/cascade_nfp/](backend/app/engines/cascade_nfp/). Per
-  prediction, the engine generates an ETKDGv3 ensemble (default 10
-  conformers), runs the model per conformer, and Boltzmann-weights the
-  per-atom shifts at 298.15 K.
-- **ORCA engine** ([backend/app/engines/orca.py](backend/app/engines/orca.py)) —
-  DFT NMR via subprocess. Cheap defaults
-  (`! PBE def2-SVP NMR TightSCF`) are overridable through `ORCA_*` env
-  vars. Two conformer strategies are selectable per request via
-  `conformer_strategy`: `"fast"` (RDKit ETKDG+MMFF, default) or `"goat"`
-  (ORCA XTB2 GOAT global search). Chemical shieldings are converted to δ
-  ppm via a TMS reference computed once at the same (functional, basis)
-  and cached on disk. All ORCA calls funnel through a single-worker job
-  queue with an enforced timeout, bounded pending-request backpressure,
-  and automatic workdir cleanup/pruning.
-- Engine registry ([backend/app/engines/__init__.py](backend/app/engines/__init__.py))
-  dispatches by name; missing/mis-configured engines return
-  `status: "error"` rather than 500.
-- Tests ([backend/tests/test_cdk_engine.py](backend/tests/test_cdk_engine.py),
-  [backend/tests/test_cascade_engine.py](backend/tests/test_cascade_engine.py),
-  [backend/tests/test_orca_engine.py](backend/tests/test_orca_engine.py))
-  — unit checks always run; live prediction tests are skipped unless the
-  respective assets (`CDK_JAR_PATH`, CASCADE model files, or
-  `RUN_ORCA_TESTS=1` with ORCA on disk) are available.
-
-## Run the backend
-
-```bash
+```powershell
 cd backend
 python -m venv .venv
-.venv\Scripts\activate            # Windows
+.venv\Scripts\activate
 pip install -r requirements.txt
-uvicorn app.main:app --reload --port 7999
+uvicorn app.main:app --reload --host 127.0.0.1 --port 7999
 ```
 
-`backend/requirements.txt` is now a compiled lockfile with exact versions
-and hashes. Edit [backend/requirements.in](backend/requirements.in) and
-re-run `pip-compile` when you intentionally change backend dependencies.
+### Frontend
 
-Smoke tests:
+```powershell
+cd frontend
+npm install
+npm run dev -- --host 127.0.0.1 --port 8080
+```
 
-```bash
+By default the frontend talks to the backend through the Vite `/api` proxy.
+
+Useful frontend environment variables:
+
+| Variable | Purpose |
+| --- | --- |
+| `VITE_NMR_API_URL` | Overrides the API base URL. Default: `/api` |
+| `VITE_NMR_ENABLE_DEMO_MODE=1` | Enables mock responses when the backend is unreachable |
+
+Demo mode is disabled by default. If the backend is down and demo mode is not enabled, the frontend shows the real connection failure instead of fabricating chemistry results.
+
+## Prediction Engines
+
+| Engine | Current behavior | Setup notes |
+| --- | --- | --- |
+| `cdk` | Uses JPype to bridge into CDK and the `nmrshiftdb2` predictor jars. Supports `1H` and `13C`. | `run-nmr.bat` can fetch the required Java runtime and jars automatically. You can also run `python backend/scripts/fetch_cdk.py` manually. |
+| `cascade` | Uses the CASCADE neural-network model and an RDKit ETKDG/MMFF conformer ensemble. Supports `1H` and `13C`. | The backend expects the CASCADE assets under `backend/vendor/cascade/CASCADE/cascade-Jupyternotebook-SMILES/models/cascade/` unless `CASCADE_PATH` is set. |
+| `orca` | Runs ORCA as a subprocess, computes a TMS reference cache for the selected level of theory, and converts shieldings to ppm. Supports `1H` and `13C`. | ORCA is not bundled. Set `ORCA_EXE` to the executable path to enable this engine. If ORCA is not configured, the app still works with the other available engines. |
+
+### ORCA Notes
+
+ORCA-specific behavior in the current implementation:
+
+- `conformer_strategy: "fast"` uses RDKit ETKDG plus MMFF and selects the lowest-energy conformer.
+- `conformer_strategy: "goat"` runs ORCA `XTB2 GOAT` to search for a lower-energy conformer before the NMR job.
+- ORCA work is serialized through a single-worker queue.
+- The queue is intentionally bounded so expensive requests fail fast instead of piling up indefinitely.
+- TMS reference values are cached in `ORCA_WORK_DIR/tms_refs.json`.
+
+Common ORCA environment variables:
+
+| Variable | Default | Notes |
+| --- | --- | --- |
+| `ORCA_EXE` | `C:\ORCA_6.1.1\orca.exe` | |
+| `ORCA_FUNCTIONAL` | `PBE` | e.g. `PBE`, `BP86`, `TPSS`, `B97-D3`, `B3LYP`, `PBE0`, `wB97X-D3` |
+| `ORCA_BASIS` | `def2-SVP` | e.g. `def2-SVP`, `def2-TZVP`, `def2-TZVPP`, `pcSseg-1`, `pcSseg-2` |
+| `ORCA_CPUS` | host CPU count | maps to `%pal nprocs`; clamped to host CPU count |
+| `ORCA_RAM_MB` | `2000` | RAM **per core** (ORCA `%maxcore`); total RAM ≈ `ORCA_CPUS * ORCA_RAM_MB` |
+| `ORCA_TIMEOUT` | `600` | |
+
+Additional queue and work-directory settings live in `backend/app/config.py`.
+
+### Configuring via `.env`
+
+For convenience, the backend also loads a `.env` file from the project root at
+startup (via `python-dotenv`). Copy `.env.example` to `.env` and uncomment the
+variables you want to override:
+
+```powershell
+copy .env.example .env
+```
+
+The `.env.example` file documents the recommended values for the ORCA
+functional and basis set, as well as the other settings listed above. Restart
+the backend after editing `.env` so the new values are picked up.
+
+## API
+
+The backend exposes these routes:
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| `GET` | `/health` | Basic liveness check |
+| `GET` | `/engines` | Lists registered engines, default weights, and readiness |
+| `GET` | `/options` | Lists valid nuclei, modes, conformer strategies, and engine names |
+| `POST` | `/validate` | Validates a SMILES string and returns canonical SMILES |
+| `POST` | `/predict` | Runs engine predictions and optionally computes consensus |
+
+The same endpoints are also available under `/api/*`, which is what the frontend uses.
+
+### Example `POST /predict`
+
+```json
+{
+  "smiles": "CCO",
+  "engines": ["cdk", "cascade", "orca"],
+  "mode": "consensus",
+  "nucleus": "13C",
+  "conformer_strategy": "fast",
+  "weights": {
+    "cdk": 0.5,
+    "cascade": 0.3,
+    "orca": 0.2
+  }
+}
+```
+
+Current request options:
+
+- `nucleus`: `1H` or `13C`
+- `mode`: `individual` or `consensus`
+- `conformer_strategy`: `fast` or `goat`
+
+In consensus mode, the backend uses these default weights unless you override them:
+
+- `cdk`: `0.5`
+- `cascade`: `0.3`
+- `orca`: `0.2`
+
+The response includes:
+
+- `canonical_smiles`
+- `atom_symbols`
+- `engines`
+- `consensus`
+
+In individual mode, `consensus` is `null`. In consensus mode, the `consensus` block includes merged per-atom shifts and `weights_used`, which reflects the weights after dropping any engines that did not return `status: "ok"`.
+
+## Testing
+
+### Backend
+
+```powershell
 cd backend
 pytest
 ```
 
-Sanity check:
+The backend test suite covers:
 
-```bash
-curl -X POST http://localhost:7999/validate \
-     -H "Content-Type: application/json" \
-     -d '{"smiles": "c1ccccc1"}'
+- SMILES validation and canonicalization
+- conformer generation
+- engine registry behavior
+- consensus weighting and renormalization
+- signal annotation metadata for `1H`
+- endpoint shape and error handling
+
+Some live engine tests are conditional:
+
+- CDK live tests are skipped unless `CDK_JAR_PATH` is set
+- CASCADE live tests require the model assets to be present
+- ORCA live tests require both ORCA to be installed and `RUN_ORCA_TESTS=1`
+
+### Frontend
+
+```powershell
+cd frontend
+npm test
 ```
 
-## Enabling the CDK engine
+Frontend tests cover:
 
-The CDK engine needs a Java runtime (JDK/JRE 11+ — JPype1 will pick it up
-automatically if `JAVA_HOME` is set) plus `cdk-2.9.jar`. If you want
-nmrshiftdb2-trained shift predictions, also drop `nmrshiftdb2.jar` into
-the same folder.
+- API request behavior and cancellation handling
+- backend-to-UI response normalization
+- signal grouping and integral generation
+- synthetic NMRIUM spectrum assembly
+- Ketcher fallback behavior when the editor bundle is unavailable
 
-1. Run the bundled fetch script (one-shot, ~43 MB download from the CDK
-   GitHub release):
+## Repository Layout
 
-   ```bash
-   python backend/scripts/fetch_cdk.py
-   ```
+| Path | Purpose |
+| --- | --- |
+| `backend/app/` | FastAPI app, RDKit utilities, engine implementations, consensus logic |
+| `backend/tests/` | Backend tests |
+| `backend/scripts/` | Bootstrap scripts for Java and CDK assets |
+| `backend/vendor/` | Vendored third-party runtime and model assets used by the app |
+| `frontend/src/` | React application, API client, spectrum generation, and UI components |
+| `run-nmr.bat` | Main local startup script |
 
-   It drops `cdk-2.9.jar` into `backend/vendor/cdk/`. `run-nmr.bat`
-   invokes this automatically on startup when the folder is empty.
-2. (Optional) Download `nmrshiftdb2.jar` from
-   <https://sourceforge.net/projects/nmrshiftdb2/> and drop it alongside
-   the CDK bundle. Without it the engine still loads CDK, but shift
-   prediction errors at runtime (the engine uses the nmrshiftdb HOSE
-   tables).
-3. No env var needed — `settings.cdk_jar_path` defaults to
-   `backend/vendor/cdk/`. Override with `CDK_JAR_PATH` only if your jars
-   live elsewhere.
-4. Restart `uvicorn`. Run the live prediction tests:
+## Current Scope
 
-   ```bash
-   cd backend
-   pytest tests/test_cdk_engine.py -v
-   ```
-
-Predict for ethanol:
-
-```bash
-curl -X POST http://localhost:7999/predict \
-     -H "Content-Type: application/json" \
-     -d '{"smiles": "CCO", "engines": ["cdk"], "nucleus": "13C"}'
-```
-
-If `CDK_JAR_PATH` is unset or the jar is incomplete, `/predict` still returns
-a valid response — the CDK slot reports `status: "error"` with a message
-pointing at the setup step that failed, so other engines continue to run.
-
-## Enabling the CASCADE engine
-
-CASCADE ships as a vendored clone of `patonlab/CASCADE`. Clone it into
-`backend/vendor/cascade/` (expected layout: `backend/vendor/cascade/CASCADE/
-cascade-Jupyternotebook-SMILES/models/cascade/` containing `preprocessor.p`
-and `trained_model/best_model.hdf5`, `best_model_H_DFTNN.hdf5`). The default
-`settings.cascade_path` resolves there automatically; override with
-`CASCADE_PATH` if you keep the assets somewhere else.
-
-Upstream CASCADE was written against Keras 2.2 / TensorFlow 1.12 (Python 3.5).
-The backend ships a Keras 3 port of the custom `nfp` layers and the model
-architecture in [backend/app/engines/cascade_nfp/](backend/app/engines/cascade_nfp/);
-the ported architecture loads the shipped HDF5 weights by layer name.
-
-```bash
-# 1. Clone the upstream repo (once)
-git clone https://github.com/patonlab/CASCADE backend/vendor/cascade/CASCADE
-
-# 2. Install deps (tensorflow + keras + h5py are in requirements.txt)
-cd backend && pip install -r requirements.txt
-
-# 3. Smoke test — runs 10-conformer ethanol prediction for both nuclei
-pytest tests/test_cascade_engine.py -v
-```
-
-Predict for ethanol via the API:
-
-```bash
-curl -X POST http://localhost:7999/predict \
-     -H "Content-Type: application/json" \
-     -d '{"smiles": "CCO", "engines": ["cascade"], "nucleus": "1H"}'
-```
-
-Notes on the install:
-
-- TensorFlow dropped native Windows GPU after 2.10; the engine runs on CPU.
-  For a 50-atom molecule × 10 conformers, a single-nucleus inference is
-  typically sub-second.
-- If the CASCADE assets are missing, `/predict` returns `status: "error"`
-  for the CASCADE slot (same pattern as CDK) rather than failing the whole
-  request.
-
-## Enabling the ORCA engine
-
-ORCA is invoked as a subprocess. Point the backend at the binary and pick
-the level of theory you want; the defaults are tuned for speed, not
-publication-quality accuracy.
-
-Environment variables (all optional):
-
-| Variable | Default | Notes |
-| -- | -- | -- |
-| `ORCA_EXE` | `C:\ORCA_6.1.1\orca.exe` | Absolute path to `orca[.exe]`. |
-| `ORCA_FUNCTIONAL` | `PBE` | Any ORCA keyword (e.g. `B3LYP`, `B97-D3`). |
-| `ORCA_BASIS` | `def2-SVP` | Any basis ORCA understands (e.g. `pcS-seg-1`). |
-| `ORCA_CPUS` | `4` | `%pal nprocs` for each ORCA job. |
-| `ORCA_RAM_MB` | `2000` | `%maxcore` per process, in MB. |
-| `ORCA_WORK_DIR` | `./\_work/orca` | Where job dirs and `tms_refs.json` live. |
-| `ORCA_TIMEOUT` | `600` | Hard timeout in seconds for each ORCA subprocess. |
-| `ORCA_MAX_PENDING_REQUESTS` | `2` | Reject new ORCA-backed requests when the single-worker queue is already backed up. |
-| `ORCA_JOB_TTL_SECONDS` | `3600` | Prune stale failed job directories older than this age. |
-| `ORCA_RAM_CEILING_MB` | `8192` | Clamp `%maxcore` to a sane upper ceiling before writing ORCA inputs. |
-
-Conformer strategy is picked per request (frontend-selectable later). Pass
-`conformer_strategy` in the body:
-
-- `"fast"` — RDKit ETKDG + MMFF, lowest-energy conformer. Default,
-  sub-second overhead.
-- `"goat"` — ORCA XTB2 GOAT global conformer search. Minutes of
-  overhead; finds the global minimum across rotatable bonds.
-
-The first prediction at a given `(functional, basis)` also runs a TMS
-reference calculation to convert isotropic shielding σ → δ ppm. The
-result is cached at `{ORCA_WORK_DIR}/tms_refs.json` so subsequent
-predictions at the same level of theory skip TMS entirely.
-
-Predict for ethanol via the API:
-
-```bash
-curl -X POST http://localhost:7999/predict \
-     -H "Content-Type: application/json" \
-     -d '{"smiles": "CCO", "engines": ["orca"], "nucleus": "13C", "conformer_strategy": "fast"}'
-```
-
-Run the ORCA engine tests — parser/unit tests always run; the live
-end-to-end test is gated on `RUN_ORCA_TESTS=1`:
-
-```bash
-cd backend
-pytest tests/test_orca_engine.py -v            # parser + registry checks
-RUN_ORCA_TESTS=1 pytest tests/test_orca_engine.py -v   # also run the live methane test
-```
-
-Notes:
-
-- All ORCA invocations are serialised through a single-worker thread
-  queue so concurrent `/predict` calls don't trample each other (each
-  ORCA job already saturates CPU via `%pal`). A hard per-job timeout is
-  enforced, stale job directories are pruned automatically, and the
-  pending-request queue is intentionally short so the service fails fast
-  under load instead of growing unbounded.
-- If `ORCA_EXE` is missing, the ORCA slot in `/predict` returns
-  `status: "error"` with a path-specific message rather than failing
-  the whole request.
-
-Phase 3:
-
-- **Consensus manager** ([backend/app/consensus.py](backend/app/consensus.py))
-  — weighted reducer over per-engine results. Defaults follow the plan:
-  `W_cdk=0.5`, `W_cascade=0.3`, `W_orca=0.2`. Engines with
-  `status != "ok"` are dropped and the surviving weights are renormalised
-  to sum to 1.0 so one failed engine does not bias the output. Per-atom
-  output carries the weighted mean shift, the unweighted standard
-  deviation across contributing engines (spread proxy), and the list of
-  engines that reported for that atom.
-- **`GET /engines`** — lists every registered engine with its
-  `default_weight`, whether it is implemented, and readiness info the
-  frontend can use to grey out unavailable engines before submit. CDK
-  readiness now reflects a real warmup/import path rather than only file
-  presence.
-- **`GET /options`** — enumerates the valid values for `nuclei`,
-  `modes`, `conformer_strategies`, and the set of engine names so the
-  frontend can build dropdowns without hardcoding literals.
-- **`POST /predict`** now accepts `mode: "consensus"` and an optional
-  `weights` dict. When `mode == "consensus"` the response carries an
-  extra `consensus` block with the merged shifts and the normalised
-  weights actually applied.
-- Tests ([backend/tests/test_consensus.py](backend/tests/test_consensus.py),
-  [backend/tests/test_endpoints.py](backend/tests/test_endpoints.py))
-  cover default weights, single/multi-engine averaging, error-drop
-  renormalisation, override handling, partial atom coverage, and the
-  HTTP shape of every endpoint.
-
-## HTTP API
-
-| Method & Path | Purpose |
-| -- | -- |
-| `GET /health` | Liveness probe — `{"status": "ok"}`. |
-| `GET /engines` | Engine roster with default weights and readiness. |
-| `GET /options` | Enumerates valid nuclei, modes, conformer strategies, and engine names for the UI. |
-| `POST /validate` | Validates a SMILES string and returns its canonical form. |
-| `POST /predict` | Runs the requested engines and (optionally) their weighted consensus. |
-
-### `POST /predict` request body
-
-```jsonc
-{
-  "smiles": "CCO",
-  "engines": ["cdk", "cascade", "orca"],
-  "mode": "consensus",                  // or "individual"
-  "nucleus": "13C",                      // or "1H"
-  "conformer_strategy": "fast",          // or "goat" (ORCA only)
-  "weights": {"cdk": 0.6, "cascade": 0.3, "orca": 0.1}   // optional
-}
-```
-
-The response is always `{canonical_smiles, atom_symbols, engines, consensus}`.
-`consensus` is `null` when `mode == "individual"` and otherwise holds
-`{shifts, weights_used}`, where `weights_used` reflects the
-renormalisation applied after dropping any errored engines.
-
-Consensus example for ethanol across all three engines:
-
-```bash
-curl -X POST http://localhost:7999/predict \
-     -H "Content-Type: application/json" \
-     -d '{"smiles": "CCO", "engines": ["cdk","cascade","orca"], "mode": "consensus", "nucleus": "13C"}'
-```
-
-Phase 4:
-
-- **React + Vite frontend** ([frontend/](frontend/)) — TypeScript SPA
-  served by Vite on `:8080`, talks to the FastAPI backend on `:7999`.
-- **Explicit demo mode** — the frontend no longer fabricates chemistry
-  responses when the backend is down. If you want demo data on purpose,
-  set `VITE_NMR_ENABLE_DEMO_MODE=1`.
-- **Ketcher molecule editor** ([frontend/src/components/nmr/MoleculeEditor.tsx](frontend/src/components/nmr/MoleculeEditor.tsx))
-  — iframe-embedded Ketcher exposes a SMILES stream plus atom-click
-  events that drive the highlight pipeline below.
-- **Bare NMRIUM spectrum viewer**
-  ([frontend/src/components/nmr/NmriumBareViewer.tsx](frontend/src/components/nmr/NmriumBareViewer.tsx))
-  — composes NMRIUM's providers directly (no toolbar/panels) and feeds
-  the viewer a synthetic `Spectrum1DSource` built from the per-atom
-  shifts. The shape generator
-  ([frontend/src/lib/nmr/nmrium.ts](frontend/src/lib/nmr/nmrium.ts))
-  renders Lorentzian multiplets using backend-supplied `multiplicity`,
-  `coupling_hz`, and `neighbor_count`; widths are tuned so J ≈ 7 Hz
-  splittings resolve instead of blurring into one hump.
-- **Bidirectional atom/peak highlighting** — an `InteractionBridge`
-  inside the NMRIUM provider tree maps the pointer X-coordinate to ppm
-  using the live `xDomain`/`margin`/`width` from `useChartData()`,
-  finds the nearest signal, and drives Ketcher's
-  `editor.selection({atoms: […]})` in [frontend/src/pages/Index.tsx](frontend/src/pages/Index.tsx).
-  The inverse path — clicking an assignment card to jump to its atom —
-  works the same way. A floating tooltip over the spectrum shows δ,
-  integration, multiplicity, J, and the source engine.
-- **Double-click zoom reset** — the bridge also attaches a native
-  `dblclick` listener that dispatches `FULL_ZOOM_OUT` through the
-  NMRIUM reducer, so double-clicking anywhere in the plot resets the
-  view regardless of the current tool.
-- **CDK bootstrap** — `settings.cdk_jar_path` now defaults to
-  `backend/vendor/cdk/` and `run-nmr.bat` auto-runs
-  [backend/scripts/fetch_cdk.py](backend/scripts/fetch_cdk.py) to pull
-  `cdk-2.9.jar` from the CDK GitHub release when the folder is empty.
-  No env var required for a fresh clone; drop `nmrshiftdb2.jar` into
-  the same folder for the HOSE-code shift tables.
-- **Signal grouping + splitting summary**
-  ([frontend/src/lib/nmr/signals.ts](frontend/src/lib/nmr/signals.ts))
-  — buckets per-atom shifts by `assignment_group`/engine, then emits a
-  human-readable splitting line (e.g. `doublet: 1 neighbor (n+1 = 2
-  lines) · J ≈ 7.2 Hz`) under each signal card.
-- **ORCA Windows-path fix**
-  ([backend/app/engines/orca.py](backend/app/engines/orca.py)) — the
-  TMS subdir name is sanitised to `[A-Za-z0-9._-]` so basis strings
-  like `def2-SVP` don't produce `pbe|def2-svp_…` which Windows rejects.
-
-## Next phases (not yet implemented)
-
-- **Phase 5** — strict QM timeouts, atom-map validation across engine
-  outputs.
+This repository currently implements a local prediction workflow for `1H` and `13C` NMR, including engine comparison, weighted consensus, and an interactive viewer for inspecting predicted assignments.

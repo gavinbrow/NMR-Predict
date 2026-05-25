@@ -26,7 +26,7 @@ from app.schemas import (
     ValidationRequest,
     ValidationResponse,
 )
-from app.signal_annotations import annotate_atom_shifts
+from app.signal_annotations import annotate_atom_shifts, apply_exchangeable_proton_corrections
 
 logger = logging.getLogger(__name__)
 
@@ -161,6 +161,7 @@ def _run_engine(name: str, mol, nucleus: str, **options) -> EngineResult:
     try:
         shifts: list[AtomShift] = engine.predict(mol, nucleus, **options)
         _validate_atom_indices(name, mol.GetNumAtoms(), shifts)
+        shifts = apply_exchangeable_proton_corrections(mol, nucleus, shifts)
         shifts = annotate_atom_shifts(mol, nucleus, shifts)
         _validate_atom_indices(name, mol.GetNumAtoms(), shifts)
     except (CdkEngineError, CascadeEngineError, OrcaEngineError, ValueError):
@@ -197,9 +198,7 @@ def predict(req: PredictRequest) -> PredictResponse:
         for name in req.engines
     }
 
-    consensus = None
-    if req.mode == "consensus":
-        consensus = compute_consensus(engine_results, weights=req.weights)
+    consensus = compute_consensus(engine_results, weights=req.weights)
 
     return PredictResponse(
         canonical_smiles=canon.canonical_smiles,

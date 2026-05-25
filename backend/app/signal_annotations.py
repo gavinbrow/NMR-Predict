@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import List, Optional
+from typing import List, Optional, Sequence
 
 from rdkit import Chem
 from rdkit.Chem.rdchem import Atom, HybridizationType, Mol
@@ -18,15 +18,65 @@ _FIRST_ORDER_MULTIPLICITY = {
     6: "sept",
 }
 
+# Typical carboxylic-acid proton shift in common organic solvents.
+# Used to override engine predictions, which routinely underestimate
+# COOH shifts because trained ML models average across solvents and
+# gas-phase DFT misses H-bonding/exchange.
+_COOH_PROTON_SHIFT_PPM = 12.0
+_COOH_SMARTS = Chem.MolFromSmarts("C(=O)[OH]")
+
 
 def annotate_atom_shifts(mol: Mol, nucleus: str, shifts: List[AtomShift]) -> List[AtomShift]:
     if nucleus != "1H":
         return shifts
 
-    return [_annotate_proton_shift(mol, shift) for shift in shifts]
+    # Symmetry-equivalent atoms share a rank when breakTies=False, so protons
+    # on different heavy atoms that sit at equivalent molecular positions
+    # (e.g. the ortho-H's of a para-substituted benzene, or the two halves of
+    # a C2-symmetric molecule) collapse into a single assignment group. The
+    # frontend relies on this to merge those peaks and to highlight every
+    # equivalent heavy atom on hover.
+    ranks = list(Chem.CanonicalRankAtoms(mol, breakTies=False, includeChirality=True))
+    return [_annotate_proton_shift(mol, shift, ranks) for shift in shifts]
 
 
-def _annotate_proton_shift(mol: Mol, shift: AtomShift) -> AtomShift:
+def apply_exchangeable_proton_corrections(
+    mol: Mol, nucleus: str, shifts: List[AtomShift]
+) -> List[AtomShift]:
+    """Override engine-predicted shifts for protons that engines handle poorly.
+
+    Currently covers carboxylic-acid protons only — experimental COOH shifts
+    cluster around 11–13 ppm, but ML and gas-phase DFT models both routinely
+    predict them in the 5–7 ppm range.
+    """
+    if nucleus != "1H":
+        return shifts
+
+    cooh_proton_indices = _cooh_proton_indices(mol)
+    if not cooh_proton_indices:
+        return shifts
+
+    return [
+        shift.model_copy(update={"shift_ppm": _COOH_PROTON_SHIFT_PPM})
+        if shift.atom_index in cooh_proton_indices
+        else shift
+        for shift in shifts
+    ]
+
+
+def _cooh_proton_indices(mol: Mol) -> set[int]:
+    if _COOH_SMARTS is None:
+        return set()
+    indices: set[int] = set()
+    for match in mol.GetSubstructMatches(_COOH_SMARTS):
+        oxygen = mol.GetAtomWithIdx(match[2])
+        for neighbor in oxygen.GetNeighbors():
+            if neighbor.GetAtomicNum() == 1:
+                indices.add(neighbor.GetIdx())
+    return indices
+
+
+def _annotate_proton_shift(mol: Mol, shift: AtomShift, ranks: Sequence[int]) -> AtomShift:
     if shift.atom_index < 0 or shift.atom_index >= mol.GetNumAtoms():
         return shift
 
@@ -45,7 +95,7 @@ def _annotate_proton_shift(mol: Mol, shift: AtomShift) -> AtomShift:
     return shift.model_copy(
         update={
             "attached_atom_index": anchor.GetIdx(),
-            "assignment_group": f"h@{anchor.GetIdx()}",
+            "assignment_group": f"h_sym:{ranks[proton.GetIdx()]}",
             "multiplicity": multiplicity,
             "coupling_hz": coupling_hz,
             "neighbor_count": neighbor_count,

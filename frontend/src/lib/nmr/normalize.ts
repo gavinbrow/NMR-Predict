@@ -134,37 +134,36 @@ export function normalizePredictResponse(
     .map(([name, result]) => warningForEngine(name, result))
     .filter((warning): warning is string => Boolean(warning));
 
-  const shifts =
-    request.mode === "consensus"
-      ? (response.consensus?.shifts ?? [])
-          .filter((shift) => hasValidAtomIndices(shift, atomCount))
-          .map((shift) => toUiShift(shift, { std: shift.std_ppm ?? undefined }))
-      : engineEntries.flatMap(([name, result]) =>
-          (result.shifts ?? [])
-            .filter((shift) => hasValidAtomIndices(shift, atomCount))
-            .map((shift) => toUiShift(shift, { engine: name })),
-        );
+  const rawEngineShifts = engineEntries.flatMap(([, result]) => result.shifts ?? []);
+  const shifts = engineEntries.flatMap(([name, result]) =>
+    (result.shifts ?? [])
+      .filter((shift) => hasValidAtomIndices(shift, atomCount))
+      .map((shift) => toUiShift(shift, { engine: name })),
+  );
 
-  const droppedShiftCount =
-    (request.mode === "consensus" ? response.consensus?.shifts.length ?? 0 : engineEntries.reduce(
-      (sum, [, result]) => sum + (result.shifts?.length ?? 0),
-      0,
-    )) - shifts.length;
-  if (droppedShiftCount > 0) {
-    warnings.push(`Dropped ${droppedShiftCount} invalid engine assignment(s).`);
+  const rawConsensusShifts = response.consensus?.shifts ?? [];
+  const consensusShifts = rawConsensusShifts
+    .filter((shift) => hasValidAtomIndices(shift, atomCount))
+    .map((shift) => toUiShift(shift, { std: shift.std_ppm ?? undefined }));
+
+  const droppedCount =
+    rawEngineShifts.length + rawConsensusShifts.length - shifts.length - consensusShifts.length;
+  if (droppedCount > 0) {
+    warnings.push(`Dropped ${droppedCount} invalid engine assignment(s).`);
   }
 
   const enginesUsed =
-    request.mode === "consensus"
+    Object.keys(response.consensus?.weights_used ?? {}).length > 0
       ? Object.keys(response.consensus?.weights_used ?? {})
       : request.engines;
 
   return {
     smiles: response.canonical_smiles,
     nucleus: request.nucleus,
-    mode: request.mode,
     shifts,
+    consensusShifts,
     engines_used: enginesUsed.length > 0 ? enginesUsed : request.engines,
+    consensusWeights: response.consensus?.weights_used ?? undefined,
     warnings,
   };
 }

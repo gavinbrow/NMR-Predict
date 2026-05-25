@@ -80,7 +80,9 @@ def test_validate_rejects_oversized_smiles_payload(client):
     assert r.status_code == 422
 
 
-def test_predict_individual_mode_returns_no_consensus(client, stub_run_engine):
+def test_predict_always_returns_consensus_block(client, stub_run_engine):
+    # Consensus is always computed server-side so the UI can toggle
+    # between per-engine and mixed views without a second request.
     r = client.post(
         "/predict",
         json={
@@ -92,7 +94,7 @@ def test_predict_individual_mode_returns_no_consensus(client, stub_run_engine):
     )
     assert r.status_code == 200
     body = r.json()
-    assert body["consensus"] is None
+    assert body["consensus"] is not None
     assert "cdk" in body["engines"]
 
 

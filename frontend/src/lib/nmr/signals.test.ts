@@ -48,7 +48,7 @@ describe("deriveSignals", () => {
     expect(signals[0]).toMatchObject({
       integration: 3,
       multiplicity: "t",
-      attachedAtomIndex: 0,
+      attachedAtomIndices: [0],
       assignmentText: "H4-H6 on atom #0",
     });
     expect(signals[0].lines).toHaveLength(3);
@@ -86,6 +86,42 @@ describe("deriveSignals", () => {
     expect(signals.map((signal) => signal.sourceId)).toEqual(["component-a", "component-b"]);
   });
 
+  it("merges symmetry-equivalent protons on different anchors into a single peak", () => {
+    const signals = deriveSignals(
+      [
+        {
+          atom_index: 10,
+          shift: 6.80,
+          element: "H",
+          engine: "cascade",
+          assignment_group: "h_sym:7",
+          attached_atom_index: 2,
+          multiplicity: "d",
+          coupling_hz: 8,
+        },
+        {
+          atom_index: 11,
+          shift: 6.95,
+          element: "H",
+          engine: "cascade",
+          assignment_group: "h_sym:7",
+          attached_atom_index: 5,
+          multiplicity: "d",
+          coupling_hz: 8,
+        },
+      ],
+      "1H",
+      "individual",
+    );
+
+    expect(signals).toHaveLength(1);
+    expect(signals[0]).toMatchObject({
+      integration: 2,
+      attachedAtomIndices: [2, 5],
+    });
+    expect(signals[0].center).toBeCloseTo(6.875, 3);
+  });
+
   it("renders zero-coupling multiplets as a single line", () => {
     const signals = deriveSignals(
       [
@@ -118,6 +154,7 @@ describe("buildIntegralCurve", () => {
           center: 3.5,
           atomIndices: [1, 2],
           representativeAtomIndex: 1,
+          attachedAtomIndices: [0],
           assignmentText: "H1-H2 on atom #0",
           integration: 2,
           lines: [{ shift: 3.5, intensity: 1 }],
@@ -127,6 +164,7 @@ describe("buildIntegralCurve", () => {
           center: 1.2,
           atomIndices: [3, 4, 5],
           representativeAtomIndex: 3,
+          attachedAtomIndices: [1],
           assignmentText: "H3-H5 on atom #1",
           integration: 3,
           lines: [{ shift: 1.2, intensity: 1 }],
@@ -142,16 +180,28 @@ describe("buildIntegralCurve", () => {
 });
 
 describe("signalSelectionAtomIndices", () => {
-  it("uses the attached heavy atom for proton assignments in the editor", () => {
+  it("uses the attached heavy atoms for proton assignments in the editor", () => {
     expect(
       signalSelectionAtomIndices(
         {
           atomIndices: [4, 5, 6],
-          attachedAtomIndex: 0,
+          attachedAtomIndices: [0],
         },
         "1H",
       ),
     ).toEqual([0]);
+  });
+
+  it("returns every symmetry-equivalent anchor for a merged proton signal", () => {
+    expect(
+      signalSelectionAtomIndices(
+        {
+          atomIndices: [10, 11, 12, 13],
+          attachedAtomIndices: [2, 5],
+        },
+        "1H",
+      ),
+    ).toEqual([2, 5]);
   });
 
   it("falls back to the predicted atom indices for non-proton signals", () => {
@@ -159,6 +209,7 @@ describe("signalSelectionAtomIndices", () => {
       signalSelectionAtomIndices(
         {
           atomIndices: [2],
+          attachedAtomIndices: [],
         },
         "13C",
       ),

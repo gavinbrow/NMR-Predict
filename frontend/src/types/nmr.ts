@@ -46,17 +46,23 @@ export interface Shift {
 export interface PredictResponse {
   smiles: string;
   nucleus: Nucleus;
-  mode: Mode;
+  /** Per-engine shifts (each carries an `engine` tag). */
   shifts: Shift[];
+  /** Consensus/mixed shifts (one per atom, weighted across engines). */
+  consensusShifts: Shift[];
   engines_used: string[];
+  consensusWeights?: Record<string, number>;
   warnings?: string[];
 }
 
 export interface PredictRequest {
   smiles: string;
   engines: string[];
-  mode: Mode;
+  mode?: Mode;
   nucleus: Nucleus;
   conformer_strategy: ConformerStrategy;
+  /** Optional per-engine consensus weight overrides (matches the backend's
+   * `weights` field). The UI does not currently send these, but the type
+   * mirrors the API contract so callers/tests can supply them. */
   weights?: Record<string, number>;
 }
