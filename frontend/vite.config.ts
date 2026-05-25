@@ -13,9 +13,21 @@ export default defineConfig(({ mode }) => ({
     },
     proxy: {
       "/api": {
-        target: "http://127.0.0.1:8000",
+        target: "http://127.0.0.1:7999",
         changeOrigin: true,
       },
+    },
+  },
+  build: {
+    commonjsOptions: {
+      // Ketcher (via ketcher-core) runs `require("raphael")` guarded by
+      // `typeof window !== "undefined"`. That require lives inside an ES-module
+      // file, so without this flag Rollup leaves it untransformed and the
+      // production bundle throws "require is not defined" at load time, dropping
+      // the editor into its manual-SMILES fallback. Transforming mixed modules
+      // rewrites the require into a real import so Raphael is bundled normally.
+      // (Dev works regardless because esbuild pre-bundling shims CJS requires.)
+      transformMixedEsModules: true,
     },
   },
   plugins: [react(), mode === "development" && componentTagger()].filter(Boolean),

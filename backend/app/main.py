@@ -39,7 +39,17 @@ DEV_FRONTEND_ORIGINS = [
     "http://127.0.0.1:5173",
 ]
 
-app = FastAPI(title="NMR Predict", version="0.3.0")
+# In production (NMR_ENV=production) hide the interactive docs and the OpenAPI
+# schema so a publicly hosted instance doesn't advertise its full surface area.
+# Development leaves them enabled for convenience.
+_IS_PRODUCTION = os.getenv("NMR_ENV", "").strip().lower() == "production"
+_docs_kwargs = (
+    {"docs_url": None, "redoc_url": None, "openapi_url": None}
+    if _IS_PRODUCTION
+    else {}
+)
+
+app = FastAPI(title="NMR Predict", version="0.3.0", **_docs_kwargs)
 
 app.add_middleware(
     CORSMiddleware,

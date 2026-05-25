@@ -162,6 +162,17 @@ def _run_orca(inp_text: str, base: str, subdir: str) -> _OrcaJobResult:
     env["TEMP"] = str(tmpdir)
     env["TMP"] = str(tmpdir)
 
+    # Parallel ORCA (%pal nprocs > 1) shells out to its MPI launcher and the
+    # per-module worker binaries (orca_*_mpi), which live next to orca.exe. If
+    # the ORCA install dir isn't on PATH, ORCA can't find them and either errors
+    # out or silently falls back to a single process — so put it first on PATH.
+    orca_bin_dir = str(orca_exe.parent)
+    existing_path = env.get("PATH", "")
+    if orca_bin_dir not in existing_path.split(os.pathsep):
+        env["PATH"] = (
+            orca_bin_dir + os.pathsep + existing_path if existing_path else orca_bin_dir
+        )
+
     creationflags = 0
     popen_kwargs: dict[str, object] = {}
     if sys.platform == "win32":

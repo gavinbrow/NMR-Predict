@@ -128,7 +128,11 @@ export async function predict(req: PredictRequest, options: RequestOptions = {})
     "POST /predict",
     async () =>
       normalizePredictResponse(
-        (await api.post<PredictResponse>("/predict", req, { signal: options.signal })).data,
+        // No client-side timeout: ORCA DFT jobs can run for many minutes, well
+        // past the 20s default. The backend enforces its own ORCA timeout and
+        // the UI exposes a Cancel button (AbortController) to stop a run.
+        (await api.post<PredictResponse>("/predict", req, { signal: options.signal, timeout: 0 }))
+          .data,
         req,
       ),
     () => mockPredict(req),

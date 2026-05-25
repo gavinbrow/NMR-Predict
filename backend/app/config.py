@@ -66,7 +66,7 @@ class Settings(BaseModel):
         "ORCA_WORK_DIR",
         os.path.join(os.getcwd(), "_work", "orca"),
     )
-    orca_timeout_seconds: int = int(os.getenv("ORCA_TIMEOUT", "600"))
+    orca_timeout_seconds: int = int(os.getenv("ORCA_TIMEOUT", "1800"))
     orca_max_pending_requests: int = int(
         os.getenv("ORCA_MAX_PENDING_REQUESTS", str(DEFAULT_ORCA_MAX_PENDING_REQUESTS))
     )

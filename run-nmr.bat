@@ -109,14 +109,14 @@ exit /b 1
 
 :check_existing_backend
 set "BACKEND_STATUS=free"
-call :load_port_owner 8000
+call :load_port_owner 7999
 if not defined PORT_OWNER_PID goto :eof
 
 set "BACKEND_STATUS=busy"
 echo(%PORT_OWNER_CMDLINE%| findstr /I /C:"uvicorn app.main:app" >nul
 if errorlevel 1 goto :eof
 
-powershell -NoProfile -Command "try { $content = (Invoke-WebRequest -UseBasicParsing http://127.0.0.1:8000/health -TimeoutSec 2).Content; if ($content -match '\"status\"\s*:\s*\"ok\"') { exit 0 } } catch {}; exit 1" >nul 2>nul
+powershell -NoProfile -Command "try { $content = (Invoke-WebRequest -UseBasicParsing http://127.0.0.1:7999/health -TimeoutSec 2).Content; if ($content -match '\"status\"\s*:\s*\"ok\"') { exit 0 } } catch {}; exit 1" >nul 2>nul
 if errorlevel 1 goto :eof
 
 set "BACKEND_STATUS=reuse"
@@ -177,7 +177,7 @@ call :ensure_backend_dependencies
 if errorlevel 1 exit /b %errorlevel%
 call :check_existing_backend
 if /I "%BACKEND_STATUS%"=="busy" (
-    call :show_port_conflict 8000 backend
+    call :show_port_conflict 7999 backend
     exit /b 1
 )
 call :check_existing_frontend
@@ -191,16 +191,16 @@ if /I not "%BACKEND_STATUS%"=="reuse" (
     call :ensure_cdk_bundle
     if errorlevel 1 exit /b %errorlevel%
     echo Using backend Python: %BACKEND_PY_CMD%
-    start "NMR Backend" cmd /k "cd /d ""%ROOT%backend"" && %BACKEND_PY_CMD% -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8000"
+    start "NMR Backend" cmd /k "cd /d ""%ROOT%backend"" && %BACKEND_PY_CMD% -m uvicorn app.main:app --reload --host 127.0.0.1 --port 7999"
 ) else (
-    echo Backend already running on http://127.0.0.1:8000
+    echo Backend already running on http://127.0.0.1:7999
 )
 if /I not "%FRONTEND_STATUS%"=="reuse" (
     start "NMR Frontend" cmd /k "cd /d ""%ROOT%frontend"" && npm run dev -- --host 127.0.0.1 --port 8080"
 ) else (
     echo Frontend already running on http://127.0.0.1:8080
 )
-echo Backend:  http://127.0.0.1:8000
+echo Backend:  http://127.0.0.1:7999
 echo Frontend: http://127.0.0.1:8080
 goto :eof
 
@@ -209,7 +209,7 @@ call :detect_backend_python
 if errorlevel 1 exit /b %errorlevel%
 call :ensure_backend_dependencies
 if errorlevel 1 exit /b %errorlevel%
-call :ensure_port_free 8000 backend
+call :ensure_port_free 7999 backend
 if errorlevel 1 exit /b %errorlevel%
 call :ensure_java_runtime
 if errorlevel 1 exit /b %errorlevel%
@@ -217,7 +217,7 @@ call :ensure_cdk_bundle
 if errorlevel 1 exit /b %errorlevel%
 echo Using backend Python: %BACKEND_PY_CMD%
 cd /d "%ROOT%backend"
-%BACKEND_PY_CMD% -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
+%BACKEND_PY_CMD% -m uvicorn app.main:app --reload --host 127.0.0.1 --port 7999
 goto :eof
 
 :run_frontend
@@ -232,7 +232,7 @@ call :detect_backend_python
 if errorlevel 1 exit /b %errorlevel%
 call :ensure_backend_dependencies
 if errorlevel 1 exit /b %errorlevel%
-call :ensure_port_free 8000 combined server
+call :ensure_port_free 7999 combined server
 if errorlevel 1 exit /b %errorlevel%
 call :ensure_java_runtime
 if errorlevel 1 exit /b %errorlevel%
@@ -243,15 +243,15 @@ cd /d "%ROOT%frontend"
 call npm run build
 if errorlevel 1 exit /b %errorlevel%
 cd /d "%ROOT%backend"
-echo Serving the built frontend and API from http://127.0.0.1:8000
-%BACKEND_PY_CMD% -m uvicorn app.main:app --host 127.0.0.1 --port 8000
+echo Serving the built frontend and API from http://127.0.0.1:7999
+%BACKEND_PY_CMD% -m uvicorn app.main:app --host 127.0.0.1 --port 7999
 goto :eof
 
 :usage
 echo Usage:
 echo   run-nmr.bat           ^(same as: run-nmr.bat all^)
 echo   run-nmr.bat all       Start backend and frontend dev servers in separate windows
-echo   run-nmr.bat backend   Start only the FastAPI backend on port 8000
+echo   run-nmr.bat backend   Start only the FastAPI backend on port 7999
 echo   run-nmr.bat frontend  Start only the Vite frontend on port 8080
-echo   run-nmr.bat serve     Build the frontend, then serve frontend + API from FastAPI on port 8000
+echo   run-nmr.bat serve     Build the frontend, then serve frontend + API from FastAPI on port 7999
 exit /b 1

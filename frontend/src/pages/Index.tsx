@@ -68,8 +68,8 @@ const Index = () => {
   const [engines, setEngines] = useState<Engine[]>([]);
 
   const [smiles, setSmiles] = useState("");
-  const [nucleus, setNucleus] = useState("13C");
-  const [mode, setMode] = useState<Mode>("consensus");
+  const [nucleus, setNucleus] = useState("1H");
+  const [mode, setMode] = useState<Mode>("individual");
   const [conformerStrategy, setConformerStrategy] = useState("fast");
   const [selectedEngines, setSelectedEngines] = useState<string[]>([]);
   const [weights, setWeights] = useState<Record<string, number>>({});
@@ -148,11 +148,11 @@ const Index = () => {
         setMocked(health.mocked || opts.mocked || eng.mocked);
 
         const firstNucleus =
-          opts.data.nuclei.includes("13C") ? "13C" : opts.data.nuclei[0] ?? "13C";
+          opts.data.nuclei.includes("1H") ? "1H" : opts.data.nuclei[0] ?? "1H";
         const firstMode =
-          opts.data.modes.includes("consensus")
-            ? "consensus"
-            : (opts.data.modes[0] as Mode) ?? "consensus";
+          opts.data.modes.includes("individual")
+            ? "individual"
+            : (opts.data.modes[0] as Mode) ?? "individual";
         const firstStrategy =
           opts.data.conformer_strategies.includes("fast")
             ? "fast"

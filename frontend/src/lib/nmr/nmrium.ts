@@ -4,7 +4,7 @@ import type { Mode, Nucleus, Shift } from "@/types/nmr";
 import { deriveSignals } from "./signals";
 
 const DEFAULT_DOMAIN_PPM: Record<string, [number, number]> = {
-  "1H": [0, 12],
+  "1H": [-1, 12],
   "13C": [0, 220],
   "15N": [-50, 450],
   "19F": [-260, 80],
@@ -95,10 +95,6 @@ function groupShiftsByEngine(shifts: Shift[]) {
   return [...grouped.entries()];
 }
 
-function clamp(value: number, lower: number, upper: number) {
-  return Math.min(upper, Math.max(lower, value));
-}
-
 function getSharedDomain(signals: ReturnType<typeof deriveSignals>, nucleus: Nucleus): [number, number] {
   const fallback = DEFAULT_DOMAIN_PPM[nucleus] ?? [0, 200];
   const linePositions = signals.flatMap((signal) => signal.lines.map((line) => line.shift));
@@ -111,9 +107,10 @@ function getSharedDomain(signals: ReturnType<typeof deriveSignals>, nucleus: Nuc
   const maxLine = Math.max(...linePositions);
   const margin = nucleus === "1H" ? 0.9 : 8;
 
+  // Always show the full default range; only expand outward if peaks fall outside it.
   return [
-    clamp(minLine - margin, fallback[0], fallback[1]),
-    clamp(maxLine + margin, fallback[0], fallback[1]),
+    Math.min(fallback[0], minLine - margin),
+    Math.max(fallback[1], maxLine + margin),
   ];
 }
 

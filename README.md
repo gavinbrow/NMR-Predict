@@ -32,10 +32,31 @@ run-nmr.bat serve
 ```
 
 - `all` starts backend and frontend dev servers in separate windows.
-- `backend` starts only FastAPI on `http://127.0.0.1:8000`.
+- `backend` starts only FastAPI on `http://127.0.0.1:7999`.
 - `frontend` starts only Vite on `http://127.0.0.1:8080`.
 - `serve` builds the frontend and serves both the SPA and API from FastAPI on
-  `http://127.0.0.1:8000`.
+  `http://127.0.0.1:7999`.
+
+### Production / public hosting
+
+```bat
+run-production.bat
+```
+
+`run-production.bat` builds the frontend and serves the SPA + API from a single
+uvicorn process on `0.0.0.0:7999` — reachable from other machines, not just
+localhost. It runs without `--reload`, refuses to start if the port is busy or
+the build is missing, and sets `NMR_ENV=production` so the interactive API docs
+(`/docs`, `/redoc`, `/openapi.json`) are disabled. It runs in the foreground;
+close the window or press Ctrl+C to stop.
+
+> The service has **no built-in authentication** — anyone who can reach the port
+> can submit prediction jobs (and ORCA DFT jobs, if ORCA is installed). Before
+> exposing it to the open internet, open the Windows Firewall for the port and
+> consider a reverse proxy (nginx / Caddy / Cloudflare Tunnel) for HTTPS and
+> rate limiting. To keep it local-only instead, set `BIND_HOST=127.0.0.1` at the
+> top of the script. The startup banner prints these notes and the firewall
+> command.
 
 Phase 1 (complete):
 
@@ -93,7 +114,7 @@ cd backend
 python -m venv .venv
 .venv\Scripts\activate            # Windows
 pip install -r requirements.txt
-uvicorn app.main:app --reload --port 8000
+uvicorn app.main:app --reload --port 7999
 ```
 
 `backend/requirements.txt` is now a compiled lockfile with exact versions
@@ -110,7 +131,7 @@ pytest
 Sanity check:
 
 ```bash
-curl -X POST http://localhost:8000/validate \
+curl -X POST http://localhost:7999/validate \
      -H "Content-Type: application/json" \
      -d '{"smiles": "c1ccccc1"}'
 ```
@@ -149,7 +170,7 @@ the same folder.
 Predict for ethanol:
 
 ```bash
-curl -X POST http://localhost:8000/predict \
+curl -X POST http://localhost:7999/predict \
      -H "Content-Type: application/json" \
      -d '{"smiles": "CCO", "engines": ["cdk"], "nucleus": "13C"}'
 ```
@@ -186,7 +207,7 @@ pytest tests/test_cascade_engine.py -v
 Predict for ethanol via the API:
 
 ```bash
-curl -X POST http://localhost:8000/predict \
+curl -X POST http://localhost:7999/predict \
      -H "Content-Type: application/json" \
      -d '{"smiles": "CCO", "engines": ["cascade"], "nucleus": "1H"}'
 ```
@@ -237,7 +258,7 @@ predictions at the same level of theory skip TMS entirely.
 Predict for ethanol via the API:
 
 ```bash
-curl -X POST http://localhost:8000/predict \
+curl -X POST http://localhost:7999/predict \
      -H "Content-Type: application/json" \
      -d '{"smiles": "CCO", "engines": ["orca"], "nucleus": "13C", "conformer_strategy": "fast"}'
 ```
@@ -322,7 +343,7 @@ renormalisation applied after dropping any errored engines.
 Consensus example for ethanol across all three engines:
 
 ```bash
-curl -X POST http://localhost:8000/predict \
+curl -X POST http://localhost:7999/predict \
      -H "Content-Type: application/json" \
      -d '{"smiles": "CCO", "engines": ["cdk","cascade","orca"], "mode": "consensus", "nucleus": "13C"}'
 ```
@@ -330,7 +351,7 @@ curl -X POST http://localhost:8000/predict \
 Phase 4:
 
 - **React + Vite frontend** ([frontend/](frontend/)) — TypeScript SPA
-  served by Vite on `:8080`, talks to the FastAPI backend on `:8000`.
+  served by Vite on `:8080`, talks to the FastAPI backend on `:7999`.
 - **Explicit demo mode** — the frontend no longer fabricates chemistry
   responses when the backend is down. If you want demo data on purpose,
   set `VITE_NMR_ENABLE_DEMO_MODE=1`.
