@@ -1,0 +1,457 @@
+{
+  "schema_version": 1,
+  "notes": "group_smarts anchors on a heavy atom (the first SMARTS atom). For 13C the anchor carbon is scored; for 1H the hydrogens bonded to the anchor are scored. Equivalent atoms matched by one pattern are averaged into a single data point. ppm values are standard literature/textbook values (SDBS, Pretsch 'Structure Determination of Organic Compounds', nmrshiftdb2) in CDCl3 unless noted; treat as ~+/-0.5 ppm (1H) / ~+/-2 ppm (13C) reference-quality, not certified.",
+  "molecules": [
+    {
+      "id": "methane", "name": "Methane", "smiles": "C", "scenario": "aliphatic",
+      "solvent": "gas/CDCl3", "source": "Pretsch tables",
+      "shifts": {
+        "13C": [{"group_smarts": "[CH4]", "ppm": -2.3}],
+        "1H": [{"group_smarts": "[CH4]", "ppm": 0.23}]
+      }
+    },
+    {
+      "id": "ethane", "name": "Ethane", "smiles": "CC", "scenario": "aliphatic",
+      "solvent": "CDCl3", "source": "Pretsch tables",
+      "shifts": {
+        "13C": [{"group_smarts": "[CH3]", "ppm": 5.7}],
+        "1H": [{"group_smarts": "[CH3]", "ppm": 0.86}]
+      }
+    },
+    {
+      "id": "cyclohexane", "name": "Cyclohexane", "smiles": "C1CCCCC1", "scenario": "aliphatic",
+      "solvent": "CDCl3", "source": "Pretsch tables",
+      "shifts": {
+        "13C": [{"group_smarts": "[CH2]", "ppm": 27.0}],
+        "1H": [{"group_smarts": "[CH2]", "ppm": 1.43}]
+      }
+    },
+    {
+      "id": "ethanol", "name": "Ethanol", "smiles": "CCO", "scenario": "aliphatic",
+      "solvent": "CDCl3", "source": "SDBS / standard tables",
+      "shifts": {
+        "13C": [
+          {"group_smarts": "[CH3]", "ppm": 18.4},
+          {"group_smarts": "[CH2][OH]", "ppm": 58.0}
+        ],
+        "1H": [
+          {"group_smarts": "[CH3]", "ppm": 1.18},
+          {"group_smarts": "[CH2][OH]", "ppm": 3.69},
+          {"group_smarts": "[OH]", "ppm": 2.6, "exchangeable": true}
+        ]
+      }
+    },
+    {
+      "id": "isopropanol", "name": "Isopropanol", "smiles": "CC(C)O", "scenario": "aliphatic",
+      "solvent": "CDCl3", "source": "SDBS / standard tables",
+      "shifts": {
+        "13C": [
+          {"group_smarts": "[CH3]", "ppm": 25.3},
+          {"group_smarts": "[CH1][OH]", "ppm": 64.0}
+        ],
+        "1H": [
+          {"group_smarts": "[CH3]", "ppm": 1.18},
+          {"group_smarts": "[CH1][OH]", "ppm": 4.01},
+          {"group_smarts": "[OH]", "ppm": 2.2, "exchangeable": true}
+        ]
+      }
+    },
+    {
+      "id": "tert_butanol", "name": "tert-Butanol", "smiles": "CC(C)(C)O", "scenario": "aliphatic",
+      "solvent": "CDCl3", "source": "SDBS / standard tables",
+      "shifts": {
+        "13C": [
+          {"group_smarts": "[CH3]", "ppm": 31.2},
+          {"group_smarts": "[CX4]([CH3])([CH3])([CH3])[OH]", "ppm": 69.0}
+        ],
+        "1H": [
+          {"group_smarts": "[CH3]", "ppm": 1.22},
+          {"group_smarts": "[OH]", "ppm": 2.2, "exchangeable": true}
+        ]
+      }
+    },
+    {
+      "id": "neopentane", "name": "Neopentane", "smiles": "CC(C)(C)C", "scenario": "aliphatic",
+      "solvent": "CDCl3", "source": "Pretsch tables",
+      "shifts": {
+        "13C": [
+          {"group_smarts": "[CH3]", "ppm": 31.7},
+          {"group_smarts": "[CX4]([CH3])([CH3])([CH3])[CH3]", "ppm": 27.9}
+        ],
+        "1H": [{"group_smarts": "[CH3]", "ppm": 0.92}]
+      }
+    },
+
+    {
+      "id": "benzene", "name": "Benzene", "smiles": "c1ccccc1", "scenario": "aromatic",
+      "solvent": "CDCl3", "source": "standard tables",
+      "shifts": {
+        "13C": [{"group_smarts": "[cH]", "ppm": 128.5}],
+        "1H": [{"group_smarts": "[cH]", "ppm": 7.26}]
+      }
+    },
+    {
+      "id": "p_xylene", "name": "p-Xylene", "smiles": "Cc1ccc(C)cc1", "scenario": "aromatic",
+      "solvent": "CDCl3", "source": "SDBS / standard tables",
+      "shifts": {
+        "13C": [
+          {"group_smarts": "[CH3]", "ppm": 20.9},
+          {"group_smarts": "[cH]", "ppm": 129.0},
+          {"group_smarts": "[c]([CH3])", "ppm": 134.7}
+        ],
+        "1H": [
+          {"group_smarts": "[CH3]", "ppm": 2.30},
+          {"group_smarts": "[cH]", "ppm": 7.05}
+        ]
+      }
+    },
+    {
+      "id": "mesitylene", "name": "Mesitylene", "smiles": "Cc1cc(C)cc(C)c1", "scenario": "aromatic",
+      "solvent": "CDCl3", "source": "SDBS / standard tables",
+      "shifts": {
+        "13C": [
+          {"group_smarts": "[CH3]", "ppm": 21.2},
+          {"group_smarts": "[cH]", "ppm": 126.2},
+          {"group_smarts": "[c]([CH3])", "ppm": 137.6}
+        ],
+        "1H": [
+          {"group_smarts": "[CH3]", "ppm": 2.25},
+          {"group_smarts": "[cH]", "ppm": 6.78}
+        ]
+      }
+    },
+    {
+      "id": "pyridine", "name": "Pyridine", "smiles": "c1ccncc1", "scenario": "aromatic",
+      "solvent": "CDCl3", "source": "standard tables",
+      "shifts": {
+        "13C": [
+          {"group_smarts": "[cH]n", "ppm": 149.9},
+          {"group_smarts": "[cH]cn", "ppm": 123.8},
+          {"group_smarts": "[cH]ccn", "ppm": 136.0}
+        ],
+        "1H": [
+          {"group_smarts": "[cH]n", "ppm": 8.60},
+          {"group_smarts": "[cH]cn", "ppm": 7.25},
+          {"group_smarts": "[cH]ccn", "ppm": 7.65}
+        ]
+      }
+    },
+    {
+      "id": "naphthalene", "name": "Naphthalene", "smiles": "c1ccc2ccccc2c1", "scenario": "aromatic",
+      "solvent": "CDCl3", "source": "standard tables",
+      "shifts": {
+        "13C": [
+          {"group_smarts": "[cH][cH0]", "ppm": 127.9},
+          {"group_smarts": "[cH]([cH])[cH]", "ppm": 125.8},
+          {"group_smarts": "[cH0]", "ppm": 133.5}
+        ],
+        "1H": [
+          {"group_smarts": "[cH][cH0]", "ppm": 7.84},
+          {"group_smarts": "[cH]([cH])[cH]", "ppm": 7.46}
+        ]
+      }
+    },
+
+    {
+      "id": "acetone", "name": "Acetone", "smiles": "CC(C)=O", "scenario": "carbonyl",
+      "solvent": "CDCl3", "source": "standard tables",
+      "shifts": {
+        "13C": [
+          {"group_smarts": "[CH3]", "ppm": 30.9},
+          {"group_smarts": "[CX3]=O", "ppm": 206.0}
+        ],
+        "1H": [{"group_smarts": "[CH3]", "ppm": 2.17}]
+      }
+    },
+    {
+      "id": "acetaldehyde", "name": "Acetaldehyde", "smiles": "CC=O", "scenario": "carbonyl",
+      "solvent": "CDCl3", "source": "standard tables",
+      "shifts": {
+        "13C": [
+          {"group_smarts": "[CH3]", "ppm": 30.9},
+          {"group_smarts": "[CX3H1]=O", "ppm": 199.6}
+        ],
+        "1H": [
+          {"group_smarts": "[CH3]", "ppm": 2.20},
+          {"group_smarts": "[CX3H1]=O", "ppm": 9.79}
+        ]
+      }
+    },
+    {
+      "id": "ethyl_acetate", "name": "Ethyl acetate", "smiles": "CC(=O)OCC", "scenario": "carbonyl",
+      "solvent": "CDCl3", "source": "SDBS / standard tables",
+      "shifts": {
+        "13C": [
+          {"group_smarts": "[CH3]C(=O)O", "ppm": 21.0},
+          {"group_smarts": "[CX3](=O)O", "ppm": 171.0},
+          {"group_smarts": "[CH2]OC=O", "ppm": 60.5},
+          {"group_smarts": "[CH3][CH2]O", "ppm": 14.2}
+        ],
+        "1H": [
+          {"group_smarts": "[CH3]C(=O)O", "ppm": 2.04},
+          {"group_smarts": "[CH2]OC=O", "ppm": 4.12},
+          {"group_smarts": "[CH3][CH2]O", "ppm": 1.26}
+        ]
+      }
+    },
+    {
+      "id": "benzaldehyde", "name": "Benzaldehyde", "smiles": "O=Cc1ccccc1", "scenario": "carbonyl",
+      "solvent": "CDCl3", "source": "standard tables",
+      "shifts": {
+        "13C": [{"group_smarts": "[CX3H1]=O", "ppm": 192.4}],
+        "1H": [{"group_smarts": "[CX3H1]=O", "ppm": 9.99}]
+      }
+    },
+    {
+      "id": "dmf", "name": "N,N-Dimethylformamide", "smiles": "CN(C)C=O", "scenario": "carbonyl",
+      "solvent": "CDCl3", "source": "standard tables",
+      "shifts": {
+        "13C": [{"group_smarts": "[CX3H1]=O", "ppm": 162.6}],
+        "1H": [{"group_smarts": "[CX3H1]=O", "ppm": 8.02}]
+      }
+    },
+
+    {
+      "id": "acetic_acid", "name": "Acetic acid", "smiles": "CC(=O)O", "scenario": "carboxylic_acid",
+      "solvent": "CDCl3", "source": "standard tables",
+      "shifts": {
+        "13C": [
+          {"group_smarts": "[CH3]", "ppm": 20.8},
+          {"group_smarts": "[CX3](=O)[OH]", "ppm": 178.1}
+        ],
+        "1H": [
+          {"group_smarts": "[CH3]", "ppm": 2.10},
+          {"group_smarts": "[OX2H][CX3]=O", "ppm": 11.4, "exchangeable": true}
+        ]
+      }
+    },
+    {
+      "id": "formic_acid", "name": "Formic acid", "smiles": "OC=O", "scenario": "carboxylic_acid",
+      "solvent": "CDCl3", "source": "standard tables",
+      "shifts": {
+        "13C": [{"group_smarts": "[CX3H1](=O)[OH]", "ppm": 166.3}],
+        "1H": [
+          {"group_smarts": "[CX3H1](=O)[OH]", "ppm": 8.08},
+          {"group_smarts": "[OX2H][CX3]=O", "ppm": 11.0, "exchangeable": true}
+        ]
+      }
+    },
+    {
+      "id": "benzoic_acid", "name": "Benzoic acid", "smiles": "OC(=O)c1ccccc1", "scenario": "carboxylic_acid",
+      "solvent": "CDCl3", "source": "standard tables",
+      "shifts": {
+        "13C": [{"group_smarts": "[CX3](=O)[OH]", "ppm": 172.6}],
+        "1H": [{"group_smarts": "[OX2H][CX3]=O", "ppm": 12.0, "exchangeable": true}]
+      }
+    },
+
+    {
+      "id": "chloroform", "name": "Chloroform", "smiles": "C(Cl)(Cl)Cl", "scenario": "heteroatom_halogen",
+      "solvent": "CDCl3", "source": "standard tables",
+      "shifts": {
+        "13C": [{"group_smarts": "[CX4H1](Cl)(Cl)Cl", "ppm": 77.7}],
+        "1H": [{"group_smarts": "[CX4H1](Cl)(Cl)Cl", "ppm": 7.26}]
+      }
+    },
+    {
+      "id": "dichloromethane", "name": "Dichloromethane", "smiles": "ClCCl", "scenario": "heteroatom_halogen",
+      "solvent": "CDCl3", "source": "standard tables",
+      "shifts": {
+        "13C": [{"group_smarts": "[CH2](Cl)Cl", "ppm": 53.5}],
+        "1H": [{"group_smarts": "[CH2](Cl)Cl", "ppm": 5.30}]
+      }
+    },
+    {
+      "id": "methanol", "name": "Methanol", "smiles": "CO", "scenario": "heteroatom_halogen",
+      "solvent": "CDCl3", "source": "standard tables",
+      "shifts": {
+        "13C": [{"group_smarts": "[CH3]O", "ppm": 50.4}],
+        "1H": [
+          {"group_smarts": "[CH3]O", "ppm": 3.40},
+          {"group_smarts": "[OH]", "ppm": 2.0, "exchangeable": true}
+        ]
+      }
+    },
+    {
+      "id": "acetonitrile", "name": "Acetonitrile", "smiles": "CC#N", "scenario": "heteroatom_halogen",
+      "solvent": "CDCl3", "source": "standard tables",
+      "shifts": {
+        "13C": [
+          {"group_smarts": "[CH3]C#N", "ppm": 1.3},
+          {"group_smarts": "[CX2]#N", "ppm": 117.7}
+        ],
+        "1H": [{"group_smarts": "[CH3]C#N", "ppm": 2.00}]
+      }
+    },
+    {
+      "id": "dmso", "name": "Dimethyl sulfoxide", "smiles": "CS(C)=O", "scenario": "heteroatom_halogen",
+      "solvent": "CDCl3", "source": "standard tables",
+      "shifts": {
+        "13C": [{"group_smarts": "[CH3]", "ppm": 40.5}],
+        "1H": [{"group_smarts": "[CH3]", "ppm": 2.50}]
+      }
+    },
+    {
+      "id": "iodomethane", "name": "Iodomethane", "smiles": "CI", "scenario": "heteroatom_halogen",
+      "solvent": "CDCl3", "source": "standard tables",
+      "shifts": {
+        "13C": [{"group_smarts": "[CH3]I", "ppm": -20.7}],
+        "1H": [{"group_smarts": "[CH3]I", "ppm": 2.16}]
+      }
+    },
+
+    {
+      "id": "ethylene", "name": "Ethylene", "smiles": "C=C", "scenario": "conjugated_strained",
+      "solvent": "CDCl3", "source": "standard tables",
+      "shifts": {
+        "13C": [{"group_smarts": "[CH2]=[CH2]", "ppm": 123.3}],
+        "1H": [{"group_smarts": "[CH2]=[CH2]", "ppm": 5.40}]
+      }
+    },
+    {
+      "id": "acetylene", "name": "Acetylene", "smiles": "C#C", "scenario": "conjugated_strained",
+      "solvent": "CDCl3", "source": "standard tables",
+      "shifts": {
+        "13C": [{"group_smarts": "[CH1]#[CH1]", "ppm": 71.9}],
+        "1H": [{"group_smarts": "[CH1]#[CH1]", "ppm": 1.80}]
+      }
+    },
+    {
+      "id": "cyclopropane", "name": "Cyclopropane", "smiles": "C1CC1", "scenario": "conjugated_strained",
+      "solvent": "CDCl3", "source": "standard tables",
+      "shifts": {
+        "13C": [{"group_smarts": "[CH2]", "ppm": -2.8}],
+        "1H": [{"group_smarts": "[CH2]", "ppm": 0.22}]
+      }
+    },
+    {
+      "id": "styrene", "name": "Styrene", "smiles": "C=Cc1ccccc1", "scenario": "conjugated_strained",
+      "solvent": "CDCl3", "source": "standard tables",
+      "shifts": {
+        "13C": [
+          {"group_smarts": "[CH2]=[CH]", "ppm": 113.2},
+          {"group_smarts": "[CH1](=[CH2])c", "ppm": 136.9}
+        ],
+        "1H": [
+          {"group_smarts": "[CH1](=[CH2])c", "ppm": 6.72}
+        ]
+      }
+    },
+    {
+      "id": "furan", "name": "Furan", "smiles": "c1ccoc1", "scenario": "conjugated_strained",
+      "solvent": "CDCl3", "source": "standard tables",
+      "shifts": {
+        "13C": [
+          {"group_smarts": "[cH]o", "ppm": 142.7},
+          {"group_smarts": "[cH]co", "ppm": 109.6}
+        ],
+        "1H": [
+          {"group_smarts": "[cH]o", "ppm": 7.42},
+          {"group_smarts": "[cH]co", "ppm": 6.37}
+        ]
+      }
+    },
+
+    {
+      "id": "adamantane", "name": "Adamantane", "smiles": "C1C2CC3CC1CC(C2)C3", "scenario": "larger",
+      "heavy_atoms": 10, "solvent": "CDCl3", "source": "standard tables",
+      "shifts": {
+        "13C": [
+          {"group_smarts": "[CX4H2]", "ppm": 37.8},
+          {"group_smarts": "[CX4H1]", "ppm": 28.3}
+        ],
+        "1H": [
+          {"group_smarts": "[CX4H2]", "ppm": 1.72},
+          {"group_smarts": "[CX4H1]", "ppm": 2.03}
+        ]
+      }
+    },
+    {
+      "id": "camphor", "name": "(+)-Camphor", "smiles": "CC1(C)C2CCC1(C)C(=O)C2", "scenario": "larger",
+      "heavy_atoms": 11, "solvent": "CDCl3", "source": "standard tables",
+      "shifts": {
+        "13C": [{"group_smarts": "[CX3]=O", "ppm": 217.9}]
+      }
+    },
+    {
+      "id": "menthol", "name": "(-)-Menthol", "smiles": "CC(C)C1CCC(C)CC1O", "scenario": "larger",
+      "heavy_atoms": 11, "solvent": "CDCl3", "source": "standard tables",
+      "shifts": {
+        "13C": [{"group_smarts": "[CX4H1][OH]", "ppm": 71.5}],
+        "1H": [{"group_smarts": "[OH]", "ppm": 1.6, "exchangeable": true}]
+      }
+    },
+    {
+      "id": "caffeine", "name": "Caffeine", "smiles": "Cn1cnc2c1c(=O)n(C)c(=O)n2C", "scenario": "larger",
+      "heavy_atoms": 14, "solvent": "CDCl3", "source": "standard tables",
+      "shifts": {
+        "13C": [{"group_smarts": "[cH]", "ppm": 141.6}],
+        "1H": [{"group_smarts": "[cH]", "ppm": 7.51}]
+      }
+    },
+    {
+      "id": "ibuprofen", "name": "Ibuprofen", "smiles": "CC(C)Cc1ccc(C(C)C(=O)O)cc1", "scenario": "larger",
+      "heavy_atoms": 15, "solvent": "CDCl3", "source": "standard tables",
+      "shifts": {
+        "13C": [
+          {"group_smarts": "[CX3](=O)[OH]", "ppm": 180.6},
+          {"group_smarts": "[CH3]C([CH3])C", "ppm": 22.4}
+        ],
+        "1H": [
+          {"group_smarts": "[CH3]C([CH3])C", "ppm": 0.89},
+          {"group_smarts": "[OX2H][CX3]=O", "ppm": 11.5, "exchangeable": true}
+        ]
+      }
+    },
+    {
+      "id": "anthracene", "name": "Anthracene", "smiles": "c1ccc2cc3ccccc3cc2c1", "scenario": "larger",
+      "heavy_atoms": 14, "solvent": "CDCl3", "source": "standard tables",
+      "shifts": {
+        "13C": [
+          {"group_smarts": "[cH]([cH0])[cH0]", "ppm": 126.4},
+          {"group_smarts": "[cH]([cH0])[cH]", "ppm": 128.4},
+          {"group_smarts": "[cH]([cH])[cH]", "ppm": 125.5},
+          {"group_smarts": "[cH0]", "ppm": 131.9}
+        ],
+        "1H": [
+          {"group_smarts": "[cH]([cH0])[cH0]", "ppm": 8.43},
+          {"group_smarts": "[cH]([cH0])[cH]", "ppm": 8.01},
+          {"group_smarts": "[cH]([cH])[cH]", "ppm": 7.46}
+        ]
+      }
+    },
+    {
+      "id": "testosterone", "name": "Testosterone", "smiles": "CC12CCC3C(CCC4=CC(=O)CCC34C)C1CCC2O", "scenario": "larger",
+      "heavy_atoms": 21, "solvent": "CDCl3", "source": "standard tables / SDBS",
+      "shifts": {
+        "13C": [
+          {"group_smarts": "[CX3]=O", "ppm": 199.4},
+          {"group_smarts": "[CX3H0]=[CX3H1]", "ppm": 171.2},
+          {"group_smarts": "[CX3H1]=[CX3]", "ppm": 123.8},
+          {"group_smarts": "[CX4H1][OH]", "ppm": 81.6}
+        ],
+        "1H": [
+          {"group_smarts": "[CX3H1]=[CX3]", "ppm": 5.72},
+          {"group_smarts": "[CX4H1][OH]", "ppm": 3.65},
+          {"group_smarts": "[OH]", "ppm": 1.6, "exchangeable": true}
+        ]
+      }
+    },
+    {
+      "id": "cholesterol", "name": "Cholesterol", "smiles": "CC(C)CCCC(C)C1CCC2C1(CCC3C2CC=C4C3(CCC(C4)O)C)C", "scenario": "larger",
+      "heavy_atoms": 28, "solvent": "CDCl3", "source": "standard tables",
+      "shifts": {
+        "13C": [
+          {"group_smarts": "[CX3H0]=[CX3H1]", "ppm": 140.8},
+          {"group_smarts": "[CX3H1]=[CX3]", "ppm": 121.7},
+          {"group_smarts": "[CX4H1][OH]", "ppm": 71.8}
+        ],
+        "1H": [
+          {"group_smarts": "[CX3H1]=[CX3]", "ppm": 5.35},
+          {"group_smarts": "[CX4H1][OH]", "ppm": 3.52},
+          {"group_smarts": "[OH]", "ppm": 1.6, "exchangeable": true}
+        ]
+      }
+    }
+  ]
+}

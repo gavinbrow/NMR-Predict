@@ -29,4 +29,6 @@ frontend/*.log
 frontend/*.tgz
 
 backend/.pytest_cache/
-backend/_work/
+
+# Benchmark reports — keep the dir (.gitkeep) but ignore generated output.
+

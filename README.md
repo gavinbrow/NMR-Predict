@@ -241,6 +241,42 @@ Some live engine tests are conditional:
 - CASCADE live tests require the model assets to be present
 - ORCA live tests require both ORCA to be installed and `RUN_ORCA_TESTS=1`
 
+### Accuracy benchmarks
+
+A standalone harness in `backend/benchmarks/` measures how accurate each engine
+is against a curated literature dataset (`benchmarks/data/reference_shifts.json`,
+~39 molecules across chemical-environment scenarios, including a `larger` bucket —
+anthracene, testosterone, cholesterol, etc. — that exercises ORCA size-scaling),
+and sweeps ORCA functional / basis levels of theory on a cheap→expensive ladder.
+Run from `backend/`:
+
+```powershell
+# Validate the dataset (canonicalize + SMARTS resolution)
+python -m benchmarks.cli --validate-dataset
+
+# Compare available engines on every scenario, both nuclei. Writes a report
+# trio (.md + .csv + .html) into benchmarks/reports/. Unready engines are
+# skipped, not errored.
+python -m benchmarks.cli --engines cdk cascade orca --nucleus 13C 1H
+
+# Print the ORCA level-of-theory ladder (relative speed + pros/cons table)
+python -m benchmarks.cli ladder
+
+# ORCA functional/basis sweep over the cheap end of the ladder (needs ORCA)
+python -m benchmarks.cli orca-sweep --levels 1 2 3 --scenario aliphatic
+```
+
+Each run writes three files into `benchmarks/reports/` sharing one basename
+(override with `--basename`, otherwise timestamped): a Markdown report, a raw
+per-group CSV, and a **standalone styled HTML report** you can open directly in
+a browser. All three break accuracy down per scenario and per nucleus (MAE /
+RMSE / max error / bias / R², plus a bias-removed "scaled MAE" and a
+worst-offenders list).
+A pytest gate (`tests/test_benchmark_accuracy.py`) asserts per-engine MAE stays
+under calibrated thresholds; it skips engines that aren't installed, and ORCA
+accuracy assertions are gated behind `RUN_ORCA_TESTS=1` like the other ORCA
+tests. See `backend/benchmarks/data/README.md` for the dataset schema.
+
 ### Frontend
 
 ```powershell
