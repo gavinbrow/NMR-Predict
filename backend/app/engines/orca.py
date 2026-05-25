@@ -518,6 +518,32 @@ def _future_result(future: Future, label: str):
         raise OrcaEngineError(f"Timed out waiting for ORCA {label} result") from exc
 
 
+def _average_symmetry_equivalent_shifts(
+    mol: Chem.Mol, shifts: List[AtomShift]
+) -> List[AtomShift]:
+    # ORCA computes per-atom shieldings from a single 3D conformer whose geometry
+    # is never perfectly symmetric, so topologically equivalent atoms come out at
+    # slightly different ppm. Collapse them to their group mean so symmetric
+    # molecules render as one signal per equivalence class, matching CDK/CASCADE.
+    if not shifts:
+        return shifts
+
+    ranks = list(Chem.CanonicalRankAtoms(mol, breakTies=False, includeIsotopes=True))
+    group_sums: Dict[int, float] = {}
+    group_counts: Dict[int, int] = {}
+    for shift in shifts:
+        rank = ranks[shift.atom_index]
+        group_sums[rank] = group_sums.get(rank, 0.0) + shift.shift_ppm
+        group_counts[rank] = group_counts.get(rank, 0) + 1
+
+    averaged: List[AtomShift] = []
+    for shift in shifts:
+        rank = ranks[shift.atom_index]
+        mean_ppm = group_sums[rank] / group_counts[rank]
+        averaged.append(shift.model_copy(update={"shift_ppm": mean_ppm}))
+    return averaged
+
+
 class OrcaEngine(Engine):
     name = "orca"
     default_weight = 0.2
@@ -602,7 +628,7 @@ class OrcaEngine(Engine):
                     confidence=None,
                 )
             )
-        return shifts
+        return _average_symmetry_equivalent_shifts(mol, shifts)
 
 
 orca_engine = OrcaEngine()

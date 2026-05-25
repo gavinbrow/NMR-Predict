@@ -2,6 +2,7 @@ import logging
 import os
 import warnings
 
+from dotenv import load_dotenv
 from pydantic import BaseModel
 
 from app.limits import (
@@ -9,6 +10,11 @@ from app.limits import (
     DEFAULT_ORCA_MAX_PENDING_REQUESTS,
     DEFAULT_ORCA_RAM_CEILING_MB,
 )
+
+
+_BACKEND_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_ROOT_DIR = os.path.dirname(_BACKEND_DIR)
+load_dotenv(os.path.join(_ROOT_DIR, ".env"))
 
 
 # TensorFlow is imported lazily by the CASCADE model builder. Set these before
@@ -30,7 +36,6 @@ else:
     absl_logging.set_stderrthreshold("error")
 
 
-_BACKEND_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _DEFAULT_CDK_DIR = os.path.join(_BACKEND_DIR, "vendor", "cdk")
 
 
@@ -59,7 +64,7 @@ class Settings(BaseModel):
     orca_exe: str = os.getenv("ORCA_EXE", r"C:\ORCA_6.1.1\orca.exe")
     orca_functional: str = os.getenv("ORCA_FUNCTIONAL", "PBE")
     orca_basis: str = os.getenv("ORCA_BASIS", "def2-SVP")
-    orca_cpus: int = int(os.getenv("ORCA_CPUS", "4"))
+    orca_cpus: int = int(os.getenv("ORCA_CPUS", str(os.cpu_count() or 4)))
     orca_ram_mb: int = int(os.getenv("ORCA_RAM_MB", "2000"))
     # Where ORCA job dirs and the TMS reference cache live.
     orca_work_dir: str = os.getenv(
@@ -76,6 +81,13 @@ class Settings(BaseModel):
     orca_ram_ceiling_mb: int = int(
         os.getenv("ORCA_RAM_CEILING_MB", str(DEFAULT_ORCA_RAM_CEILING_MB))
     )
+
+    # Consensus weights — relative importance of each engine when
+    # mixing their predictions into a single spectrum. Values are
+    # renormalised server-side; ratios are what matters.
+    consensus_weight_cdk: float = float(os.getenv("CONSENSUS_WEIGHT_CDK", "0.5"))
+    consensus_weight_cascade: float = float(os.getenv("CONSENSUS_WEIGHT_CASCADE", "0.3"))
+    consensus_weight_orca: float = float(os.getenv("CONSENSUS_WEIGHT_ORCA", "0.2"))
 
 
 settings = Settings()

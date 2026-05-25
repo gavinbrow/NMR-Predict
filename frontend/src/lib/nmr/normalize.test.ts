@@ -143,6 +143,21 @@ describe("normalizePredictResponse", () => {
         element: "C",
         shift: 57.9,
         intensity: 1,
+        engine: "cdk",
+        std: undefined,
+        attached_atom_index: undefined,
+        assignment_group: undefined,
+        multiplicity: undefined,
+        coupling_hz: undefined,
+        neighbor_count: undefined,
+      },
+    ]);
+    expect(normalized.consensusShifts).toEqual([
+      {
+        atom_index: 0,
+        element: "C",
+        shift: 57.9,
+        intensity: 1,
         engine: undefined,
         std: 0.4,
         attached_atom_index: undefined,

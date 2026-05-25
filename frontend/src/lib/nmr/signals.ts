@@ -15,7 +15,7 @@ export interface DerivedSignal {
   atomIndices: number[];
   representativeAtomIndex: number;
   element?: string;
-  attachedAtomIndex?: number;
+  attachedAtomIndices: number[];
   integration?: number;
   multiplicity?: string;
   couplingHz?: number;
@@ -25,7 +25,7 @@ export interface DerivedSignal {
   lines: DerivedSignalLine[];
 }
 
-type SignalSelectionTarget = Pick<DerivedSignal, "atomIndices" | "attachedAtomIndex">;
+type SignalSelectionTarget = Pick<DerivedSignal, "atomIndices" | "attachedAtomIndices">;
 
 type MutableSignal = {
   id: string;
@@ -37,7 +37,7 @@ type MutableSignal = {
   atomIndices: number[];
   representativeAtomIndex: number;
   element?: string;
-  attachedAtomIndex?: number;
+  attachedAtomIndices: number[];
   multiplicities: string[];
   couplingValues: number[];
   neighborCounts: number[];
@@ -45,13 +45,6 @@ type MutableSignal = {
   lines: DerivedSignalLine[];
 };
 
-const GROUP_TOLERANCE_PPM: Record<string, number> = {
-  "1H": 0.14,
-  "13C": 0.25,
-  "15N": 1.2,
-  "19F": 0.8,
-  "31P": 0.8,
-};
 
 const MULTIPLET_PATTERNS: Record<string, number[]> = {
   s: [1],
@@ -138,8 +131,9 @@ function displayLinesForSignal(
 function signalAssignment(signal: MutableSignal, nucleus: Nucleus) {
   if (nucleus === "1H") {
     const protonText = rangeText(signal.atomIndices, "H");
-    if (signal.attachedAtomIndex != null) {
-      return `${protonText} on atom #${signal.attachedAtomIndex}`;
+    if (signal.attachedAtomIndices.length > 0) {
+      const anchorText = rangeText(signal.attachedAtomIndices, "#");
+      return `${protonText} on atom${signal.attachedAtomIndices.length === 1 ? "" : "s"} ${anchorText}`;
     }
     return protonText;
   }
@@ -152,8 +146,8 @@ export function signalSelectionAtomIndices(
   signal: SignalSelectionTarget,
   nucleus: Nucleus,
 ): number[] {
-  if (nucleus === "1H" && signal.attachedAtomIndex != null) {
-    return [signal.attachedAtomIndex];
+  if (nucleus === "1H" && signal.attachedAtomIndices.length > 0) {
+    return [...new Set(signal.attachedAtomIndices)].sort((a, b) => a - b);
   }
 
   return [...new Set(signal.atomIndices)].sort((a, b) => a - b);
@@ -208,8 +202,7 @@ export function multiplicityLabel(multiplicity?: string) {
 export function deriveSignals(shifts: Shift[], nucleus: Nucleus, mode: Mode): DerivedSignal[] {
   if (shifts.length === 0) return [];
 
-  const tolerance = GROUP_TOLERANCE_PPM[nucleus] ?? 0.25;
-  const grouped = new Map<string, MutableSignal[]>();
+  const grouped = new Map<string, MutableSignal>();
 
   const sorted = [...shifts].sort((a, b) => {
     const engineA = mode === "individual" ? a.engine ?? "" : "";
@@ -227,15 +220,17 @@ export function deriveSignals(shifts: Shift[], nucleus: Nucleus, mode: Mode): De
     const baseKey =
       `${sourceKey}:${engineKey}:${shift.assignment_group ?? `atom:${shift.atom_index}`}`;
 
-    const bucket = grouped.get(baseKey) ?? [];
-    const candidate =
-      nucleus === "1H"
-        ? [...bucket].reverse().find((group) => Math.abs(group.center - shift.shift) <= tolerance)
-        : bucket[0];
+    const candidate = grouped.get(baseKey);
 
     if (candidate) {
       if (!candidate.atomIndices.includes(shift.atom_index)) {
         candidate.atomIndices.push(shift.atom_index);
+      }
+      if (
+        shift.attached_atom_index != null &&
+        !candidate.attachedAtomIndices.includes(shift.attached_atom_index)
+      ) {
+        candidate.attachedAtomIndices.push(shift.attached_atom_index);
       }
       candidate.center =
         (candidate.center * (candidate.atomIndices.length - 1) + shift.shift) /
@@ -245,8 +240,8 @@ export function deriveSignals(shifts: Shift[], nucleus: Nucleus, mode: Mode): De
       if (shift.neighbor_count != null) candidate.neighborCounts.push(shift.neighbor_count);
       if (shift.std != null) candidate.stdValues.push(shift.std);
     } else {
-      bucket.push({
-        id: `${baseKey}:${bucket.length}`,
+      grouped.set(baseKey, {
+        id: baseKey,
         engine: mode === "individual" ? shift.engine : undefined,
         sourceId: shift.source_id,
         sourceLabel: shift.source_label,
@@ -255,19 +250,17 @@ export function deriveSignals(shifts: Shift[], nucleus: Nucleus, mode: Mode): De
         atomIndices: [shift.atom_index],
         representativeAtomIndex: shift.atom_index,
         element: shift.element,
-        attachedAtomIndex: shift.attached_atom_index,
+        attachedAtomIndices: shift.attached_atom_index != null ? [shift.attached_atom_index] : [],
         multiplicities: shift.multiplicity ? [shift.multiplicity] : [],
         couplingValues: shift.coupling_hz != null ? [shift.coupling_hz] : [],
         neighborCounts: shift.neighbor_count != null ? [shift.neighbor_count] : [],
         stdValues: shift.std != null ? [shift.std] : [],
         lines: [],
       });
-      grouped.set(baseKey, bucket);
     }
   });
 
   const signals = [...grouped.values()]
-    .flat()
     .map((group) => {
       const integration = nucleus === "1H" ? group.atomIndices.length : undefined;
       const multiplicity = primaryMultiplicity(group.multiplicities);
@@ -284,7 +277,7 @@ export function deriveSignals(shifts: Shift[], nucleus: Nucleus, mode: Mode): De
         atomIndices: [...group.atomIndices].sort((a, b) => a - b),
         representativeAtomIndex: group.representativeAtomIndex,
         element: group.element,
-        attachedAtomIndex: group.attachedAtomIndex,
+        attachedAtomIndices: [...group.attachedAtomIndices].sort((a, b) => a - b),
         integration,
         multiplicity,
         couplingHz,

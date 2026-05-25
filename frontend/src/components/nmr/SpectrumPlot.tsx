@@ -1,5 +1,5 @@
 import initNmriumCore from "@zakodium/nmrium-core-plugins";
-import { Check, EyeOff, Layers3 } from "lucide-react";
+import { Blend, Check, EyeOff, Layers3 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
 import { buildNmriumViewerModel, getEngineColorMap } from "@/lib/nmr/nmrium";
@@ -9,7 +9,7 @@ import {
   signalSelectionAtomIndices,
   type DerivedSignal,
 } from "@/lib/nmr/signals";
-import type { Mode, Nucleus, Shift } from "@/types/nmr";
+import type { Nucleus, Shift } from "@/types/nmr";
 import {
   NmriumBareViewer,
   type HighlightBand,
@@ -33,14 +33,16 @@ const HIGHLIGHT_MIN_HALF_WIDTH_PPM: Record<string, number> = {
 };
 
 interface SpectrumPlotProps {
-  shifts: Shift[];
+  individualShifts: Shift[];
+  consensusShifts: Shift[];
   nucleus: Nucleus;
-  mode: Mode;
   selectedAtomIndex: number | null;
   activeSourceId?: string | null;
   activeSourceLabel?: string | null;
   linkingEnabled?: boolean;
-  onAtomHover?: (atomIndices: number[] | null) => void;
+  viewMode?: "overlay" | "stacked";
+  intensityScales?: Record<string, number>;
+  onAtomHover?: (atomIndices: number[] | null, sourceId?: string | null) => void;
 }
 
 function signalHighlightRange(signal: DerivedSignal, nucleus: Nucleus): [number, number] {
@@ -159,16 +161,24 @@ function EngineChip({
 }
 
 export function SpectrumPlot({
-  shifts,
+  individualShifts,
+  consensusShifts,
   nucleus,
-  mode,
   selectedAtomIndex,
   activeSourceId = null,
   activeSourceLabel = null,
   linkingEnabled = true,
+  viewMode = "overlay",
+  intensityScales,
   onAtomHover,
 }: SpectrumPlotProps) {
   const core = useMemo(() => initNmriumCore(), []);
+  const [mixEngines, setMixEngines] = useState(false);
+  const hasConsensus = consensusShifts.length > 0;
+  const effectiveMix = mixEngines && hasConsensus;
+  const mode = effectiveMix ? "consensus" : "individual";
+  const shifts = effectiveMix ? consensusShifts : individualShifts;
+
   const allSignals = useMemo(() => deriveSignals(shifts, nucleus, mode), [mode, nucleus, shifts]);
   const allSources = useMemo(
     () =>
@@ -181,29 +191,29 @@ export function SpectrumPlot({
 
   const allEngines = useMemo(
     () =>
-      allSignals
-        .map((signal) => signal.engine)
+      individualShifts
+        .map((shift) => shift.engine)
         .filter((engine): engine is string => Boolean(engine))
         .filter((engine, index, items) => items.indexOf(engine) === index),
-    [allSignals],
+    [individualShifts],
   );
 
   const engineColors = useMemo(() => getEngineColorMap(allEngines), [allEngines]);
   const [visibleEngines, setVisibleEngines] = useState<string[]>(allEngines);
 
   useEffect(() => {
-    if (mode !== "individual") return;
     setVisibleEngines((current) => {
       const filtered = current.filter((engine) => allEngines.includes(engine));
-      return filtered.length > 0 || current.length === 0 ? filtered.length > 0 ? filtered : allEngines : allEngines;
+      if (filtered.length > 0) return filtered;
+      return current.length === 0 ? [] : allEngines;
     });
-  }, [allEngines, mode]);
+  }, [allEngines]);
 
   const visibleShifts = useMemo(() => {
-    if (mode !== "individual") return shifts;
+    if (effectiveMix) return shifts;
     if (visibleEngines.length === 0) return [];
     return shifts.filter((shift) => visibleEngines.includes(shift.engine ?? ""));
-  }, [mode, shifts, visibleEngines]);
+  }, [effectiveMix, shifts, visibleEngines]);
 
   const signals = useMemo(
     () => deriveSignals(visibleShifts, nucleus, mode),
@@ -216,8 +226,12 @@ export function SpectrumPlot({
   }, [activeSourceId, linkingEnabled, signals]);
 
   const viewerModel = useMemo(
-    () => buildNmriumViewerModel(visibleShifts, nucleus, mode, core.version),
-    [core.version, mode, nucleus, visibleShifts],
+    () =>
+      buildNmriumViewerModel(visibleShifts, nucleus, mode, core.version, {
+        stackBySource: viewMode === "stacked",
+        intensityScales,
+      }),
+    [core.version, intensityScales, mode, nucleus, viewMode, visibleShifts],
   );
 
   const protonIntegral = useMemo(
@@ -232,17 +246,10 @@ export function SpectrumPlot({
 
   useEffect(() => {
     if (!hoveredSignal) return;
-    if (interactiveSignals.some((signal) => signal.id === hoveredSignal.id)) return;
+    if (signals.some((signal) => signal.id === hoveredSignal.id)) return;
     setHoveredSignal(null);
-    onAtomHover?.(null);
-  }, [hoveredSignal, interactiveSignals, onAtomHover]);
-
-  useEffect(() => {
-    if (linkingEnabled) return;
-    if (!hoveredSignal && selectedAtomIndex == null) return;
-    setHoveredSignal(null);
-    onAtomHover?.(null);
-  }, [hoveredSignal, linkingEnabled, onAtomHover, selectedAtomIndex]);
+    onAtomHover?.(null, null);
+  }, [hoveredSignal, onAtomHover, signals]);
 
   const selectedSignals = useMemo(
     () =>
@@ -284,17 +291,17 @@ export function SpectrumPlot({
 
   const handleHoverPpm = useCallback(
     (ppm: number | null) => {
-      if (ppm == null || interactiveSignals.length === 0) {
+      if (ppm == null || signals.length === 0) {
         if (hoveredSignal) {
           setHoveredSignal(null);
-          onAtomHover?.(null);
+          onAtomHover?.(null, null);
         }
         return;
       }
 
       let nearest: DerivedSignal | null = null;
       let bestScore = Number.POSITIVE_INFINITY;
-      for (const signal of interactiveSignals) {
+      for (const signal of signals) {
         const score = signalHoverScore(signal, ppm, nucleus);
         if (score < bestScore) {
           bestScore = score;
@@ -305,17 +312,20 @@ export function SpectrumPlot({
       if (!nearest || bestScore > signalHoverTolerance(nearest, nucleus)) {
         if (hoveredSignal) {
           setHoveredSignal(null);
-          onAtomHover?.(null);
+          onAtomHover?.(null, null);
         }
         return;
       }
 
       if (hoveredSignal?.id !== nearest.id) {
         setHoveredSignal(nearest);
-        onAtomHover?.(signalSelectionAtomIndices(nearest, nucleus));
+        onAtomHover?.(
+          signalSelectionAtomIndices(nearest, nucleus),
+          nearest.sourceId ?? null,
+        );
       }
     },
-    [hoveredSignal, interactiveSignals, nucleus, onAtomHover],
+    [hoveredSignal, nucleus, onAtomHover, signals],
   );
 
   const toggleVisibleEngine = useCallback((engine: string) => {
@@ -346,12 +356,17 @@ export function SpectrumPlot({
     [selectedSignals],
   );
 
+  const individualSignalsForStats = useMemo(
+    () => deriveSignals(individualShifts, nucleus, "individual"),
+    [individualShifts, nucleus],
+  );
+
   return (
     <div className="space-y-4">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="flex flex-wrap items-center gap-2">
           <SummaryPill>{nucleus}</SummaryPill>
-          <SummaryPill>{mode === "consensus" ? "Consensus view" : "Per-engine overlay"}</SummaryPill>
+          <SummaryPill>{effectiveMix ? "Mixed spectrum" : "Per-engine overlay"}</SummaryPill>
           <SummaryPill>
             {signals.length} peak{signals.length === 1 ? "" : "s"}
           </SummaryPill>
@@ -362,9 +377,11 @@ export function SpectrumPlot({
         </div>
         <p className="text-xs text-muted-foreground">
           {linkingEnabled
-            ? allSources.length > 1 && activeSourceLabel
-              ? `Hover peaks to highlight atoms for ${activeSourceLabel}. Engine filtering on the right also scopes the atom sync.`
-              : "Hover peaks to highlight atoms. Engine filtering on the right limits both the graph and the atom sync."
+            ? effectiveMix
+              ? "Mixed spectrum combines every engine into one weighted peak per atom. Toggle off in the rail to see per-engine overlays again."
+              : allSources.length > 1 && activeSourceLabel
+                ? `Hover peaks to highlight atoms for ${activeSourceLabel}. Engine filtering on the right also scopes the atom sync.`
+                : "Hover peaks to highlight atoms. Engine filtering on the right limits both the graph and the atom sync."
             : "The editor currently holds an unsaved structure, so atom highlighting is paused until you select a predicted component or run a new prediction."}
         </p>
       </div>
@@ -372,8 +389,8 @@ export function SpectrumPlot({
       <div className="overflow-hidden rounded-2xl border border-border/60 bg-white shadow-card">
         <div
           className={`grid min-h-[580px] ${
-            mode === "individual" && allEngines.length > 0
-              ? "grid-cols-1 xl:grid-cols-[minmax(0,1fr)_240px]"
+            allEngines.length > 0
+              ? "grid-cols-1 xl:grid-cols-[minmax(0,1fr)_260px]"
               : "grid-cols-1"
           }`}
         >
@@ -404,7 +421,7 @@ export function SpectrumPlot({
                   signalAnnotations={signalAnnotations}
                   emptyText={
                     <div className="flex h-full items-center justify-center px-4 text-center text-sm text-muted-foreground">
-                      {mode === "individual" && visibleEngines.length === 0
+                      {!effectiveMix && visibleEngines.length === 0
                         ? "Enable at least one engine in the spectrum rail to render the graph."
                         : "No predicted signals were returned for this request."}
                     </div>
@@ -486,7 +503,7 @@ export function SpectrumPlot({
             </div>
           </div>
 
-          {mode === "individual" && allEngines.length > 0 ? (
+          {allEngines.length > 0 ? (
             <aside className="border-t border-border/60 bg-muted/15 xl:border-l xl:border-t-0">
               <div className="flex h-full flex-col">
                 <div className="border-b border-border/60 px-4 py-4">
@@ -494,59 +511,122 @@ export function SpectrumPlot({
                     <Layers3 className="h-4 w-4 text-primary" />
                     Engine spectra
                   </div>
-                  <p className="mt-1 text-[11px] text-muted-foreground">
-                    Toggle overlays here. Peak hover, peak highlight, and atom sync only use the engines that stay enabled.
+
+                  <button
+                    type="button"
+                    onClick={() => setMixEngines((current) => !current)}
+                    disabled={!hasConsensus}
+                    className={`mt-3 flex w-full items-center justify-between gap-2 rounded-xl border px-3 py-2 text-left text-xs transition-smooth ${
+                      effectiveMix
+                        ? "border-primary/60 bg-primary/10 text-primary"
+                        : "border-border/70 bg-background text-foreground hover:border-primary/40 hover:bg-muted/40"
+                    } ${!hasConsensus ? "cursor-not-allowed opacity-50" : ""}`}
+                  >
+                    <span className="flex items-center gap-2">
+                      <Blend className="h-3.5 w-3.5" />
+                      <span className="font-semibold">Mix engines</span>
+                    </span>
+                    <span
+                      className={`rounded-full px-1.5 py-0.5 text-[10px] font-semibold ${
+                        effectiveMix
+                          ? "bg-primary text-primary-foreground"
+                          : "border border-border/70 bg-background text-muted-foreground"
+                      }`}
+                    >
+                      {effectiveMix ? "On" : "Off"}
+                    </span>
+                  </button>
+
+                  <p className="mt-2 text-[11px] text-muted-foreground">
+                    {effectiveMix
+                      ? "Mixed view blends every engine into one weighted peak per atom. Weights are set via CONSENSUS_WEIGHT_* in the .env file."
+                      : "Toggle overlays below. Peak hover, peak highlight, and atom sync only use the engines that stay enabled."}
                   </p>
 
-                  <div className="mt-3 flex items-center gap-2">
-                    <button
-                      type="button"
-                      onClick={showAllEngines}
-                      className="rounded-full border border-border/70 bg-background px-2.5 py-1 text-[11px] font-medium text-foreground transition-smooth hover:bg-muted"
-                    >
-                      Show all
-                    </button>
-                    <button
-                      type="button"
-                      onClick={clearVisibleEngines}
-                      className="rounded-full border border-border/70 bg-background px-2.5 py-1 text-[11px] font-medium text-muted-foreground transition-smooth hover:bg-muted hover:text-foreground"
-                    >
-                      <span className="inline-flex items-center gap-1">
-                        <EyeOff className="h-3 w-3" />
-                        Hide all
-                      </span>
-                    </button>
-                  </div>
+                  {!effectiveMix ? (
+                    <div className="mt-3 flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={showAllEngines}
+                        className="rounded-full border border-border/70 bg-background px-2.5 py-1 text-[11px] font-medium text-foreground transition-smooth hover:bg-muted"
+                      >
+                        Show all
+                      </button>
+                      <button
+                        type="button"
+                        onClick={clearVisibleEngines}
+                        className="rounded-full border border-border/70 bg-background px-2.5 py-1 text-[11px] font-medium text-muted-foreground transition-smooth hover:bg-muted hover:text-foreground"
+                      >
+                        <span className="inline-flex items-center gap-1">
+                          <EyeOff className="h-3 w-3" />
+                          Hide all
+                        </span>
+                      </button>
+                    </div>
+                  ) : null}
                 </div>
 
                 <div className="flex-1 space-y-3 overflow-y-auto p-3">
-                  {allEngines.map((engine) => {
-                    const engineSignals = allSignals.filter((signal) => signal.engine === engine);
-                    const protonCount =
-                      nucleus === "1H"
-                        ? engineSignals.reduce((sum, signal) => sum + (signal.integration ?? 0), 0)
-                        : undefined;
+                  {effectiveMix ? (
+                    <div className="space-y-2">
+                      {allEngines.map((engine) => {
+                        const color = engineColors[engine] ?? "#0ea5e9";
+                        return (
+                          <div
+                            key={engine}
+                            className="flex items-center gap-2 rounded-lg border border-border/60 bg-background/80 px-3 py-2"
+                          >
+                            <span
+                              className="h-2.5 w-2.5 shrink-0 rounded-full"
+                              style={{ backgroundColor: color }}
+                            />
+                            <span className="flex-1 text-sm font-medium text-foreground">
+                              {engine}
+                            </span>
+                            <span className="rounded-full bg-muted px-1.5 py-0.5 text-[10px] font-semibold text-muted-foreground">
+                              contributing
+                            </span>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  ) : (
+                    allEngines.map((engine) => {
+                      const engineSignals = individualSignalsForStats.filter(
+                        (signal) => signal.engine === engine,
+                      );
+                      const protonCount =
+                        nucleus === "1H"
+                          ? engineSignals.reduce(
+                              (sum, signal) => sum + (signal.integration ?? 0),
+                              0,
+                            )
+                          : undefined;
 
-                    return (
-                      <EngineChip
-                        key={engine}
-                        active={visibleEngines.includes(engine)}
-                        color={engineColors[engine] ?? "#0ea5e9"}
-                        engine={engine}
-                        signalCount={engineSignals.length}
-                        protonCount={protonCount}
-                        onOnly={() => onlyVisibleEngine(engine)}
-                        onToggle={() => toggleVisibleEngine(engine)}
-                      />
-                    );
-                  })}
+                      return (
+                        <EngineChip
+                          key={engine}
+                          active={visibleEngines.includes(engine)}
+                          color={engineColors[engine] ?? "#0ea5e9"}
+                          engine={engine}
+                          signalCount={engineSignals.length}
+                          protonCount={protonCount}
+                          onOnly={() => onlyVisibleEngine(engine)}
+                          onToggle={() => toggleVisibleEngine(engine)}
+                        />
+                      );
+                    })
+                  )}
                 </div>
 
                 <div className="border-t border-border/60 px-4 py-3 text-[11px] text-muted-foreground">
                   <div className="flex items-center gap-2">
                     <Check className="h-3 w-3 text-primary" />
-                    {visibleEngines.length} of {allEngines.length} engine
-                    {allEngines.length === 1 ? "" : "s"} visible
+                    {effectiveMix
+                      ? `Mixing ${allEngines.length} engine${allEngines.length === 1 ? "" : "s"}`
+                      : `${visibleEngines.length} of ${allEngines.length} engine${
+                          allEngines.length === 1 ? "" : "s"
+                        } visible`}
                   </div>
                 </div>
               </div>

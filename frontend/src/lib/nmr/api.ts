@@ -18,10 +18,15 @@ const BASE_URL = (
   (import.meta.env.VITE_NMR_API_URL as string | undefined) ?? "/api"
 ).replace(/\/+$/, "");
 const DEMO_MODE_ENABLED = import.meta.env.VITE_NMR_ENABLE_DEMO_MODE === "1";
+const TIMEOUT_MS = (() => {
+  const raw = import.meta.env.VITE_NMR_API_TIMEOUT_MS as string | undefined;
+  const parsed = raw ? Number.parseInt(raw, 10) : NaN;
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 600000;
+})();
 
 export const api = axios.create({
   baseURL: BASE_URL,
-  timeout: 20000,
+  timeout: TIMEOUT_MS,
   headers: { "Content-Type": "application/json" },
 });
 

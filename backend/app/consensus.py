@@ -23,6 +23,7 @@ from __future__ import annotations
 import math
 from typing import Dict, List, Mapping, Optional
 
+from app.config import settings
 from app.schemas import (
     AtomShift,
     ConsensusAtomShift,
@@ -33,9 +34,9 @@ from app.schemas import (
 
 
 DEFAULT_WEIGHTS: Dict[EngineName, float] = {
-    "cdk": 0.5,
-    "cascade": 0.3,
-    "orca": 0.2,
+    "cdk": settings.consensus_weight_cdk,
+    "cascade": settings.consensus_weight_cascade,
+    "orca": settings.consensus_weight_orca,
 }
 
 

@@ -46,17 +46,19 @@ export interface Shift {
 export interface PredictResponse {
   smiles: string;
   nucleus: Nucleus;
-  mode: Mode;
+  /** Per-engine shifts (each carries an `engine` tag). */
   shifts: Shift[];
+  /** Consensus/mixed shifts (one per atom, weighted across engines). */
+  consensusShifts: Shift[];
   engines_used: string[];
+  consensusWeights?: Record<string, number>;
   warnings?: string[];
 }
 
 export interface PredictRequest {
   smiles: string;
   engines: string[];
-  mode: Mode;
+  mode?: Mode;
   nucleus: Nucleus;
   conformer_strategy: ConformerStrategy;
-  weights?: Record<string, number>;
 }
