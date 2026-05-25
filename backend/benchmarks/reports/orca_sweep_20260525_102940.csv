@@ -1,0 +1,2 @@
+label,engine,functional,basis,nucleus,molecule,scenario,group_smarts,n_atoms,reference_ppm,predicted_ppm,error,abs_error,exchangeable
+orca [PBE/def2-SVP],orca,PBE,def2-SVP,13C,methane,aliphatic,[CH4],1,-2.3000,-4.9168,-2.6168,2.6168,0

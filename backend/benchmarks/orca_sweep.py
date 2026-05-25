@@ -21,7 +21,7 @@ from typing import List, Optional, Sequence
 from app.config import settings
 
 from benchmarks.dataset import Dataset
-from benchmarks.runner import BenchmarkResult, run_engine
+from benchmarks.runner import BenchmarkResult, _fmt_secs, _now, run_engine
 
 
 @dataclass(frozen=True)
@@ -66,17 +66,6 @@ LADDER: List[Level] = [
         6, "B3LYP", "pcSseg-2", "~20-90 min",
         "Best accuracy-per-cost sweet spot for routine 1H/13C.",
         "Noticeably slower; RAM-hungry (set ORCA_RAM_MB >= 4000).",
-    ),
-    Level(
-        7, "wB97X-D3", "pcSseg-2", "~1-3 hr",
-        "Range-separated hybrid + NMR basis; top routine accuracy; good for "
-        "conjugated/charged systems.",
-        "Expensive; range separation adds cost over PBE0.",
-    ),
-    Level(
-        8, "wB97X-D3", "pcSseg-3", "many hours / overnight",
-        "Benchmark-quality reference numbers.",
-        "Impractical for >~15 heavy atoms; huge basis/RAM; mainly anchors the ladder.",
     ),
 ]
 
@@ -143,17 +132,19 @@ def run_sweep(
     so the report renders one row per level).
     """
     results: List[BenchmarkResult] = []
-    for lvl in levels:
+    sweep_start = time.perf_counter()
+    for i, lvl in enumerate(levels, start=1):
         if progress:
             print(
-                f"== Level {lvl.n}: {lvl.functional}/{lvl.basis} "
-                f"(rel. speed: {lvl.rel_speed}) ==",
+                f"\n[{_now()}] == Level {lvl.n} ({i}/{len(levels)}): "
+                f"{lvl.functional}/{lvl.basis} (rel. speed: {lvl.rel_speed}) ==",
                 flush=True,
             )
+        level_start = time.perf_counter()
         with _orca_level(lvl.functional, lvl.basis):
             tms_seconds = _warm_tms(lvl.functional, lvl.basis) if warm_tms else 0.0
             if progress and warm_tms:
-                print(f"   TMS reference warm: {tms_seconds:.1f}s", flush=True)
+                print(f"[{_now()}]    TMS reference warm: {_fmt_secs(tms_seconds)}", flush=True)
             result = run_engine(
                 "orca",
                 dataset,
@@ -165,6 +156,20 @@ def run_sweep(
                 progress=progress,
             )
         results.append(result)
+        if progress:
+            ok = sum(1 for r in result.runs if r.status == "ok")
+            err = sum(1 for r in result.runs if r.status == "error")
+            print(
+                f"[{_now()}] -- Level {lvl.n} done in "
+                f"{_fmt_secs(time.perf_counter() - level_start)} - {ok} ok, {err} error --",
+                flush=True,
+            )
+    if progress:
+        print(
+            f"\n[{_now()}] Sweep complete: {len(levels)} level(s) in "
+            f"{_fmt_secs(time.perf_counter() - sweep_start)}",
+            flush=True,
+        )
     return results
 
 

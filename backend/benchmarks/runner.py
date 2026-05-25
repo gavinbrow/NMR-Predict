@@ -18,6 +18,22 @@ from app.engines import engine_is_implemented, get_engine
 from benchmarks.dataset import Dataset, ReferenceMolecule, resolve_reference_atoms
 
 
+def _now() -> str:
+    """Wall-clock HH:MM:SS stamp for progress lines."""
+    return time.strftime("%H:%M:%S")
+
+
+def _fmt_secs(seconds: float) -> str:
+    """Human-friendly elapsed time (e.g. ``4.2s``, ``3m12.0s``, ``1h04m``)."""
+    if seconds < 60:
+        return f"{seconds:.1f}s"
+    minutes, sec = divmod(seconds, 60)
+    if minutes < 60:
+        return f"{int(minutes)}m{sec:04.1f}s"
+    hours, minutes = divmod(int(minutes), 60)
+    return f"{hours}h{int(minutes):02d}m"
+
+
 @dataclass(frozen=True)
 class DataPoint:
     """One scored (predicted, reference) pair for a reference group."""
@@ -99,6 +115,11 @@ def run_engine(
     result = BenchmarkResult(engine=engine_name, functional=functional, basis=basis)
 
     if not engine_is_implemented(engine_name):
+        if progress:
+            print(
+                f"[{_now()}] {engine_name}: not implemented - skipping all molecules",
+                flush=True,
+            )
         for mol in dataset.molecules:
             for nucleus in nuclei:
                 result.runs.append(
@@ -111,6 +132,11 @@ def run_engine(
     if not ready:
         if not skip_unready:
             raise RuntimeError(f"engine {engine_name!r} not ready: {reason}")
+        if progress:
+            print(
+                f"[{_now()}] {engine_name}: not ready ({reason}) - skipping all molecules",
+                flush=True,
+            )
         for mol in dataset.molecules:
             for nucleus in nuclei:
                 result.runs.append(
@@ -118,20 +144,43 @@ def run_engine(
                 )
         return result
 
-    for mol in dataset.molecules:
-        for nucleus in nuclei:
-            if nucleus not in mol.shifts:
-                continue
-            _run_one(
-                engine_name=engine_name,
-                engine=engine,
-                mol=mol,
-                nucleus=nucleus,
-                conformer_strategy=conformer_strategy,
-                exclude_exchangeable=exclude_exchangeable,
-                result=result,
-                progress=progress,
-            )
+    work = [
+        (mol, nucleus)
+        for mol in dataset.molecules
+        for nucleus in nuclei
+        if nucleus in mol.shifts
+    ]
+    total = len(work)
+    if progress:
+        print(
+            f"[{_now()}] {engine_name}: {total} (molecule, nucleus) run(s) to do",
+            flush=True,
+        )
+    engine_start = time.perf_counter()
+    for index, (mol, nucleus) in enumerate(work, start=1):
+        _run_one(
+            engine_name=engine_name,
+            engine=engine,
+            mol=mol,
+            nucleus=nucleus,
+            conformer_strategy=conformer_strategy,
+            exclude_exchangeable=exclude_exchangeable,
+            result=result,
+            progress=progress,
+            index=index,
+            total=total,
+        )
+
+    if progress:
+        ok = sum(1 for r in result.runs if r.status == "ok")
+        err = sum(1 for r in result.runs if r.status == "error")
+        skipped = sum(1 for r in result.runs if r.status == "skipped")
+        print(
+            f"[{_now()}] {engine_name}: done in "
+            f"{_fmt_secs(time.perf_counter() - engine_start)} - "
+            f"{ok} ok, {err} error, {skipped} skipped",
+            flush=True,
+        )
 
     return result
 
@@ -146,14 +195,22 @@ def _run_one(
     exclude_exchangeable: bool,
     result: BenchmarkResult,
     progress: bool,
+    index: int = 0,
+    total: int = 0,
 ) -> None:
-    if progress:
-        print(f"  [{engine_name}] {mol.id} {nucleus} ...", flush=True)
+    tag = f"[{index}/{total}] " if total else ""
+
+    def _log(msg: str) -> None:
+        if progress:
+            print(f"[{_now()}] {tag}{engine_name} | {mol.id} {nucleus} | {msg}", flush=True)
+
+    _log("predicting ...")
 
     try:
         canon = canonicalize(mol.smiles, add_hs=True)
     except InvalidSmilesError as exc:
         result.runs.append(MoleculeRun(mol.id, nucleus, "error", 0.0, f"canon: {exc}"))
+        _log(f"ERROR - canon: {exc}")
         return
 
     start = time.perf_counter()
@@ -166,9 +223,11 @@ def _run_one(
         result.runs.append(
             MoleculeRun(mol.id, nucleus, "error", elapsed, f"{type(exc).__name__}: {exc}")
         )
+        _log(f"ERROR in {_fmt_secs(elapsed)} - {type(exc).__name__}: {exc}")
         return
     elapsed = time.perf_counter() - start
 
+    n_before = len(result.points)
     pred = _predicted_by_index(shifts)
     matched_any = False
     for ref in mol.shifts[nucleus]:
@@ -196,3 +255,14 @@ def _run_one(
     status = "ok" if matched_any else "error"
     message = None if matched_any else "no reference groups matched predicted atoms"
     result.runs.append(MoleculeRun(mol.id, nucleus, status, elapsed, message))
+
+    added = result.points[n_before:]
+    if status == "ok" and added:
+        mae = fmean(p.abs_error for p in added)
+        max_err = max(p.abs_error for p in added)
+        _log(
+            f"OK in {_fmt_secs(elapsed)} - MAE {mae:.2f} max {max_err:.2f} ppm "
+            f"(n={len(added)})"
+        )
+    else:
+        _log(f"ERROR in {_fmt_secs(elapsed)} - {message}")

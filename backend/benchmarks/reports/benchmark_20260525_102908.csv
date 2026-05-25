@@ -1,0 +1,11 @@
+label,engine,functional,basis,nucleus,molecule,scenario,group_smarts,n_atoms,reference_ppm,predicted_ppm,error,abs_error,exchangeable
+cdk,cdk,,,13C,ethane,aliphatic,[CH3],2,5.7000,19.3303,13.6303,13.6303,0
+cdk,cdk,,,13C,cyclohexane,aliphatic,[CH2],6,27.0000,24.7697,-2.2303,2.2303,0
+cdk,cdk,,,13C,ethanol,aliphatic,[CH3],1,18.4000,17.5000,-0.9000,0.9000,0
+cdk,cdk,,,13C,ethanol,aliphatic,[CH2][OH],1,58.0000,57.9000,-0.1000,0.1000,0
+cdk,cdk,,,13C,isopropanol,aliphatic,[CH3],2,25.3000,26.5000,1.2000,1.2000,0
+cdk,cdk,,,13C,isopropanol,aliphatic,[CH1][OH],1,64.0000,64.7000,0.7000,0.7000,0
+cdk,cdk,,,13C,tert_butanol,aliphatic,[CH3],3,31.2000,32.0050,0.8050,0.8050,0
+cdk,cdk,,,13C,tert_butanol,aliphatic,[CX4]([CH3])([CH3])([CH3])[OH],1,69.0000,69.4050,0.4050,0.4050,0
+cdk,cdk,,,13C,neopentane,aliphatic,[CH3],4,31.7000,24.8799,-6.8201,6.8201,0
+cdk,cdk,,,13C,neopentane,aliphatic,[CX4]([CH3])([CH3])([CH3])[CH3],1,27.9000,40.4961,12.5961,12.5961,0
