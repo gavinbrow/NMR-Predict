@@ -75,9 +75,17 @@ def _orca_timeout_seconds() -> int:
     return max(30, int(settings.orca_timeout_seconds))
 
 
-def _clamped_orca_resources() -> tuple[int, int]:
+def _clamped_orca_resources(atom_count: Optional[int] = None) -> tuple[int, int]:
     host_cpus = os.cpu_count() or 1
     cpus = max(1, min(int(settings.orca_cpus), host_cpus))
+    # ORCA parallelises several steps -- notably the per-atom NMR CP-SCF -- by
+    # handing each MPI rank a slice of the atoms. If nprocs exceeds the atom
+    # count the surplus ranks get no work and the parallel module
+    # (orca_leanscf_mpi / the NMR property step) aborts ("process exited
+    # without calling finalize") or deadlocks on a collective, which hangs the
+    # whole request until ORCA_TIMEOUT. Never launch more ranks than atoms.
+    if atom_count is not None and atom_count > 0:
+        cpus = min(cpus, atom_count)
     ram_ceiling = max(256, int(settings.orca_ram_ceiling_mb))
     ram_mb = max(256, min(int(settings.orca_ram_mb), ram_ceiling))
     return cpus, ram_mb
@@ -410,7 +418,7 @@ def _compute_tms_reference(functional: str, basis: str) -> Dict[str, float]:
     logger.info("Computing TMS reference at %s/%s (first-time)", functional, basis)
     mol = _build_tms_mol()
     xyz = _mol_xyz_block(mol)
-    cpus, ram_mb = _clamped_orca_resources()
+    cpus, ram_mb = _clamped_orca_resources(mol.GetNumAtoms())
     inp_text = _build_nmr_input(
         xyz,
         charge=0,
@@ -582,7 +590,7 @@ class OrcaEngine(Engine):
         charge = Chem.GetFormalCharge(mol)
         radicals = sum(atom.GetNumRadicalElectrons() for atom in mol.GetAtoms())
         multiplicity = radicals + 1
-        cpus, ram_mb = _clamped_orca_resources()
+        cpus, ram_mb = _clamped_orca_resources(mol.GetNumAtoms())
 
         with _orca_request_slot():
             _prune_old_orca_job_dirs()

@@ -17,6 +17,7 @@ from app.engines.orca import (
     OrcaEngineError,
     _build_goat_input,
     _build_nmr_input,
+    _clamped_orca_resources,
     _get_tms_reference,
     _run_orca,
     _tms_cache_key,
@@ -65,6 +66,27 @@ def test_orca_requires_binary(monkeypatch, tmp_path):
     canon = canonicalize("CCO", add_hs=True)
     with pytest.raises(OrcaEngineError, match="ORCA binary not found"):
         engine.predict(canon.mol, "13C")
+
+
+def test_clamped_resources_caps_nprocs_at_atom_count(monkeypatch):
+    # Regression guard: ORCA crashes/deadlocks when nprocs exceeds the atom
+    # count (surplus MPI ranks get no work in the per-atom NMR CP-SCF step).
+    from app import config as app_config
+
+    monkeypatch.setattr(app_config.settings, "orca_cpus", 16)
+    monkeypatch.setattr(app_config.settings, "orca_ram_mb", 2000)
+    monkeypatch.setattr(app_config.settings, "orca_ram_ceiling_mb", 8192)
+
+    baseline = min(16, os.cpu_count() or 1)
+
+    # A 1-atom system must never launch more than one rank.
+    assert _clamped_orca_resources(1)[0] == 1
+
+    # Large molecules keep the configured/host-bound core count.
+    assert _clamped_orca_resources(1000)[0] == baseline
+
+    # Omitting the atom count preserves the legacy (host-bound) behaviour.
+    assert _clamped_orca_resources()[0] == baseline
 
 
 def test_build_nmr_input_shape():
