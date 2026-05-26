@@ -1,7 +1,7 @@
 // Shared NMR Predict types — mirror the FastAPI backend contract.
 export type Nucleus = "1H" | "13C" | "15N" | "19F" | "31P" | string;
 export type Mode = "individual" | "consensus" | string;
-export type ConformerStrategy = "fast" | "goat" | "accurate" | "single" | string;
+export type ConformerStrategy = "fast" | string;
 
 export interface Engine {
   name: string;
@@ -46,6 +46,8 @@ export interface Shift {
 export interface PredictResponse {
   smiles: string;
   nucleus: Nucleus;
+  structureMolfile?: string | null;
+  structureHydrogenCounts?: number[];
   /** Per-engine shifts (each carries an `engine` tag). */
   shifts: Shift[];
   /** Consensus/mixed shifts (one per atom, weighted across engines). */

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import re
 import shutil
@@ -276,28 +277,6 @@ def _build_nmr_input(
     ])
 
 
-def _build_goat_input(
-    xyz_block: str, charge: int, multiplicity: int, cpus: int, ram_mb: int,
-) -> str:
-    return "\n".join([
-        "! XTB2 GOAT",
-        "",
-        f"%maxcore {ram_mb}",
-        "%pal",
-        f"  nprocs {cpus}",
-        "end",
-        "",
-        "%goat",
-        f"  NWorkers {cpus}",
-        "end",
-        "",
-        f"* xyz {charge} {multiplicity}",
-        xyz_block,
-        "*",
-        "",
-    ])
-
-
 _NUCLEUS_HEADER_RE = re.compile(
     r"^\s*Nucleus\s*:?\s*(\d+)\s*([A-Z][a-z]?)\s*:?\s*$"
 )
@@ -339,24 +318,6 @@ def parse_shieldings(out_text: str) -> Dict[int, float]:
                 shieldings[int(match.group(1))] = float(match.group(3))
 
     return shieldings
-
-
-def _parse_goat_globalmin_xyz(path: Path) -> str:
-    lines = path.read_text(encoding="utf-8").strip().splitlines()
-    if len(lines) < 3:
-        raise OrcaEngineError(f"GOAT globalminimum file malformed: {path}")
-    coord_lines: List[str] = []
-    for line in lines[2:]:
-        parts = line.split()
-        if len(parts) >= 4:
-            elem = parts[0]
-            x, y, z = float(parts[1]), float(parts[2]), float(parts[3])
-            coord_lines.append(f"  {elem:2s}  {x:14.8f}  {y:14.8f}  {z:14.8f}")
-    if not coord_lines:
-        raise OrcaEngineError(
-            f"GOAT globalminimum file contained no coordinates: {path}"
-        )
-    return "\n".join(coord_lines)
 
 
 _tms_lock = threading.Lock()
@@ -403,15 +364,7 @@ def _save_tms_cache(cache: dict) -> None:
 def _build_tms_mol() -> Chem.Mol:
     mol = Chem.MolFromSmiles(_TMS_SMILES)
     mol = Chem.AddHs(mol)
-    params = AllChem.ETKDGv3()
-    params.randomSeed = 0xC0FFEE
-    if AllChem.EmbedMolecule(mol, params) == -1:
-        raise OrcaEngineError("Failed to embed TMS reference molecule")
-    try:
-        AllChem.MMFFOptimizeMolecule(mol, maxIters=500)
-    except Exception:
-        AllChem.UFFOptimizeMolecule(mol, maxIters=500)
-    return mol
+    return _rdkit_preoptimized_mol(mol, random_seed=0xC0FFEE, num_confs=75)
 
 
 def _compute_tms_reference(functional: str, basis: str) -> Dict[str, float]:
@@ -472,61 +425,88 @@ def _get_tms_reference(functional: str, basis: str) -> Dict[str, float]:
         return refs
 
 
-def _fast_conformer_xyz(mol: Chem.Mol) -> str:
+def _set_rdkit_param(params, name: str, value) -> None:
+    try:
+        setattr(params, name, value)
+    except (AttributeError, ValueError):
+        pass
+
+
+def _rdkit_conformer_count(mol: Chem.Mol) -> int:
+    heavy_atoms = sum(1 for atom in mol.GetAtoms() if atom.GetAtomicNum() > 1)
+    # RDKit is cheap relative to DFT, so spend extra effort finding a good
+    # starting geometry before the ORCA shielding job.
+    return max(75, min(300, heavy_atoms * 25))
+
+
+def _copy_single_conformer(mol: Chem.Mol, conf_id: int) -> Chem.Mol:
+    conf = Chem.Conformer(mol.GetConformer(conf_id))
+    single = Chem.Mol(mol)
+    single.RemoveAllConformers()
+    single.AddConformer(conf, assignId=True)
+    return single
+
+
+def _optimize_rdkit_conformers(work: Chem.Mol, conf_ids: List[int]) -> List[tuple[int, float]]:
+    optimize_kwargs = {"maxIters": 4000, "numThreads": 0}
+    results = None
+    if AllChem.MMFFHasAllMoleculeParams(work):
+        try:
+            results = AllChem.MMFFOptimizeMoleculeConfs(work, **optimize_kwargs)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("MMFF conformer optimization failed; trying UFF: %s", exc)
+
+    if results is None:
+        try:
+            results = AllChem.UFFOptimizeMoleculeConfs(work, **optimize_kwargs)
+        except Exception as exc:  # noqa: BLE001
+            raise OrcaEngineError("RDKit force-field optimization failed") from exc
+
+    scored: List[tuple[int, float]] = []
+    for cid, (status, energy) in zip(conf_ids, results):
+        if status == -1:
+            continue
+        energy = float(energy)
+        if math.isfinite(energy):
+            scored.append((cid, energy))
+    return scored
+
+
+def _rdkit_preoptimized_mol(
+    mol: Chem.Mol,
+    *,
+    random_seed: int = 42,
+    num_confs: Optional[int] = None,
+) -> Chem.Mol:
     work = Chem.Mol(mol)
     params = AllChem.ETKDGv3()
-    params.randomSeed = 42
-    params.numThreads = 0
-    conf_ids = list(AllChem.EmbedMultipleConfs(work, numConfs=50, params=params))
+    params.randomSeed = random_seed
+    params.pruneRmsThresh = 0.25
+    _set_rdkit_param(params, "maxAttempts", 2000)
+    _set_rdkit_param(params, "numThreads", 0)
+    _set_rdkit_param(params, "enforceChirality", True)
+    _set_rdkit_param(params, "useSmallRingTorsions", True)
+    _set_rdkit_param(params, "useMacrocycleTorsions", True)
+
+    conf_ids = list(
+        AllChem.EmbedMultipleConfs(
+            work,
+            numConfs=num_confs or _rdkit_conformer_count(work),
+            params=params,
+        )
+    )
     if not conf_ids:
-        if AllChem.EmbedMolecule(work, randomSeed=42) == -1:
+        if AllChem.EmbedMolecule(work, randomSeed=random_seed) == -1:
             raise OrcaEngineError("ETKDG failed to embed any conformer")
         conf_ids = [0]
 
-    try:
-        results = AllChem.MMFFOptimizeMoleculeConfs(work, maxIters=2000)
-    except Exception:
-        results = None
-
-    best_cid = conf_ids[0]
-    if results is not None:
-        best_energy = float("inf")
-        for cid, (conv, energy) in zip(conf_ids, results):
-            if conv == -1:
-                continue
-            if energy < best_energy:
-                best_energy = energy
-                best_cid = cid
-
-    return _mol_xyz_block(work, conf_id=best_cid)
+    scored = _optimize_rdkit_conformers(work, conf_ids)
+    best_cid = min(scored, key=lambda item: item[1])[0] if scored else conf_ids[0]
+    return _copy_single_conformer(work, best_cid)
 
 
-def _goat_conformer_xyz(
-    mol: Chem.Mol,
-    charge: int,
-    multiplicity: int,
-    cpus: int,
-    ram_mb: int,
-) -> str:
-    seed_xyz = _fast_conformer_xyz(mol)
-    inp_text = _build_goat_input(
-        seed_xyz,
-        charge=charge,
-        multiplicity=multiplicity,
-        cpus=cpus,
-        ram_mb=ram_mb,
-    )
-    stamp = uuid.uuid4().hex[:8]
-    job = _run_orca(inp_text, base="goat", subdir=f"goat_{stamp}")
-    try:
-        gmin = job.out_path.parent / f"{job.out_path.stem}.globalminimum.xyz"
-        if not gmin.exists():
-            raise OrcaEngineError(
-                f"GOAT completed but no globalminimum.xyz was written in {job.out_path.parent}"
-            )
-        return _parse_goat_globalmin_xyz(gmin)
-    finally:
-        _cleanup_job_dir(job.job_dir)
+def _fast_conformer_xyz(mol: Chem.Mol) -> str:
+    return _mol_xyz_block(_rdkit_preoptimized_mol(mol))
 
 
 def _future_result(future: Future, label: str):
@@ -580,9 +560,9 @@ class OrcaEngine(Engine):
             raise OrcaEngineError(f"Unsupported nucleus: {nucleus!r}")
 
         strategy = options.get("conformer_strategy", "fast")
-        if strategy not in ("fast", "goat"):
+        if strategy != "fast":
             raise OrcaEngineError(
-                f"Unknown conformer_strategy: {strategy!r} (expected 'fast' or 'goat')"
+                f"Unknown conformer_strategy: {strategy!r} (expected 'fast')"
             )
 
         functional = settings.orca_functional
@@ -597,13 +577,7 @@ class OrcaEngine(Engine):
 
             tms_future = submit_orca_job(lambda: _get_tms_reference(functional, basis))
 
-            if strategy == "fast":
-                xyz_block = _fast_conformer_xyz(mol)
-            else:
-                goat_future = submit_orca_job(
-                    lambda: _goat_conformer_xyz(mol, charge, multiplicity, cpus, ram_mb)
-                )
-                xyz_block = _future_result(goat_future, "GOAT conformer")
+            xyz_block = _fast_conformer_xyz(mol)
 
             def _run_sample() -> Dict[int, float]:
                 inp_text = _build_nmr_input(

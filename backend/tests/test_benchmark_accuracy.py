@@ -46,7 +46,8 @@ _THRESHOLDS = {
     ("cdk", "1H"): 1.0,
     ("cascade", "13C"): 4.0,
     ("cascade", "1H"): 0.6,
-    # ORCA at the cheap default (PBE/def2-SVP) is only qualitative — generous.
+    # ORCA live tests are expensive and benchmark-dependent, so keep this
+    # generous enough to catch breakage rather than method-to-method variance.
     ("orca", "13C"): 25.0,
     ("orca", "1H"): 2.0,
 }

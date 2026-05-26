@@ -16,7 +16,7 @@ from __future__ import annotations
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import List, Optional, Sequence
+from typing import Callable, List, Optional, Sequence
 
 from app.config import settings
 
@@ -37,7 +37,7 @@ class Level:
 # Cheap -> expensive. Numbers are stable selectors for the CLI (--levels 1 2 3).
 LADDER: List[Level] = [
     Level(
-        1, "PBE", "def2-SVP", "seconds (current default)",
+        1, "PBE", "def2-SVP", "seconds",
         "Cheapest; fast TMS; fine for nonpolar sp3 trends.",
         "SVP too small for quantitative shifts; GGA underestimates deshielding; "
         "weak for aromatics/carbonyls.",
@@ -66,6 +66,31 @@ LADDER: List[Level] = [
         6, "B3LYP", "pcSseg-2", "~20-90 min",
         "Best accuracy-per-cost sweet spot for routine 1H/13C.",
         "Noticeably slower; RAM-hungry (set ORCA_RAM_MB >= 4000).",
+    ),
+    Level(
+        7, "r2SCAN", "pcSseg-1", "~1-10 min",
+        "Modern meta-GGA with an NMR-optimized compact basis; cheap r2SCAN check.",
+        "No exact exchange; may lag hybrids for aromatic/carbonyl 13C.",
+    ),
+    Level(
+        8, "TPSSh", "pcSseg-1", "~5-20 min",
+        "Hybrid meta-GGA with low exact exchange; app default for benchmark-informed DFT runs.",
+        "More expensive than nonhybrids; still limited by the small pcSseg-1 basis.",
+    ),
+    Level(
+        9, "PBE0", "pcSseg-1", "~5-20 min",
+        "Hybrid functional with Jensen shielding basis; isolates basis effect vs PBE0/TZVP.",
+        "Smaller basis than pcSseg-2; can retain systematic offsets.",
+    ),
+    Level(
+        10, "wB97X-D3", "pcSseg-1", "~10-30 min",
+        "Range-separated hybrid plus dispersion with an NMR-optimized compact basis.",
+        "Range-separated exact exchange is costlier; keyword support depends on ORCA build.",
+    ),
+    Level(
+        11, "wB97X-D3", "def2-TZVP", "~10-45 min",
+        "Modern range-separated hybrid + dispersion on a broadly reliable triple-zeta basis.",
+        "Likely slower than pcSseg-1 and not as shielding-specialized.",
     ),
 ]
 
@@ -123,8 +148,11 @@ def run_sweep(
     levels: Sequence[Level],
     *,
     conformer_strategy: str = "fast",
+    skip_unready: bool = True,
     warm_tms: bool = True,
+    exclude_exchangeable: bool = False,
     progress: bool = True,
+    on_level_done: Optional[Callable[[BenchmarkResult], None]] = None,
 ) -> List[BenchmarkResult]:
     """Run the ORCA engine over ``dataset`` at each level of theory.
 
@@ -150,12 +178,15 @@ def run_sweep(
                 dataset,
                 nuclei,
                 conformer_strategy=conformer_strategy,
-                skip_unready=True,
+                skip_unready=skip_unready,
+                exclude_exchangeable=exclude_exchangeable,
                 functional=lvl.functional,
                 basis=lvl.basis,
                 progress=progress,
             )
         results.append(result)
+        if on_level_done:
+            on_level_done(result)
         if progress:
             ok = sum(1 for r in result.runs if r.status == "ok")
             err = sum(1 for r in result.runs if r.status == "error")

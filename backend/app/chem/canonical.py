@@ -86,6 +86,25 @@ def canonicalize(smiles: str, add_hs: bool = True) -> CanonicalMolecule:
     )
 
 
+def display_molfile(mol: Chem.Mol) -> str:
+    """Return a 2D heavy-atom molfile using the canonical atom order."""
+    display = Chem.RemoveHs(Chem.Mol(mol), sanitize=False)
+    Chem.SanitizeMol(display)
+    AllChem.Compute2DCoords(display)
+    return Chem.MolToMolBlock(display, includeStereo=True, kekulize=False)
+
+
+def heavy_atom_hydrogen_counts(mol: Chem.Mol) -> List[int]:
+    """Hydrogen counts indexed by canonical heavy-atom index."""
+    counts: List[int] = []
+    for atom in mol.GetAtoms():
+        if atom.GetAtomicNum() <= 1:
+            continue
+        explicit_h = sum(1 for neighbor in atom.GetNeighbors() if neighbor.GetAtomicNum() == 1)
+        counts.append(explicit_h + atom.GetNumImplicitHs())
+    return counts
+
+
 def validate_smiles(smiles: str) -> Optional[str]:
     """Return None if valid, otherwise a human-readable error string."""
     try:

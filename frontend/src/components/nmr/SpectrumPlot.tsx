@@ -42,6 +42,8 @@ interface SpectrumPlotProps {
   linkingEnabled?: boolean;
   viewMode?: "overlay" | "stacked";
   intensityScales?: Record<string, number>;
+  hoveredAtomIndices?: number[] | null;
+  hoveredSourceId?: string | null;
   onAtomHover?: (atomIndices: number[] | null, sourceId?: string | null) => void;
 }
 
@@ -170,6 +172,8 @@ export function SpectrumPlot({
   linkingEnabled = true,
   viewMode = "overlay",
   intensityScales,
+  hoveredAtomIndices = null,
+  hoveredSourceId = null,
   onAtomHover,
 }: SpectrumPlotProps) {
   const core = useMemo(() => initNmriumCore(), []);
@@ -261,8 +265,27 @@ export function SpectrumPlot({
     [interactiveSignals, nucleus, selectedAtomIndex],
   );
 
-  const activeSignals = hoveredSignal ? [hoveredSignal] : selectedSignals;
-  const activeSignal = hoveredSignal ?? (selectedSignals.length === 1 ? selectedSignals[0] : null);
+  const externallyHoveredSignals = useMemo(() => {
+    if (!hoveredAtomIndices || hoveredAtomIndices.length === 0) return [];
+    const hoverSet = new Set(hoveredAtomIndices);
+    return signals.filter((signal) => {
+      if (hoveredSourceId && signal.sourceId !== hoveredSourceId) return false;
+      return signalSelectionAtomIndices(signal, nucleus).some((atomIndex) => hoverSet.has(atomIndex));
+    });
+  }, [hoveredAtomIndices, hoveredSourceId, nucleus, signals]);
+
+  const activeSignals = hoveredSignal
+    ? [hoveredSignal]
+    : externallyHoveredSignals.length > 0
+      ? externallyHoveredSignals
+      : selectedSignals;
+  const activeSignal =
+    hoveredSignal ??
+    (externallyHoveredSignals.length === 1
+      ? externallyHoveredSignals[0]
+      : selectedSignals.length === 1
+        ? selectedSignals[0]
+        : null);
 
   const highlightBands = useMemo<HighlightBand[]>(
     () =>

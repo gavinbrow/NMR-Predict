@@ -15,7 +15,6 @@ from app.engines import engine_is_implemented, get_engine
 from app.engines.orca import (
     OrcaEngine,
     OrcaEngineError,
-    _build_goat_input,
     _build_nmr_input,
     _clamped_orca_resources,
     _get_tms_reference,
@@ -104,20 +103,6 @@ def test_build_nmr_input_shape():
     assert "nprocs 4" in inp
     assert "* xyz 0 1" in inp
     assert inp.rstrip().endswith("*")
-
-
-def test_build_goat_input_includes_goat_block():
-    inp = _build_goat_input(
-        xyz_block="  H   0.0  0.0  0.0",
-        charge=-1,
-        multiplicity=2,
-        cpus=8,
-        ram_mb=3000,
-    )
-    assert inp.startswith("! XTB2 GOAT")
-    assert "%goat" in inp
-    assert "NWorkers 8" in inp
-    assert "* xyz -1 2" in inp
 
 
 _PER_ATOM_SAMPLE = """

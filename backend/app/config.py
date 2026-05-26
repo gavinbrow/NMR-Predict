@@ -59,11 +59,11 @@ class Settings(BaseModel):
     )
     work_dir: str = os.getenv("NMR_WORK_DIR", os.path.join(os.getcwd(), "_work"))
 
-    # ORCA (QM engine) configuration. Cheap defaults — override via env
-    # for production accuracy (e.g. ``! B97-D3 pcS-seg-1 NMR``).
+    # ORCA (QM engine) configuration. Defaults are tuned from the local
+    # benchmark sweep for routine NMR work; override via env for experiments.
     orca_exe: str = os.getenv("ORCA_EXE", r"C:\ORCA_6.1.1\orca.exe")
-    orca_functional: str = os.getenv("ORCA_FUNCTIONAL", "PBE")
-    orca_basis: str = os.getenv("ORCA_BASIS", "def2-SVP")
+    orca_functional: str = os.getenv("ORCA_FUNCTIONAL", "TPSSh")
+    orca_basis: str = os.getenv("ORCA_BASIS", "pcSseg-1")
     orca_cpus: int = int(os.getenv("ORCA_CPUS", str(os.cpu_count() or 4)))
     orca_ram_mb: int = int(os.getenv("ORCA_RAM_MB", "2000"))
     # Where ORCA job dirs and the TMS reference cache live.

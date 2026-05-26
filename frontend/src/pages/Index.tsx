@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { Ketcher } from "ketcher-core";
-import { Atom, FlaskConical, Loader2, Play, Plus, Sparkles, WifiOff } from "lucide-react";
+import { FlaskConical, Loader2, Play, Plus, Sparkles, WifiOff } from "lucide-react";
+import { AppShell } from "@/components/AppShell";
 import { BootSplash } from "@/components/nmr/BootSplash";
 import { CompoundsPanel, type ViewMode } from "@/components/nmr/CompoundsPanel";
 import { ControlPanel } from "@/components/nmr/ControlPanel";
@@ -33,6 +34,7 @@ interface PredictionComponent {
   visible: boolean;
   imageDataUrl: string | null;
   molfile: string | null;
+  hydrogenCounts: number[];
   intensityScale: number;
 }
 
@@ -92,6 +94,20 @@ function formatElapsed(ms: number) {
   const minutes = Math.floor(totalSeconds / 60);
   const seconds = totalSeconds % 60;
   return `${minutes}:${seconds.toString().padStart(2, "0")}`;
+}
+
+const DEFAULT_ENGINE_BY_NUCLEUS: Record<string, string> = {
+  "1H": "cdk",
+  "13C": "cascade",
+};
+
+function defaultEnginesForNucleus(nucleus: string, engines: Engine[]) {
+  const readyNames = engines.filter((engine) => engine.ready).map((engine) => engine.name);
+  const preferred = DEFAULT_ENGINE_BY_NUCLEUS[nucleus];
+  if (preferred && readyNames.includes(preferred)) {
+    return [preferred];
+  }
+  return readyNames.length > 0 ? [readyNames[0]] : [];
 }
 
 const Index = () => {
@@ -219,8 +235,7 @@ const Index = () => {
         setNucleus(firstNucleus);
         setConformerStrategy(firstStrategy);
 
-        const ready = eng.data.filter((engine) => engine.ready);
-        setSelectedEngines(ready.map((engine) => engine.name));
+        setSelectedEngines(defaultEnginesForNucleus(firstNucleus, eng.data));
         setBooted(true);
       } catch (error) {
         const message = error instanceof Error ? error.message : "Unknown error";
@@ -371,6 +386,19 @@ const Index = () => {
     );
   }, []);
 
+  const handleNucleusChange = useCallback(
+    (nextNucleus: string) => {
+      setNucleus(nextNucleus);
+      setSelectedEngines(defaultEnginesForNucleus(nextNucleus, engines));
+    },
+    [engines],
+  );
+
+  const clearAtomHover = useCallback(() => {
+    setHoveredAtomIndices(null);
+    setHoveredSourceId(null);
+  }, []);
+
   const cancelPrediction = useCallback(() => {
     predictAbortRef.current?.abort();
   }, []);
@@ -436,11 +464,13 @@ const Index = () => {
           ketcherRef.current,
           decoratedResponse.smiles,
         );
-        let molfile: string | null = null;
-        try {
-          molfile = (await ketcherRef.current?.getMolfile()) ?? null;
-        } catch {
-          molfile = null;
+        let molfile: string | null = decoratedResponse.structureMolfile ?? null;
+        if (!molfile) {
+          try {
+            molfile = (await ketcherRef.current?.getMolfile()) ?? null;
+          } catch {
+            molfile = null;
+          }
         }
         const nextComponent: PredictionComponent = {
           id: componentId,
@@ -449,6 +479,7 @@ const Index = () => {
           visible: true,
           imageDataUrl,
           molfile,
+          hydrogenCounts: decoratedResponse.structureHydrogenCounts ?? [],
           intensityScale: 1,
         };
 
@@ -507,39 +538,28 @@ const Index = () => {
   }, [activeComponent]);
 
   if (!booted || !options) {
-    return <BootSplash message={bootMessage} error={bootError} />;
+    return (
+      <AppShell>
+        <BootSplash message={bootMessage} error={bootError} />
+      </AppShell>
+    );
   }
 
   return (
-    <div className="min-h-screen bg-gradient-surface">
-      <header className="border-b border-border/60 bg-background/70 backdrop-blur supports-[backdrop-filter]:bg-background/60">
-        <div className="container flex items-center justify-between py-4">
-          <div className="flex items-center gap-3">
-            <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-gradient-primary shadow-elegant">
-              <Atom className="h-5 w-5 text-primary-foreground" />
-            </div>
-            <div>
-              <h1 className="text-lg font-semibold tracking-tight">NMR Predict</h1>
-              <p className="text-xs text-muted-foreground">
-                Interactive multi-engine chemical shift prediction
-              </p>
-            </div>
-          </div>
-
-          <div className="flex items-center gap-3 text-xs">
-            {mocked ? (
-              <span className="flex items-center gap-1.5 rounded-full bg-warning/15 px-2.5 py-1 font-medium text-warning">
-                <WifiOff className="h-3 w-3" /> Offline (mock data)
-              </span>
-            ) : null}
-            <span className="hidden items-center gap-1.5 rounded-full bg-success/10 px-2.5 py-1 font-medium text-success sm:flex">
-              <Sparkles className="h-3 w-3" /> {readyEngineCount} engines ready
+    <AppShell
+      headerAccessory={
+        <>
+          {mocked ? (
+            <span className="flex items-center gap-1.5 rounded-full bg-warning/15 px-2.5 py-1 font-medium text-warning">
+              <WifiOff className="h-3 w-3" /> Offline (mock data)
             </span>
-          </div>
-        </div>
-      </header>
-
-      <main className="container py-6">
+          ) : null}
+          <span className="hidden items-center gap-1.5 rounded-full bg-success/10 px-2.5 py-1 font-medium text-success sm:flex">
+            <Sparkles className="h-3 w-3" /> {readyEngineCount} engines ready
+          </span>
+        </>
+      }
+    >
         <div className="space-y-6">
           <div className="grid grid-cols-1 gap-6 lg:grid-cols-12">
             <section className="space-y-6 lg:col-span-8">
@@ -600,7 +620,7 @@ const Index = () => {
                   nucleus={nucleus}
                   conformerStrategy={conformerStrategy}
                   selectedEngines={selectedEngines}
-                  onNucleusChange={setNucleus}
+                  onNucleusChange={handleNucleusChange}
                   onConformerChange={setConformerStrategy}
                   onToggleEngine={toggleEngine}
                 />
@@ -762,6 +782,8 @@ const Index = () => {
                 linkingEnabled={linkingEnabled}
                 viewMode={viewMode}
                 intensityScales={intensityScales}
+                hoveredAtomIndices={hoveredAtomIndices}
+                hoveredSourceId={hoveredSourceId}
                 onAtomHover={handleAtomHover}
               />
             ) : (
@@ -774,7 +796,6 @@ const Index = () => {
             )}
           </section>
         </div>
-      </main>
 
       {predictionComponents
         .filter((component) => floatingComponentIds.includes(component.id))
@@ -794,13 +815,27 @@ const Index = () => {
               imageDataUrl={component.imageDataUrl}
               molfile={component.molfile}
               highlightedAtoms={componentHighlights}
+              hydrogenCounts={component.hydrogenCounts}
               initialX={24 + index * 36}
               initialY={120 + index * 36}
+              onAtomHover={(atomIndex) => {
+                if (atomIndex == null) {
+                  clearAtomHover();
+                  return;
+                }
+                handleAtomHover([atomIndex], component.id);
+              }}
+              onAtomClick={(atomIndex) => {
+                setActiveComponentId(component.id);
+                setEditorLinkedComponentId(component.id);
+                setSelectedAtomIndex(atomIndex);
+                handleAtomHover([atomIndex], component.id);
+              }}
               onClose={() => closeFloatingComponent(component.id)}
             />
           );
         })}
-    </div>
+    </AppShell>
   );
 };
 

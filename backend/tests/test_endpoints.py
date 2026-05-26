@@ -50,7 +50,7 @@ def test_options_enumerates_literals(client):
     body = r.json()
     assert body["nuclei"] == ["1H", "13C"]
     assert set(body["modes"]) == {"individual", "consensus"}
-    assert set(body["conformer_strategies"]) == {"fast", "goat"}
+    assert body["conformer_strategies"] == ["fast"]
     assert set(body["engines"]) == {"cdk", "cascade", "orca"}
 
 
@@ -96,6 +96,24 @@ def test_predict_always_returns_consensus_block(client, stub_run_engine):
     body = r.json()
     assert body["consensus"] is not None
     assert "cdk" in body["engines"]
+    assert body["structure_molfile"]
+    assert body["structure_hydrogen_counts"] == [3, 2, 1]
+
+
+def test_predict_defaults_engine_by_nucleus(client, stub_run_engine):
+    proton = client.post(
+        "/predict",
+        json={"smiles": "CCO", "mode": "individual", "nucleus": "1H"},
+    )
+    carbon = client.post(
+        "/predict",
+        json={"smiles": "CCO", "mode": "individual", "nucleus": "13C"},
+    )
+
+    assert proton.status_code == 200
+    assert carbon.status_code == 200
+    assert set(proton.json()["engines"]) == {"cdk"}
+    assert set(carbon.json()["engines"]) == {"cascade"}
 
 
 def test_predict_consensus_mode_includes_consensus_block(client, stub_run_engine):

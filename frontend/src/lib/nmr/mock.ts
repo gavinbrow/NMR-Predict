@@ -9,7 +9,7 @@ import type {
 export const mockOptions: OptionsResponse = {
   nuclei: ["1H", "13C", "15N", "19F", "31P"],
   modes: ["individual", "consensus"],
-  conformer_strategies: ["fast", "accurate", "single"],
+  conformer_strategies: ["fast"],
   engine_names: ["cdk", "nmrshiftdb", "cascade", "orca", "mestrenova"],
 };
 
@@ -25,7 +25,7 @@ export function mockValidate(smiles: string): ValidateResponse {
   const trimmed = smiles.trim();
   if (!trimmed) return { valid: false, error: "SMILES is empty" };
   // Naive check — balanced parens/brackets and only allowed chars.
-  const allowed = /^[A-Za-z0-9@+\-\[\]\(\)=#$\/\\.%:*]+$/;
+  const allowed = new RegExp("^[A-Za-z0-9@+\\-\\[\\]()=#$/.%:*\\\\]+$");
   if (!allowed.test(trimmed)) return { valid: false, error: "Invalid characters in SMILES" };
   let depth = 0;
   for (const c of trimmed) {

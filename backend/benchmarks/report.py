@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 from benchmarks import metrics
-from benchmarks.runner import BenchmarkResult, DataPoint
+from benchmarks.runner import BenchmarkResult, DataPoint, MoleculeRun
 
 _REPORTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "reports")
 
@@ -26,6 +26,35 @@ def _fmt(x: float) -> str:
     return f"{x:.3f}"
 
 
+_SIZE_BUCKETS = (
+    (1, 3, "tiny (1-3 heavy atoms)"),
+    (4, 7, "small (4-7 heavy atoms)"),
+    (8, 14, "medium (8-14 heavy atoms)"),
+    (15, 10**9, "large (15+ heavy atoms)"),
+)
+_SIZE_BUCKET_ORDER = {bucket[2]: i for i, bucket in enumerate(_SIZE_BUCKETS)}
+
+
+def size_bucket(heavy_atoms: Optional[int]) -> str:
+    """Return the molecule-size bucket used for accuracy/time breakdowns."""
+    if heavy_atoms is None:
+        return "unknown"
+    for lo, hi, label in _SIZE_BUCKETS:
+        if lo <= heavy_atoms <= hi:
+            return label
+    return "unknown"
+
+
+def _size_sort_key(bucket: str) -> int:
+    return _SIZE_BUCKET_ORDER.get(bucket, len(_SIZE_BUCKET_ORDER))
+
+
+def _safe_div(numerator: float, denominator: float) -> float:
+    if denominator <= 0:
+        return float("nan")
+    return numerator / denominator
+
+
 @dataclass(frozen=True)
 class GroupSummary:
     label: str
@@ -33,7 +62,19 @@ class GroupSummary:
     scenario: Optional[str]  # None == overall
     summary: metrics.MetricSummary
     seconds: float
+    seconds_per_heavy_atom: float
     scaled_mae: float  # MAE after linear scaling (bias-removed)
+
+
+@dataclass(frozen=True)
+class SizeSummary:
+    label: str
+    nucleus: str
+    bucket: str
+    summary: metrics.MetricSummary
+    seconds: float
+    seconds_per_heavy_atom: float
+    run_count: int
 
 
 def _collect(results: Sequence[BenchmarkResult]) -> List[DataPoint]:
@@ -58,27 +99,37 @@ def summarize_results(results: Sequence[BenchmarkResult]) -> List[GroupSummary]:
     """Per (label, nucleus) overall summaries + per-scenario breakdowns."""
     summaries: List[GroupSummary] = []
     seconds_by_label_nuc: Dict[Tuple[str, str], float] = {}
+    heavy_atoms_by_label_nuc: Dict[Tuple[str, str], int] = {}
     for r in results:
         for run in r.runs:
-            seconds_by_label_nuc.setdefault((r.label, run.nucleus), 0.0)
-            seconds_by_label_nuc[(r.label, run.nucleus)] += run.seconds
+            key = (r.label, run.nucleus)
+            seconds_by_label_nuc.setdefault(key, 0.0)
+            seconds_by_label_nuc[key] += run.seconds
+            if run.status != "skipped" and run.heavy_atoms:
+                heavy_atoms_by_label_nuc.setdefault(key, 0)
+                heavy_atoms_by_label_nuc[key] += run.heavy_atoms
 
     # Group points by label (engine + optional level) and nucleus.
     by_label_nuc: Dict[Tuple[str, str], List[DataPoint]] = {}
-    label_of: Dict[int, str] = {}
     for r in results:
         for p in r.points:
             by_label_nuc.setdefault((r.label, p.nucleus), []).append(p)
 
     for (label, nucleus), pts in sorted(by_label_nuc.items()):
         summary, scaled = _summary_for(pts)
+        key = (label, nucleus)
+        seconds = seconds_by_label_nuc.get(key, 0.0)
         summaries.append(
             GroupSummary(
                 label=label,
                 nucleus=nucleus,
                 scenario=None,
                 summary=summary,
-                seconds=seconds_by_label_nuc.get((label, nucleus), 0.0),
+                seconds=seconds,
+                seconds_per_heavy_atom=_safe_div(
+                    seconds,
+                    heavy_atoms_by_label_nuc.get(key, 0),
+                ),
                 scaled_mae=scaled,
             )
         )
@@ -94,10 +145,57 @@ def summarize_results(results: Sequence[BenchmarkResult]) -> List[GroupSummary]:
                     scenario=scenario,
                     summary=s_summary,
                     seconds=0.0,
+                    seconds_per_heavy_atom=float("nan"),
                     scaled_mae=s_scaled,
                 )
             )
 
+    return summaries
+
+
+def summarize_size_results(results: Sequence[BenchmarkResult]) -> List[SizeSummary]:
+    """Summaries grouped by model, nucleus, and molecule heavy-atom bucket."""
+    points_by_key: Dict[Tuple[str, str, str], List[DataPoint]] = {}
+    seconds_by_key: Dict[Tuple[str, str, str], float] = {}
+    heavy_atoms_by_key: Dict[Tuple[str, str, str], int] = {}
+    runs_by_key: Dict[Tuple[str, str, str], int] = {}
+
+    for r in results:
+        for p in r.points:
+            key = (r.label, p.nucleus, size_bucket(p.molecule_heavy_atoms))
+            points_by_key.setdefault(key, []).append(p)
+        for run in r.runs:
+            if run.status == "skipped" or not run.heavy_atoms:
+                continue
+            key = (r.label, run.nucleus, size_bucket(run.heavy_atoms))
+            seconds_by_key.setdefault(key, 0.0)
+            heavy_atoms_by_key.setdefault(key, 0)
+            runs_by_key.setdefault(key, 0)
+            seconds_by_key[key] += run.seconds
+            heavy_atoms_by_key[key] += run.heavy_atoms
+            runs_by_key[key] += 1
+
+    summaries: List[SizeSummary] = []
+    for key, pts in sorted(
+        points_by_key.items(),
+        key=lambda item: (item[0][0], item[0][1], _size_sort_key(item[0][2])),
+    ):
+        summary, _scaled = _summary_for(pts)
+        seconds = seconds_by_key.get(key, 0.0)
+        summaries.append(
+            SizeSummary(
+                label=key[0],
+                nucleus=key[1],
+                bucket=key[2],
+                summary=summary,
+                seconds=seconds,
+                seconds_per_heavy_atom=_safe_div(
+                    seconds,
+                    heavy_atoms_by_key.get(key, 0),
+                ),
+                run_count=runs_by_key.get(key, 0),
+            )
+        )
     return summaries
 
 
@@ -148,15 +246,16 @@ def render_markdown(
     lines.append("## Overall accuracy")
     lines.append("")
     lines.append(
-        "| Label | Nucleus | n | MAE | RMSE | Max err | Bias | R² | Scaled MAE | Total s |"
+        "| Label | Nucleus | n | MAE | RMSE | Max err | Bias | R² | "
+        "Scaled MAE | Total s | s/heavy atom |"
     )
-    lines.append("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |")
+    lines.append("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |")
     for s in overall:
         m = s.summary
         lines.append(
             f"| {s.label} | {s.nucleus} | {m.n} | {_fmt(m.mae)} | {_fmt(m.rmse)} | "
             f"{_fmt(m.max_abs_err)} | {_fmt(m.bias)} | {_fmt(m.r2)} | {_fmt(s.scaled_mae)} | "
-            f"{_fmt(s.seconds)} |"
+            f"{_fmt(s.seconds)} | {_fmt(s.seconds_per_heavy_atom)} |"
         )
     lines.append("")
     lines.append(
@@ -177,6 +276,23 @@ def render_markdown(
             f"{_fmt(m.rmse)} | {_fmt(m.max_abs_err)} | {_fmt(m.bias)} |"
         )
     lines.append("")
+
+    # Molecule-size breakdown.
+    size_summaries = summarize_size_results(results)
+    if size_summaries:
+        lines.append("## Per-size accuracy and speed")
+        lines.append("")
+        lines.append(
+            "| Label | Nucleus | Size bucket | n | MAE | RMSE | Total s | s/heavy atom |"
+        )
+        lines.append("| --- | --- | --- | --- | --- | --- | --- | --- |")
+        for s in size_summaries:
+            m = s.summary
+            lines.append(
+                f"| {s.label} | {s.nucleus} | {s.bucket} | {m.n} | {_fmt(m.mae)} | "
+                f"{_fmt(m.rmse)} | {_fmt(s.seconds)} | {_fmt(s.seconds_per_heavy_atom)} |"
+            )
+        lines.append("")
 
     # Worst offenders.
     offenders = worst_offenders(results)
@@ -214,6 +330,15 @@ th { background: #f1f3f5; text-align: center; }
 td:first-child, th:first-child, td.l, th.l { text-align: left; }
 tr:nth-child(even) td { background: #fafbfc; }
 code { background: #f1f3f5; padding: 0.05rem 0.3rem; border-radius: 3px; font-size: 0.85em; }
+.chart { border: 1px solid #e1e4e8; border-radius: 10px; padding: 0.8rem 1rem;
+         margin: 1rem 0 1.4rem; background: linear-gradient(180deg, #fff, #f8fafc); }
+.chart figcaption { font-weight: 700; margin-bottom: 0.7rem; }
+.bar-row { display: grid; grid-template-columns: minmax(13rem, 28%) 1fr 7rem;
+           gap: 0.7rem; align-items: center; margin: 0.35rem 0; font-size: 0.85rem; }
+.bar-label { overflow-wrap: anywhere; color: #243042; }
+.bar-track { background: #e8edf3; border-radius: 999px; height: 0.75rem; overflow: hidden; }
+.bar-fill { background: linear-gradient(90deg, #2f80ed, #1f9d8a); height: 100%; border-radius: 999px; }
+.bar-value { color: #243042; font-variant-numeric: tabular-nums; text-align: right; }
 """
 
 
@@ -244,6 +369,53 @@ def _html_table(headers: Sequence[str], rows: Sequence[Sequence[object]],
     return "".join(out)
 
 
+def _chart_rows(
+    rows: Sequence[Tuple[str, float, str]],
+    *,
+    value_suffix: str = "",
+) -> str:
+    finite = [value for _label, value, _meta in rows if not math.isnan(value)]
+    if not finite:
+        return "<div class='note'>No finite values available.</div>"
+    max_value = max(finite) or 1.0
+    out: List[str] = []
+    for label, value, meta in rows:
+        if math.isnan(value):
+            width = 0.0
+            value_text = "n/a"
+        else:
+            width = max(1.0, min(100.0, (value / max_value) * 100.0))
+            value_text = f"{value:.3f}{value_suffix}"
+        if meta:
+            label = f"{label} ({meta})"
+        out.append(
+            "<div class='bar-row'>"
+            f"<div class='bar-label'>{_html_escape(label)}</div>"
+            "<div class='bar-track'>"
+            f"<div class='bar-fill' style='width:{width:.1f}%'></div>"
+            "</div>"
+            f"<div class='bar-value'>{_html_escape(value_text)}</div>"
+            "</div>"
+        )
+    return "".join(out)
+
+
+def _bar_chart(
+    title: str,
+    rows: Sequence[Tuple[str, float, str]],
+    *,
+    value_suffix: str = "",
+) -> str:
+    if not rows:
+        return ""
+    return (
+        "<figure class='chart'>"
+        f"<figcaption>{_html_escape(title)}</figcaption>"
+        f"{_chart_rows(rows, value_suffix=value_suffix)}"
+        "</figure>"
+    )
+
+
 def render_html(
     results: Sequence[BenchmarkResult],
     *,
@@ -254,6 +426,7 @@ def render_html(
     summaries = summarize_results(results)
     overall = [s for s in summaries if s.scenario is None]
     per_scenario = [s for s in summaries if s.scenario is not None]
+    size_summaries = summarize_size_results(results)
     esc = _html_escape
 
     parts: List[str] = []
@@ -267,6 +440,54 @@ def render_html(
         parts.append(
             "<div class='note'>Exchangeable (OH/NH/COOH) protons excluded from metrics.</div>"
         )
+
+    # Figures.
+    if overall:
+        parts.append("<h2>Figures</h2>")
+        parts.append(_bar_chart(
+            "Overall MAE by model and nucleus",
+            [
+                (f"{s.label} | {s.nucleus}", s.summary.mae, f"n={s.summary.n}")
+                for s in sorted(overall, key=lambda x: (x.nucleus, x.summary.mae))
+            ],
+        ))
+        parts.append(_bar_chart(
+            "Overall seconds per heavy atom",
+            [
+                (
+                    f"{s.label} | {s.nucleus}",
+                    s.seconds_per_heavy_atom,
+                    f"total {s.seconds:.1f}s",
+                )
+                for s in sorted(overall, key=lambda x: (x.nucleus, x.label))
+            ],
+            value_suffix="s",
+        ))
+        for nucleus in sorted({s.nucleus for s in size_summaries}):
+            by_size = [
+                s for s in size_summaries
+                if s.nucleus == nucleus and not math.isnan(s.summary.mae)
+            ]
+            by_size = sorted(by_size, key=lambda x: (_size_sort_key(x.bucket), x.label))
+            parts.append(_bar_chart(
+                f"MAE by molecule size ({nucleus})",
+                [
+                    (f"{s.bucket} | {s.label}", s.summary.mae, f"n={s.summary.n}")
+                    for s in by_size
+                ],
+            ))
+            parts.append(_bar_chart(
+                f"Seconds per heavy atom by molecule size ({nucleus})",
+                [
+                    (
+                        f"{s.bucket} | {s.label}",
+                        s.seconds_per_heavy_atom,
+                        f"{s.run_count} run(s)",
+                    )
+                    for s in by_size
+                ],
+                value_suffix="s",
+            ))
 
     # Run coverage.
     cov: Dict[Tuple[str, str], Dict[str, int]] = {}
@@ -286,10 +507,11 @@ def render_html(
     parts.append("<h2>Overall accuracy</h2>")
     parts.append(_html_table(
         ["Label", "Nucleus", "n", "MAE", "RMSE", "Max err", "Bias", "R²",
-         "Scaled MAE", "Total s"],
+         "Scaled MAE", "Total s", "s/heavy atom"],
         [[esc(s.label), esc(s.nucleus), s.summary.n, _fmt(s.summary.mae),
           _fmt(s.summary.rmse), _fmt(s.summary.max_abs_err), _fmt(s.summary.bias),
-          _fmt(s.summary.r2), _fmt(s.scaled_mae), _fmt(s.seconds)]
+          _fmt(s.summary.r2), _fmt(s.scaled_mae), _fmt(s.seconds),
+          _fmt(s.seconds_per_heavy_atom)]
          for s in overall],
         left_cols=[0, 1],
     ))
@@ -308,6 +530,19 @@ def render_html(
          for s in per_scenario],
         left_cols=[0, 1, 2],
     ))
+
+    # Per-size.
+    if size_summaries:
+        parts.append("<h2>Per-size accuracy and speed</h2>")
+        parts.append(_html_table(
+            ["Label", "Nucleus", "Size bucket", "n", "MAE", "RMSE",
+             "Total s", "s/heavy atom"],
+            [[esc(s.label), esc(s.nucleus), esc(s.bucket), s.summary.n,
+              _fmt(s.summary.mae), _fmt(s.summary.rmse), _fmt(s.seconds),
+              _fmt(s.seconds_per_heavy_atom)]
+             for s in size_summaries],
+            left_cols=[0, 1, 2],
+        ))
 
     # Worst offenders.
     offenders = worst_offenders(results)
@@ -337,27 +572,145 @@ def _point_label_lookup(results: Sequence[BenchmarkResult]) -> Dict[int, str]:
 
 def write_csv(results: Sequence[BenchmarkResult], path: str) -> None:
     """Write raw per-group data points (one row per scored group)."""
-    label_lookup = _point_label_lookup(results)
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     with open(path, "w", newline="", encoding="utf-8") as fh:
         writer = csv.writer(fh)
         writer.writerow(
             [
                 "label", "engine", "functional", "basis", "nucleus", "molecule",
-                "scenario", "group_smarts", "n_atoms", "reference_ppm",
-                "predicted_ppm", "error", "abs_error", "exchangeable",
+                "scenario", "group_smarts", "n_atoms", "molecule_heavy_atoms",
+                "molecule_total_atoms", "size_bucket", "run_seconds",
+                "run_seconds_per_heavy_atom", "reference_ppm", "predicted_ppm",
+                "error", "abs_error", "exchangeable",
             ]
         )
         for r in results:
             for p in r.points:
+                seconds_per_atom = _safe_div(p.run_seconds, p.molecule_heavy_atoms)
                 writer.writerow(
                     [
                         r.label, r.engine, r.functional or "", r.basis or "",
                         p.nucleus, p.molecule_id, p.scenario, p.group_smarts,
-                        p.n_atoms, f"{p.reference_ppm:.4f}", f"{p.predicted_ppm:.4f}",
+                        p.n_atoms, p.molecule_heavy_atoms, p.molecule_total_atoms,
+                        size_bucket(p.molecule_heavy_atoms), f"{p.run_seconds:.4f}",
+                        _fmt(seconds_per_atom), f"{p.reference_ppm:.4f}",
+                        f"{p.predicted_ppm:.4f}",
                         f"{p.error:.4f}", f"{p.abs_error:.4f}", int(p.exchangeable),
                     ]
                 )
+
+
+def _parse_float(value: object, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _parse_int(value: object, default: int = 0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def read_csv_results(paths: Sequence[str]) -> List[BenchmarkResult]:
+    """Reconstruct benchmark results from raw CSV report rows.
+
+    CSV reports intentionally store scored datapoints, not every skipped/error
+    molecule run. Reconstructed ``runs`` therefore represent successful
+    molecule/nucleus runs only, which is sufficient for merged accuracy and
+    speed comparisons without rerunning old expensive levels.
+    """
+    results_by_label: Dict[str, BenchmarkResult] = {}
+    runs_seen: set[Tuple[str, str, str]] = set()
+    points_seen: set[Tuple[object, ...]] = set()
+
+    for path in paths:
+        with open(path, newline="", encoding="utf-8") as fh:
+            reader = csv.DictReader(fh)
+            for row in reader:
+                label = row.get("label") or row.get("engine") or "unknown"
+                engine = row.get("engine") or label.split(" ", 1)[0]
+                functional = row.get("functional") or None
+                basis = row.get("basis") or None
+                result = results_by_label.get(label)
+                if result is None:
+                    result = BenchmarkResult(
+                        engine=engine,
+                        functional=functional,
+                        basis=basis,
+                    )
+                    results_by_label[label] = result
+
+                nucleus = row.get("nucleus") or ""
+                molecule = row.get("molecule") or ""
+                scenario = row.get("scenario") or ""
+                group_smarts = row.get("group_smarts") or ""
+                reference_ppm = _parse_float(row.get("reference_ppm"))
+                predicted_ppm = _parse_float(row.get("predicted_ppm"))
+                n_atoms = _parse_int(row.get("n_atoms"))
+                heavy_atoms = _parse_int(row.get("molecule_heavy_atoms"))
+                total_atoms = _parse_int(row.get("molecule_total_atoms"))
+                run_seconds = _parse_float(row.get("run_seconds"))
+                exchangeable = bool(_parse_int(row.get("exchangeable")))
+
+                point_key = (
+                    label,
+                    nucleus,
+                    molecule,
+                    scenario,
+                    group_smarts,
+                    reference_ppm,
+                    predicted_ppm,
+                    n_atoms,
+                )
+                if point_key not in points_seen:
+                    points_seen.add(point_key)
+                    result.points.append(
+                        DataPoint(
+                            engine=engine,
+                            nucleus=nucleus,
+                            molecule_id=molecule,
+                            scenario=scenario,
+                            group_smarts=group_smarts,
+                            reference_ppm=reference_ppm,
+                            predicted_ppm=predicted_ppm,
+                            n_atoms=n_atoms,
+                            molecule_heavy_atoms=heavy_atoms,
+                            molecule_total_atoms=total_atoms,
+                            run_seconds=run_seconds,
+                            exchangeable=exchangeable,
+                        )
+                    )
+
+                run_key = (label, nucleus, molecule)
+                if run_key not in runs_seen:
+                    runs_seen.add(run_key)
+                    result.runs.append(
+                        MoleculeRun(
+                            molecule,
+                            nucleus,
+                            "ok",
+                            run_seconds,
+                            heavy_atoms=heavy_atoms,
+                            total_atoms=total_atoms,
+                        )
+                    )
+
+    return list(results_by_label.values())
+
+
+def report_paths(
+    *,
+    basename: str,
+    reports_dir: str = _REPORTS_DIR,
+) -> Tuple[str, str, str]:
+    return (
+        os.path.join(reports_dir, f"{basename}.md"),
+        os.path.join(reports_dir, f"{basename}.csv"),
+        os.path.join(reports_dir, f"{basename}.html"),
+    )
 
 
 def write_reports(
@@ -373,9 +726,10 @@ def write_reports(
     Returns (markdown_path, csv_path, html_path).
     """
     os.makedirs(reports_dir, exist_ok=True)
-    md_path = os.path.join(reports_dir, f"{basename}.md")
-    csv_path = os.path.join(reports_dir, f"{basename}.csv")
-    html_path = os.path.join(reports_dir, f"{basename}.html")
+    md_path, csv_path, html_path = report_paths(
+        basename=basename,
+        reports_dir=reports_dir,
+    )
     md = render_markdown(
         results, title=title, exclude_exchangeable=exclude_exchangeable
     )

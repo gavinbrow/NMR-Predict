@@ -7,7 +7,7 @@ interface BootSplashProps {
 
 export function BootSplash({ message, error }: BootSplashProps) {
   return (
-    <div className="fixed inset-0 z-50 flex flex-col items-center justify-center bg-gradient-surface">
+    <div className="flex min-h-[70vh] flex-col items-center justify-center bg-gradient-surface">
       <div className="relative">
         <div className="absolute inset-0 animate-pulse-glow rounded-full" />
         <div className="flex h-20 w-20 items-center justify-center rounded-full bg-gradient-primary shadow-elegant">

@@ -11,7 +11,7 @@ describe("normalizeOptionsResponse", () => {
     const normalized = normalizeOptionsResponse({
       nuclei: ["1H", "13C"],
       modes: ["individual", "consensus"],
-      conformer_strategies: ["fast", "goat"],
+      conformer_strategies: ["fast"],
       engines: ["cdk", "cascade", "orca"],
     });
 
@@ -49,6 +49,8 @@ describe("normalizePredictResponse", () => {
       {
         canonical_smiles: "CCO",
         atom_symbols: ["C", "C", "O"],
+        structure_molfile: "molfile",
+        structure_hydrogen_counts: [3, 2, 1],
         engines: {
           cdk: {
             engine: "cdk",
@@ -64,6 +66,8 @@ describe("normalizePredictResponse", () => {
       request,
     );
 
+    expect(normalized.structureMolfile).toBe("molfile");
+    expect(normalized.structureHydrogenCounts).toEqual([3, 2, 1]);
     expect(normalized.shifts).toEqual([
       {
         atom_index: 0,

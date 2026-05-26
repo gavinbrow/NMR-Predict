@@ -9,7 +9,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from app.chem.canonical import InvalidSmilesError, canonicalize
+from app.chem.canonical import (
+    InvalidSmilesError,
+    canonicalize,
+    display_molfile,
+    heavy_atom_hydrogen_counts,
+)
 from app.consensus import compute_consensus
 from app.engines import engine_is_implemented, get_engine, list_engines
 from app.engines.cascade import CascadeEngineError
@@ -106,7 +111,7 @@ def options() -> OptionsResponse:
     return OptionsResponse(
         nuclei=["1H", "13C"],
         modes=["individual", "consensus"],
-        conformer_strategies=["fast", "goat"],
+        conformer_strategies=["fast"],
         engines=[e.name for e in list_engines()],
     )
 
@@ -203,6 +208,8 @@ def predict(req: PredictRequest) -> PredictResponse:
     return PredictResponse(
         canonical_smiles=canon.canonical_smiles,
         atom_symbols=canon.atom_symbols,
+        structure_molfile=display_molfile(canon.mol),
+        structure_hydrogen_counts=heavy_atom_hydrogen_counts(canon.mol),
         engines=engine_results,
         consensus=consensus,
     )

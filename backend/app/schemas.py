@@ -1,13 +1,20 @@
 from typing import Annotated, Dict, List, Literal, Optional
 
-from pydantic import BaseModel, ConfigDict, Field, NonNegativeFloat, StringConstraints
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    NonNegativeFloat,
+    StringConstraints,
+    model_validator,
+)
 
 from app.limits import MAX_SMILES_LENGTH
 
 
 EngineName = Literal["cascade", "cdk", "orca"]
 PredictionMode = Literal["individual", "consensus"]
-ConformerStrategy = Literal["fast", "goat"]
+ConformerStrategy = Literal["fast"]
 Nucleus = Literal["1H", "13C"]
 SmilesText = Annotated[
     str,
@@ -24,8 +31,8 @@ class ValidationRequest(StrictRequestModel):
 
 class PredictRequest(StrictRequestModel):
     smiles: SmilesText = Field(..., description="SMILES string from the editor")
-    engines: List[EngineName] = Field(
-        default_factory=lambda: ["cdk"],
+    engines: Optional[List[EngineName]] = Field(
+        default=None,
         min_length=1,
         max_length=3,
     )
@@ -35,8 +42,8 @@ class PredictRequest(StrictRequestModel):
         default="fast",
         description=(
             "Geometry search used by engines that consume a 3D structure "
-            "(currently ORCA). 'fast' = RDKit ETKDG+MMFF, 'goat' = ORCA "
-            "XTB2 GOAT global conformer search."
+            "(currently ORCA). 'fast' = RDKit ETKDG ensemble generation plus "
+            "MMFF/UFF force-field preoptimization."
         ),
     )
     weights: Optional[Dict[EngineName, NonNegativeFloat]] = Field(
@@ -47,6 +54,12 @@ class PredictRequest(StrictRequestModel):
             "Values are renormalised across engines that returned 'ok'."
         ),
     )
+
+    @model_validator(mode="after")
+    def apply_default_engines(self) -> "PredictRequest":
+        if self.engines is None:
+            self.engines = ["cdk"] if self.nucleus == "1H" else ["cascade"]
+        return self
 
 
 class AtomShift(BaseModel):
@@ -87,6 +100,8 @@ class ConsensusResult(BaseModel):
 class PredictResponse(BaseModel):
     canonical_smiles: str
     atom_symbols: List[str]
+    structure_molfile: Optional[str] = None
+    structure_hydrogen_counts: List[int] = Field(default_factory=list)
     engines: Dict[EngineName, EngineResult]
     consensus: Optional[ConsensusResult] = None
 

@@ -18,6 +18,10 @@ const labelClass = "text-xs font-medium uppercase tracking-wider text-muted-fore
 const selectClass =
   "h-10 w-full rounded-md border border-input bg-background px-3 text-sm shadow-card transition-smooth focus:outline-none focus:ring-2 focus:ring-ring focus:border-ring";
 
+function conformerStrategyLabel(strategy: string) {
+  return strategy === "fast" ? "RDKit force-field preopt" : strategy;
+}
+
 export function ControlPanel({
   options,
   engines,
@@ -41,10 +45,10 @@ export function ControlPanel({
             </select>
           </div>
           <div className="space-y-1.5">
-            <label className={labelClass}>Conformer strategy</label>
+            <label className={labelClass}>Geometry prep</label>
             <select className={selectClass} value={conformerStrategy} onChange={(e) => onConformerChange(e.target.value)}>
               {options.conformer_strategies.map((s) => (
-                <option key={s} value={s}>{s}</option>
+                <option key={s} value={s}>{conformerStrategyLabel(s)}</option>
               ))}
             </select>
           </div>

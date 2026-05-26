@@ -43,6 +43,8 @@ type BackendEngineResult = {
 type BackendPredictResponse = {
   canonical_smiles: string;
   atom_symbols: string[];
+  structure_molfile?: string | null;
+  structure_hydrogen_counts?: number[];
   engines: Record<string, BackendEngineResult>;
   consensus?: {
     shifts: BackendConsensusAtomShift[];
@@ -160,6 +162,8 @@ export function normalizePredictResponse(
   return {
     smiles: response.canonical_smiles,
     nucleus: request.nucleus,
+    structureMolfile: response.structure_molfile ?? null,
+    structureHydrogenCounts: response.structure_hydrogen_counts ?? [],
     shifts,
     consensusShifts,
     engines_used: enginesUsed.length > 0 ? enginesUsed : request.engines,

@@ -46,6 +46,9 @@ class DataPoint:
     reference_ppm: float
     predicted_ppm: float
     n_atoms: int
+    molecule_heavy_atoms: int
+    molecule_total_atoms: int
+    run_seconds: float
     exchangeable: bool
 
     @property
@@ -66,6 +69,8 @@ class MoleculeRun:
     status: str  # "ok" | "skipped" | "error"
     seconds: float
     message: Optional[str] = None
+    heavy_atoms: Optional[int] = None
+    total_atoms: Optional[int] = None
 
 
 @dataclass
@@ -212,6 +217,8 @@ def _run_one(
         result.runs.append(MoleculeRun(mol.id, nucleus, "error", 0.0, f"canon: {exc}"))
         _log(f"ERROR - canon: {exc}")
         return
+    heavy_atoms = sum(1 for atom in canon.mol.GetAtoms() if atom.GetAtomicNum() > 1)
+    total_atoms = canon.mol.GetNumAtoms()
 
     start = time.perf_counter()
     try:
@@ -221,7 +228,15 @@ def _run_one(
     except Exception as exc:  # engine-specific errors are intentionally broad here
         elapsed = time.perf_counter() - start
         result.runs.append(
-            MoleculeRun(mol.id, nucleus, "error", elapsed, f"{type(exc).__name__}: {exc}")
+            MoleculeRun(
+                mol.id,
+                nucleus,
+                "error",
+                elapsed,
+                f"{type(exc).__name__}: {exc}",
+                heavy_atoms,
+                total_atoms,
+            )
         )
         _log(f"ERROR in {_fmt_secs(elapsed)} - {type(exc).__name__}: {exc}")
         return
@@ -248,13 +263,18 @@ def _run_one(
                 reference_ppm=ref.ppm,
                 predicted_ppm=fmean(predicted_vals),
                 n_atoms=len(predicted_vals),
+                molecule_heavy_atoms=heavy_atoms,
+                molecule_total_atoms=total_atoms,
+                run_seconds=elapsed,
                 exchangeable=ref.exchangeable,
             )
         )
 
     status = "ok" if matched_any else "error"
     message = None if matched_any else "no reference groups matched predicted atoms"
-    result.runs.append(MoleculeRun(mol.id, nucleus, status, elapsed, message))
+    result.runs.append(
+        MoleculeRun(mol.id, nucleus, status, elapsed, message, heavy_atoms, total_atoms)
+    )
 
     added = result.points[n_before:]
     if status == "ok" and added:

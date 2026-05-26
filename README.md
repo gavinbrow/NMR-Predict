@@ -132,8 +132,7 @@ Demo mode is disabled by default. If the backend is down and demo mode is not en
 
 ORCA-specific behavior in the current implementation:
 
-- `conformer_strategy: "fast"` uses RDKit ETKDG plus MMFF and selects the lowest-energy conformer.
-- `conformer_strategy: "goat"` runs ORCA `XTB2 GOAT` to search for a lower-energy conformer before the NMR job.
+- `conformer_strategy: "fast"` uses a deeper RDKit ETKDG conformer ensemble plus MMFF/UFF force-field preoptimization, then selects the lowest-energy conformer for the ORCA NMR job.
 - ORCA work is serialized through a single-worker queue.
 - The queue is intentionally bounded so expensive requests fail fast instead of piling up indefinitely.
 - TMS reference values are cached in `ORCA_WORK_DIR/tms_refs.json`.
@@ -143,8 +142,8 @@ Common ORCA environment variables:
 | Variable | Default | Notes |
 | --- | --- | --- |
 | `ORCA_EXE` | `C:\ORCA_6.1.1\orca.exe` | |
-| `ORCA_FUNCTIONAL` | `PBE` | e.g. `PBE`, `BP86`, `TPSS`, `B97-D3`, `B3LYP`, `PBE0`, `wB97X-D3` |
-| `ORCA_BASIS` | `def2-SVP` | e.g. `def2-SVP`, `def2-TZVP`, `def2-TZVPP`, `pcSseg-1`, `pcSseg-2` |
+| `ORCA_FUNCTIONAL` | `TPSSh` | e.g. `PBE`, `BP86`, `TPSS`, `TPSSh`, `B97-D3`, `B3LYP`, `PBE0`, `wB97X-D3` |
+| `ORCA_BASIS` | `pcSseg-1` | e.g. `def2-SVP`, `def2-TZVP`, `def2-TZVPP`, `pcSseg-1`, `pcSseg-2` |
 | `ORCA_CPUS` | host CPU count | maps to `%pal nprocs`; clamped to host CPU count |
 | `ORCA_RAM_MB` | `2000` | RAM **per core** (ORCA `%maxcore`); total RAM ≈ `ORCA_CPUS * ORCA_RAM_MB` |
 | `ORCA_TIMEOUT` | `600` | |
@@ -199,8 +198,9 @@ The same endpoints are also available under `/api/*`, which is what the frontend
 Current request options:
 
 - `nucleus`: `1H` or `13C`
+- `engines`: one or more of `cdk`, `cascade`, `orca`; omitted requests default to `cdk` for `1H` and `cascade` for `13C`
 - `mode`: `individual` or `consensus`
-- `conformer_strategy`: `fast` or `goat`
+- `conformer_strategy`: `fast`
 
 In consensus mode, the backend uses these default weights unless you override them:
 
@@ -254,9 +254,10 @@ Run from `backend/`:
 # Validate the dataset (canonicalize + SMARTS resolution)
 python -m benchmarks.cli --validate-dataset
 
-# Compare available engines on every scenario, both nuclei. Writes a report
-# trio (.md + .csv + .html) into benchmarks/reports/. Unready engines are
-# skipped, not errored.
+# Compare available engines on every scenario, both nuclei. The `orca` engine
+# expands to the ORCA functional/basis ladder; use `--levels` to restrict it.
+# Writes a report trio (.md + .csv + .html) into benchmarks/reports/.
+# Unready engines are skipped, not errored.
 python -m benchmarks.cli --engines cdk cascade orca --nucleus 13C 1H
 
 # Print the ORCA level-of-theory ladder (relative speed + pros/cons table)
@@ -264,6 +265,12 @@ python -m benchmarks.cli ladder
 
 # ORCA functional/basis sweep over the cheap end of the ladder (needs ORCA)
 python -m benchmarks.cli orca-sweep --levels 1 2 3 --scenario aliphatic
+
+# Merge a new expensive ORCA add-on sweep into an existing comparison report
+python -m benchmarks.cli merge-csv --merge-csvs `
+  benchmarks/reports/benchmark_20260525_full_ladder.csv `
+  benchmarks/reports/benchmark_20260525_dft_extension.csv `
+  --basename benchmark_20260525_full_ladder_plus_dft
 ```
 
 Each run writes three files into `benchmarks/reports/` sharing one basename
@@ -271,7 +278,11 @@ Each run writes three files into `benchmarks/reports/` sharing one basename
 per-group CSV, and a **standalone styled HTML report** you can open directly in
 a browser. All three break accuracy down per scenario and per nucleus (MAE /
 RMSE / max error / bias / R², plus a bias-removed "scaled MAE" and a
-worst-offenders list).
+worst-offenders list). Long ORCA sweeps checkpoint the raw CSV after every
+completed level, and the HTML report includes figures for overall MAE,
+seconds-per-heavy-atom, and molecule-size buckets. The ORCA ladder includes
+cheap GGA/meta-GGA checks plus hybrid/range-separated levels such as
+`PBE0`, `TPSSh`, and `wB97X-D3` with `def2-*` and `pcSseg-*` bases.
 A pytest gate (`tests/test_benchmark_accuracy.py`) asserts per-engine MAE stays
 under calibrated thresholds; it skips engines that aren't installed, and ORCA
 accuracy assertions are gated behind `RUN_ORCA_TESTS=1` like the other ORCA
