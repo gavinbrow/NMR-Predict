@@ -58,6 +58,13 @@ export function AppShell({
               >
                 Prediction
               </NavLink>
+              <NavLink
+                to="/kinetics"
+                className={navLinkClassName}
+                activeClassName={navLinkActiveClassName}
+              >
+                NMR Kinetics
+              </NavLink>
             </nav>
           </div>
 

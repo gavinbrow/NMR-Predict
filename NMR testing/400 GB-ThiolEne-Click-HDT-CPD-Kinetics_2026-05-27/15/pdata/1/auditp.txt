@@ -1,0 +1,27 @@
+##TITLE= Audit trail, TopSpin 3.6.2
+##JCAMPDX= 5.01
+##ORIGIN= Bruker BioSpin GmbH
+##OWNER= mcgrnmr
+$$ D:\nmrdata\mcgrnmr\GB/400 GB-ThiolEne-Click-HDT-CPD-Kinetics_2026-05-27/15/pdata/1/auditp.txt
+##AUDIT TRAIL=  $$ (NUMBER, WHEN, WHO, WHERE, PROCESS, VERSION, WHAT)
+(   1,<2026-05-27 15:37:06.726 -0500>,<mcgrnmr>,<CZC9509NMH>,<go4>,<TopSpin 3.6.2>,
+      <created by zg
+	started at 2026-05-27 15:35:42.998 -0500,
+	POWCHK enabled, PULCHK disabled,
+       configuration hash MD5:
+       C6 DE 6C 2D D2 C0 57 AE 90 1F 03 0D 7F 42 62 4D
+       data hash MD5: 64K
+       1E 59 CC CA 29 92 DE F9 CB 4B 54 EF B8 31 24 96>)
+(   2,<2026-05-27 15:37:07.739 -0500>,<mcgrnmr>,<CZC9509NMH>,<proc1d>,<TopSpin 3.6.2>,
+      <Start of raw data processing
+       efp LB = 1 FT_mod = 6 PKNL = 1 PHC0 = 53.66205 PHC1 = -38.04134 SI = 128K 
+       data hash MD5: 128K
+       32 46 CC 0C 12 56 0E 93 23 53 1E E1 87 F1 1B 74>)
+(   3,<2026-05-27 15:37:09.075 -0500>,<mcgrnmr>,<CZC9509NMH>,<proc1d>,<TopSpin 3.6.2>,
+      <apk 
+       data hash MD5: 128K
+       32 46 CC 0C 12 56 0E 93 23 53 1E E1 87 F1 1B 74>)
+##END=
+
+$$ hash MD5
+$$ 1D 99 50 87 01 CA A3 99 5F 22 6C 9B 98 D7 65 90
