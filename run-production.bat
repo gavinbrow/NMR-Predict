@@ -124,10 +124,25 @@ if errorlevel 1 (
     echo Install Node.js 18+ from https://nodejs.org/ and re-run this script.
     exit /b 1
 )
-if not exist "%ROOT%frontend\node_modules" (
-    echo Frontend dependencies not installed yet. Running npm install...
+
+REM Install when node_modules is missing, or when package-lock.json is newer
+REM than the sentinel npm writes after a successful install (node_modules\.package-lock.json).
+REM This catches the case where a git pull adds a new dependency.
+set "NEEDS_NPM_INSTALL="
+if not exist "%ROOT%frontend\node_modules" set "NEEDS_NPM_INSTALL=1"
+if not defined NEEDS_NPM_INSTALL if not exist "%ROOT%frontend\node_modules\.package-lock.json" set "NEEDS_NPM_INSTALL=1"
+if not defined NEEDS_NPM_INSTALL (
+    for /f "usebackq delims=" %%S in (`powershell -NoProfile -Command "if ((Get-Item '%ROOT%frontend\package-lock.json').LastWriteTime -gt (Get-Item '%ROOT%frontend\node_modules\.package-lock.json').LastWriteTime) { 'stale' }"`) do (
+        set "NEEDS_NPM_INSTALL=1"
+    )
+)
+
+if defined NEEDS_NPM_INSTALL (
+    echo Frontend dependencies out of date. Running npm install...
     cd /d "%ROOT%frontend"
-    call npm install
+    REM --legacy-peer-deps is required: vite 8 in package.json conflicts with
+    REM @vitejs/plugin-react-swc's peer range (^4 || ^5 || ^6 || ^7).
+    call npm install --legacy-peer-deps
     if errorlevel 1 (
         echo npm install failed.
         exit /b 1
