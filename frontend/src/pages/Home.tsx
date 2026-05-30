@@ -1,4 +1,4 @@
-import { Activity, ArrowRight, FlaskConical, LineChart, Sparkles } from "lucide-react";
+import { Activity, ArrowRight, BarChart3, FlaskConical, LineChart, Sparkles } from "lucide-react";
 import { Link } from "react-router-dom";
 import { AppShell } from "@/components/AppShell";
 
@@ -66,7 +66,7 @@ const Home = () => {
         </div>
       </section>
 
-      <section className="mt-8 grid gap-5 lg:grid-cols-3">
+      <section className="mt-8 grid gap-5 sm:grid-cols-2">
         <WorkspaceCard
           href="/analysis"
           icon={LineChart}
@@ -87,6 +87,13 @@ const Home = () => {
           eyebrow="Kinetics"
           title="NMR Kinetics"
           description="Load a time-series of spectra, integrate tracked peaks, and fit growth/decay curves to extract rate constants and half-lives."
+        />
+        <WorkspaceCard
+          href="/maldi"
+          icon={BarChart3}
+          eyebrow="Mass spec"
+          title="MALDI interpretation"
+          description="Import a MALDI spectrum, pick peaks, detect polymer repeat units, and assign oligomer series — all in the browser."
         />
       </section>
     </AppShell>

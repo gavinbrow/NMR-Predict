@@ -7,6 +7,7 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import Home from "./pages/Home.tsx";
 import Index from "./pages/Index.tsx";
 import Kinetics from "./pages/Kinetics.tsx";
+import Maldi from "./pages/Maldi.tsx";
 import NotFound from "./pages/NotFound.tsx";
 import SpectrumAnalysis from "./pages/SpectrumAnalysis.tsx";
 
@@ -22,6 +23,7 @@ const KEEP_ALIVE: { path: string; element: JSX.Element }[] = [
   { path: "/analysis", element: <SpectrumAnalysis /> },
   { path: "/prediction", element: <Index /> },
   { path: "/kinetics", element: <Kinetics /> },
+  { path: "/maldi", element: <Maldi /> },
 ];
 const KEEP_ALIVE_PATHS = new Set(KEEP_ALIVE.map((route) => route.path));
 

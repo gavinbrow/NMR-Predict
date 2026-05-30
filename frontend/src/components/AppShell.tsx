@@ -65,6 +65,13 @@ export function AppShell({
               >
                 NMR Kinetics
               </NavLink>
+              <NavLink
+                to="/maldi"
+                className={navLinkClassName}
+                activeClassName={navLinkActiveClassName}
+              >
+                MALDI
+              </NavLink>
             </nav>
           </div>
 
