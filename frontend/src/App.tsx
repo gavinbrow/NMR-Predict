@@ -6,6 +6,7 @@ import { Toaster } from "@/components/ui/toaster";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import Home from "./pages/Home.tsx";
 import Index from "./pages/Index.tsx";
+import IrKinetics from "./pages/IrKinetics.tsx";
 import Kinetics from "./pages/Kinetics.tsx";
 import Maldi from "./pages/Maldi.tsx";
 import NotFound from "./pages/NotFound.tsx";
@@ -24,6 +25,7 @@ const KEEP_ALIVE: { path: string; element: JSX.Element }[] = [
   { path: "/prediction", element: <Index /> },
   { path: "/kinetics", element: <Kinetics /> },
   { path: "/maldi", element: <Maldi /> },
+  { path: "/ir", element: <IrKinetics /> },
 ];
 const KEEP_ALIVE_PATHS = new Set(KEEP_ALIVE.map((route) => route.path));
 

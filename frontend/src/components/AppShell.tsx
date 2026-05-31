@@ -72,6 +72,13 @@ export function AppShell({
               >
                 MALDI
               </NavLink>
+              <NavLink
+                to="/ir"
+                className={navLinkClassName}
+                activeClassName={navLinkActiveClassName}
+              >
+                IR Kinetics
+              </NavLink>
             </nav>
           </div>
 

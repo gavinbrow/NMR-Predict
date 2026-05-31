@@ -1,4 +1,4 @@
-import { Activity, ArrowRight, BarChart3, FlaskConical, LineChart, Sparkles } from "lucide-react";
+import { Activity, ArrowRight, BarChart3, FlaskConical, LineChart, Sparkles, Waves } from "lucide-react";
 import { Link } from "react-router-dom";
 import { AppShell } from "@/components/AppShell";
 
@@ -94,6 +94,13 @@ const Home = () => {
           eyebrow="Mass spec"
           title="MALDI interpretation"
           description="Import a MALDI spectrum, pick peaks, detect polymer repeat units, and assign oligomer series — all in the browser."
+        />
+        <WorkspaceCard
+          href="/ir"
+          icon={Waves}
+          eyebrow="Infrared"
+          title="IR Kinetics"
+          description="Read Shimadzu IRAffinity-1S .ispd files, overlay and export spectra, and track an IR peak's disappearance over time to fit reaction kinetics."
         />
       </section>
     </AppShell>

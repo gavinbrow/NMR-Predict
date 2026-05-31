@@ -31,6 +31,14 @@ export default defineConfig(({ mode }) => ({
       transformMixedEsModules: true,
     },
   },
+  // These two libs are imported only inside the MALDI compute Web Worker. Left
+  // undeclared, Vite first discovers them when the worker is spawned (the first
+  // time MALDI is opened), triggering a mid-session dep re-optimization that can
+  // make the worker miss its first liveness ping. Pre-bundling them in the
+  // initial optimize pass avoids that race.
+  optimizeDeps: {
+    include: ["ml-savitzky-golay", "ml-regression-polynomial"],
+  },
   plugins: [react(), mode === "development" && componentTagger()].filter(Boolean),
   resolve: {
     alias: {

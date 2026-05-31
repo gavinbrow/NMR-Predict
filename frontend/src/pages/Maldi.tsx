@@ -5,6 +5,7 @@ import {
   HardDrive,
   Layers,
   Loader2,
+  RotateCw,
   Rows3,
   Save,
   Upload,
@@ -88,6 +89,7 @@ import {
   detectCopolymer,
   detectLosses,
   detectRepeatUnits,
+  disposeWorker,
   flagBackground,
   isCancelledError,
   parse,
@@ -243,16 +245,37 @@ const Maldi = () => {
       .filter((x): x is StackSpectrum => x !== null);
   }, [documents, activeDocId, processed, raw]);
 
-  // Verify the compute worker on first mount and load the project list.
+  // Verify the compute worker — with retries. A single transient miss (e.g. the
+  // Vite dev re-optimization that fires the first time MALDI's worker-only deps
+  // are discovered, or a one-off spawn hiccup) must not strand the badge on
+  // "unavailable" forever, so we respawn and retry before giving up, and the
+  // error badge exposes a manual retry. Each run gets a token so a newer check
+  // (or the manual retry) supersedes any older one still in flight.
+  const workerCheck = useRef(0);
+  const checkWorker = useCallback(async () => {
+    const token = (workerCheck.current += 1);
+    setWorkerStatus("checking");
+    const attempts = 4;
+    for (let i = 0; i < attempts; i += 1) {
+      try {
+        await ping("maldi");
+        if (workerCheck.current === token) setWorkerStatus("ready");
+        return;
+      } catch {
+        if (workerCheck.current !== token) return; // superseded by a newer check
+        disposeWorker(); // the next ping respawns a fresh worker
+        if (i < attempts - 1) {
+          await new Promise((r) => setTimeout(r, 400 * (i + 1)));
+        }
+      }
+    }
+    if (workerCheck.current === token) setWorkerStatus("error");
+  }, []);
+
+  // Run the worker check on first mount and load the project list.
   useEffect(() => {
-    let active = true;
-    ping("maldi")
-      .then(() => active && setWorkerStatus("ready"))
-      .catch(() => active && setWorkerStatus("error"));
+    void checkWorker();
     refreshProjects();
-    return () => {
-      active = false;
-    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -915,7 +938,7 @@ const Maldi = () => {
     <AppShell
       headerAccessory={
         <>
-          <WorkerBadge status={workerStatus} />
+          <WorkerBadge status={workerStatus} onRetry={checkWorker} />
           <span className="inline-flex items-center gap-1.5 rounded-full bg-success/10 px-2.5 py-1 font-medium text-success">
             <HardDrive className="h-3 w-3" />
             Local MALDI workspace
@@ -1267,7 +1290,7 @@ function SidebarCard({ title, children }: { title: string; children: React.React
   );
 }
 
-function WorkerBadge({ status }: { status: WorkerStatus }) {
+function WorkerBadge({ status, onRetry }: { status: WorkerStatus; onRetry?: () => void }) {
   if (status === "checking") {
     return (
       <span className="inline-flex items-center gap-1.5 rounded-full border border-border/70 bg-background/80 px-3 py-1.5 text-xs font-medium text-muted-foreground">
@@ -1281,6 +1304,16 @@ function WorkerBadge({ status }: { status: WorkerStatus }) {
       <span className="inline-flex items-center gap-1.5 rounded-full border border-destructive/40 bg-destructive/10 px-3 py-1.5 text-xs font-medium text-destructive">
         <CircleSlash className="h-3.5 w-3.5" />
         Worker unavailable
+        {onRetry && (
+          <button
+            type="button"
+            onClick={onRetry}
+            className="ml-0.5 inline-flex items-center gap-1 rounded-full px-1.5 py-0.5 underline-offset-2 hover:underline"
+          >
+            <RotateCw className="h-3 w-3" />
+            Retry
+          </button>
+        )}
       </span>
     );
   }
