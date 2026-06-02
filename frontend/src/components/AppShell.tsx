@@ -79,6 +79,13 @@ export function AppShell({
               >
                 IR Kinetics
               </NavLink>
+              <NavLink
+                to="/tensile"
+                className={navLinkClassName}
+                activeClassName={navLinkActiveClassName}
+              >
+                Tensile
+              </NavLink>
             </nav>
           </div>
 

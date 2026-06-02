@@ -1,4 +1,4 @@
-import { Activity, ArrowRight, BarChart3, FlaskConical, LineChart, Sparkles, Waves } from "lucide-react";
+import { Activity, ArrowRight, BarChart3, FlaskConical, LineChart, Sparkles, Spline, Waves } from "lucide-react";
 import { Link } from "react-router-dom";
 import { AppShell } from "@/components/AppShell";
 
@@ -101,6 +101,13 @@ const Home = () => {
           eyebrow="Infrared"
           title="IR Kinetics"
           description="Read Shimadzu IRAffinity-1S .ispd files, overlay and export spectra, and track an IR peak's disappearance over time to fit reaction kinetics."
+        />
+        <WorkspaceCard
+          href="/tensile"
+          icon={Spline}
+          eyebrow="Mechanical"
+          title="Tensile analysis"
+          description="Drop zwickRoell/Instron tensile Excel exports, extract modulus, strength, yield and toughness, compare multiple files, and export to Excel and PDF."
         />
       </section>
     </AppShell>

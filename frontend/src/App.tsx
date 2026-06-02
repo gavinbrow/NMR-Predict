@@ -11,6 +11,7 @@ import Kinetics from "./pages/Kinetics.tsx";
 import Maldi from "./pages/Maldi.tsx";
 import NotFound from "./pages/NotFound.tsx";
 import SpectrumAnalysis from "./pages/SpectrumAnalysis.tsx";
+import Tensile from "./pages/Tensile.tsx";
 
 const queryClient = new QueryClient();
 
@@ -26,6 +27,7 @@ const KEEP_ALIVE: { path: string; element: JSX.Element }[] = [
   { path: "/kinetics", element: <Kinetics /> },
   { path: "/maldi", element: <Maldi /> },
   { path: "/ir", element: <IrKinetics /> },
+  { path: "/tensile", element: <Tensile /> },
 ];
 const KEEP_ALIVE_PATHS = new Set(KEEP_ALIVE.map((route) => route.path));
 
