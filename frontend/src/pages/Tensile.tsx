@@ -1,5 +1,6 @@
-import { BarChart3, FileSpreadsheet, Layers, Spline, Sliders, Trash2 } from "lucide-react";
+import { BarChart3, FileSpreadsheet, Layers, Spline, Sliders, Table2, Trash2 } from "lucide-react";
 import { AppShell } from "@/components/AppShell";
+import { CollapsibleSection } from "@/components/tensile/CollapsibleSection";
 import { ComparePanel } from "@/components/tensile/ComparePanel";
 import { ExportMenu } from "@/components/tensile/ExportMenu";
 import { FileCard } from "@/components/tensile/FileCard";
@@ -10,7 +11,7 @@ import { SpecimenTable } from "@/components/tensile/SpecimenTable";
 import { StressStrainChart } from "@/components/tensile/StressStrainChart";
 import { SummaryPanel } from "@/components/tensile/SummaryPanel";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Card, CardContent } from "@/components/ui/card";
 import { TensileProvider, useTensileStore } from "@/lib/tensile/store";
 
 /** A single capability tile shown on the empty Tensile workspace. */
@@ -92,52 +93,40 @@ function PopulatedWorkspace() {
     <div className="mx-auto flex w-full max-w-[1700px] flex-col gap-4 lg:flex-row">
       {/* Left rail */}
       <aside className="flex w-full flex-col gap-4 lg:w-[340px] lg:shrink-0">
-        <div className="flex flex-col gap-3 rounded-2xl border border-border/70 bg-card p-4 shadow-card">
-          <h3 className="flex items-center gap-2 text-sm font-semibold text-foreground">
-            <FileSpreadsheet className="h-4 w-4 text-primary" />
-            Files
-            <span className="text-xs font-normal text-muted-foreground">({files.length})</span>
-          </h3>
+        <CollapsibleSection
+          title="Files"
+          icon={FileSpreadsheet}
+          count={files.length}
+          contentClassName="flex flex-col gap-3"
+        >
           <FileDropzone compact />
           <div className="flex flex-col gap-2">
             {files.map((f) => (
               <FileCard key={f.id} file={f} />
             ))}
           </div>
-        </div>
+        </CollapsibleSection>
 
         <ParamControls />
 
-        <div className="rounded-2xl border border-border/70 bg-card p-4 shadow-card">
-          <MaterialsPanel />
-        </div>
+        <MaterialsPanel />
       </aside>
 
       {/* Main column */}
       <div className="flex min-w-0 flex-1 flex-col gap-4">
         <SummaryPanel />
 
-        <Card className="border-border/70 shadow-card">
-          <CardHeader className="pb-2">
-            <CardTitle className="text-base">Stress–strain curves</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <div className="h-[420px]">
-              <StressStrainChart />
-            </div>
-          </CardContent>
-        </Card>
+        <CollapsibleSection title="Stress–strain curves" icon={Spline}>
+          <div className="h-[420px]">
+            <StressStrainChart />
+          </div>
+        </CollapsibleSection>
 
         <ComparePanel />
 
-        <Card className="border-border/70 shadow-card">
-          <CardHeader className="pb-2">
-            <CardTitle className="text-base">Per-specimen properties</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <SpecimenTable />
-          </CardContent>
-        </Card>
+        <CollapsibleSection title="Per-specimen properties" icon={Table2}>
+          <SpecimenTable />
+        </CollapsibleSection>
       </div>
     </div>
   );

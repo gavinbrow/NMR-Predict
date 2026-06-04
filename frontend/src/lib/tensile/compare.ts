@@ -52,13 +52,21 @@ export interface DistDatum {
 
 const MAX_PLOT_POINTS = 400;
 
-/** Evenly decimate a curve for display, always keeping the first and last point. */
-export function decimateCurve(s: number[], st: number[]): { x: number; y: number }[] {
+/**
+ * Evenly decimate a curve for display, always keeping the first and last point.
+ * `maxPoints` caps the per-curve budget; callers lower it when many curves are
+ * overlaid so the figure stays light and interaction stays smooth.
+ */
+export function decimateCurve(
+  s: number[],
+  st: number[],
+  maxPoints = MAX_PLOT_POINTS,
+): { x: number; y: number }[] {
   const n = s.length;
-  if (n <= MAX_PLOT_POINTS) return s.map((x, i) => ({ x, y: st[i] }));
-  const step = (n - 1) / (MAX_PLOT_POINTS - 1);
+  if (n <= maxPoints) return s.map((x, i) => ({ x, y: st[i] }));
+  const step = (n - 1) / (maxPoints - 1);
   const out: { x: number; y: number }[] = [];
-  for (let i = 0; i < MAX_PLOT_POINTS; i += 1) {
+  for (let i = 0; i < maxPoints; i += 1) {
     const idx = Math.round(i * step);
     out.push({ x: s[idx], y: st[idx] });
   }
@@ -70,6 +78,7 @@ export function buildCurves(
   materials: MaterialView[],
   specimens: Specimen[],
   params: Parameters<typeof effectivePercent>[1],
+  maxPoints = MAX_PLOT_POINTS,
 ): CurveSeries[] {
   const meta = new Map<string, { name: string; color: string }>();
   for (const mv of materials) {
@@ -84,7 +93,7 @@ export function buildCurves(
       materialName: m?.name ?? "—",
       color: m?.color ?? "#64748b",
       excluded: s.excluded,
-      data: decimateCurve(x, y),
+      data: decimateCurve(x, y, maxPoints),
     };
   });
 }

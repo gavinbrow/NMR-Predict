@@ -1,12 +1,10 @@
-import { LineChart as LineChartIcon, ZoomIn } from "lucide-react";
-import { useMemo, useState } from "react";
+import { LineChart as LineChartIcon, RotateCcw, ZoomIn } from "lucide-react";
+import { useMemo } from "react";
 import {
   CartesianGrid,
   ComposedChart,
-  Legend,
   Line,
   ReferenceArea,
-  ReferenceDot,
   ResponsiveContainer,
   Scatter,
   Tooltip,
@@ -14,19 +12,30 @@ import {
   YAxis,
 } from "recharts";
 import { Button } from "@/components/ui/button";
-import { cleanCurve, offsetYield, youngsModulus } from "@/lib/tensile/compute";
+import { cleanCurve } from "@/lib/tensile/compute";
 import { useTensileStore } from "@/lib/tensile/store";
+import { type ChartPoint, useChartZoom } from "@/lib/tensile/useChartZoom";
+import { useHoverLabel } from "@/lib/tensile/useHoverLabel";
 import type { AnalysisParams, Specimen } from "@/lib/tensile/types";
 
-const MAX_PLOT_POINTS = 400;
+/**
+ * Per-curve point budget for display. With many specimens overlaid, fewer points
+ * per curve keeps the SVG light and the interaction smooth; with only a handful
+ * we keep full fidelity.
+ */
+function pointBudget(curveCount: number): number {
+  if (curveCount > 24) return 120;
+  if (curveCount > 12) return 200;
+  return 400;
+}
 
 /** Evenly decimate a curve for display, keeping the first/last point. */
-function decimate(s: number[], st: number[]): { x: number; y: number }[] {
+function decimate(s: number[], st: number[], cap: number): { x: number; y: number }[] {
   const n = s.length;
-  if (n <= MAX_PLOT_POINTS) return s.map((x, i) => ({ x, y: st[i] }));
-  const step = (n - 1) / (MAX_PLOT_POINTS - 1);
+  if (n <= cap) return s.map((x, i) => ({ x, y: st[i] }));
+  const step = (n - 1) / (cap - 1);
   const out: { x: number; y: number }[] = [];
-  for (let i = 0; i < MAX_PLOT_POINTS; i += 1) {
+  for (let i = 0; i < cap; i += 1) {
     const idx = Math.round(i * step);
     out.push({ x: s[idx], y: st[idx] });
   }
@@ -40,17 +49,19 @@ function effectivePercent(s: Specimen, params: AnalysisParams): boolean {
 }
 
 /**
- * The live stress–strain chart (Phase 6 visual feedback). Overlays the selected
- * specimens (colored by material; excluded ones greyed), shades the modulus
- * window, and — for one focused specimen — draws the fitted modulus line, the
- * 0.2% offset line, and markers at the offset-yield crossing and the UTS.
- * Everything is driven by the store params, so dragging a slider redraws it live.
- * "Elastic zoom" rescales the x-axis to the small-strain region so the modulus
- * window and fit lines are legible.
+ * The live stress–strain chart. Overlays the selected specimens (colored by
+ * material; excluded ones greyed) and shades the modulus window. The UTS of the
+ * focused specimen is marked in red.
+ *
+ * Zooming is interactive: drag across the plot to zoom into an X window (the Y
+ * axis auto-fits to the data inside it), double-click or "Reset" to zoom back
+ * out, and "Elastic zoom" jumps straight to the small-strain region around the
+ * modulus window. Instead of a legend that grows to cover the plot, hovering a
+ * curve shows its name in a small chip that fades after a moment.
  */
 export function StressStrainChart() {
   const { specimens, materialViews, selection, params } = useTensileStore();
-  const [zoom, setZoom] = useState(false);
+  const hover = useHoverLabel();
 
   // Which specimens to show: explicit specimen selection wins, else selected
   // materials, else everything.
@@ -75,44 +86,30 @@ export function StressStrainChart() {
     return map;
   }, [materialViews]);
 
-  const curves = useMemo(
-    () =>
-      shown.map((s) => {
-        const { s: x, st: y } = cleanCurve(s.raw.strain, s.raw.stress, effectivePercent(s, params));
-        return { specimen: s, data: decimate(x, y), color: colorOf.get(s.id) ?? "#64748b" };
-      }),
-    [shown, params, colorOf],
-  );
+  const curves = useMemo(() => {
+    const cap = pointBudget(shown.length);
+    return shown.map((s) => {
+      const { s: x, st: y } = cleanCurve(s.raw.strain, s.raw.stress, effectivePercent(s, params));
+      return { specimen: s, data: decimate(x, y, cap), color: colorOf.get(s.id) ?? "#64748b" };
+    });
+  }, [shown, params, colorOf]);
 
-  // Focused specimen for the fit overlays: first selected, else first included.
-  const focus = useMemo(() => {
+  // Every plotted point, so the zoom hook can auto-fit the Y axis to an X window.
+  const allPoints = useMemo<ChartPoint[]>(
+    () => curves.flatMap((c) => c.data),
+    [curves],
+  );
+  const zoom = useChartZoom(allPoints);
+
+  // Focused specimen for the UTS marker: first selected, else first included.
+  const utsMarker = useMemo(() => {
     const pick =
       shown.find((s) => selection.specimenIds.includes(s.id)) ??
       shown.find((s) => !s.excluded) ??
       shown[0];
-    if (!pick) return null;
-    const { s, st } = cleanCurve(pick.raw.strain, pick.raw.stress, effectivePercent(pick, params));
-    if (s.length < 2) return null;
-    const fit = youngsModulus(s, st, params);
-    const off = offsetYield(s, st, fit.slopePct, fit.intercept, params);
-    const maxX = s[s.length - 1];
-    const lineEnd = zoom ? Math.min(maxX, params.eHi * 8 + params.offsetPct) : maxX;
-    const elastic = [
-      { x: 0, y: fit.intercept },
-      { x: lineEnd, y: fit.slopePct * lineEnd + fit.intercept },
-    ];
-    const offset = [
-      { x: params.offsetPct, y: fit.intercept },
-      { x: lineEnd, y: fit.slopePct * (lineEnd - params.offsetPct) + fit.intercept },
-    ];
-    return {
-      specimen: pick,
-      elastic,
-      offset,
-      offsetCross: Number.isFinite(off.sig) ? { x: off.eps, y: off.sig } : null,
-      uts: { x: pick.props.strain_at_uts, y: pick.props.uts_MPa },
-    };
-  }, [shown, selection.specimenIds, params, zoom]);
+    if (!pick || !Number.isFinite(pick.props.uts_MPa)) return null;
+    return { specimen: pick, x: pick.props.strain_at_uts, y: pick.props.uts_MPa };
+  }, [shown, selection.specimenIds]);
 
   if (curves.length === 0) {
     return (
@@ -128,43 +125,73 @@ export function StressStrainChart() {
     );
   }
 
-  const xMax = zoom ? Math.max(params.eHi * 8 + params.offsetPct, params.offsetPct * 2) : undefined;
+  const xDomain: [number, number | string] = zoom.domain ? zoom.domain.x : [0, "dataMax"];
+  const yDomain: [number, number | string] = zoom.domain ? zoom.domain.y : [0, "auto"];
 
   return (
     <div className="flex h-full flex-col gap-2">
       <div className="flex items-center justify-between">
         <p className="text-xs text-muted-foreground">
           {curves.length} curve{curves.length === 1 ? "" : "s"}
-          {focus && <> · fit shown for <span className="font-medium">{focus.specimen.label}</span></>}
+          {!zoom.isZoomed && <> · drag across the plot to zoom · hover a curve for its name</>}
         </p>
-        <Button
-          variant={zoom ? "secondary" : "outline"}
-          size="sm"
-          className="h-7 gap-1 text-xs"
-          onClick={() => setZoom((z) => !z)}
-        >
-          <ZoomIn className="h-3 w-3" />
-          Elastic zoom
-        </Button>
+        <div className="flex items-center gap-2">
+          <Button
+            variant="outline"
+            size="sm"
+            className="h-7 gap-1 text-xs"
+            onClick={() => zoom.zoomToX(0, params.eHi * 8 + params.offsetPct)}
+          >
+            <ZoomIn className="h-3 w-3" />
+            Elastic zoom
+          </Button>
+          {zoom.isZoomed && (
+            <Button
+              variant="secondary"
+              size="sm"
+              className="h-7 gap-1 text-xs"
+              onClick={zoom.reset}
+            >
+              <RotateCcw className="h-3 w-3" />
+              Reset
+            </Button>
+          )}
+        </div>
       </div>
 
-      <div className="min-h-[340px] flex-1">
+      <div className="relative min-h-[340px] flex-1">
+        {hover.label && (
+          <div className="pointer-events-none absolute left-3 top-2 z-10 max-w-[70%] truncate rounded-md border border-border/70 bg-background/90 px-2 py-1 text-xs font-medium text-foreground shadow-sm">
+            {hover.label}
+          </div>
+        )}
         <ResponsiveContainer width="100%" height="100%">
-          <ComposedChart margin={{ top: 12, right: 20, bottom: 28, left: 8 }}>
+          <ComposedChart
+            margin={{ top: 12, right: 20, bottom: 28, left: 8 }}
+            onMouseDown={zoom.onMouseDown}
+            onMouseMove={zoom.onMouseMove}
+            onMouseUp={zoom.onMouseUp}
+            onMouseLeave={zoom.onMouseLeave}
+            onDoubleClick={zoom.reset}
+            style={{ cursor: "crosshair", userSelect: "none" }}
+          >
             <CartesianGrid strokeDasharray="3 3" className="stroke-border/50" />
             <XAxis
               type="number"
               dataKey="x"
-              domain={[0, xMax ?? "dataMax"]}
-              allowDataOverflow={zoom}
+              domain={xDomain}
+              allowDataOverflow={zoom.isZoomed}
               tickLine={false}
-              tickFormatter={(v: number) => v.toFixed(zoom ? 2 : 0)}
+              tickFormatter={(v: number) => v.toFixed(zoom.isZoomed ? 2 : 0)}
               label={{ value: "Strain (%)", position: "insideBottom", offset: -16 }}
               fontSize={11}
             />
             <YAxis
               type="number"
+              domain={yDomain}
+              allowDataOverflow={zoom.isZoomed}
               tickLine={false}
+              tickFormatter={(v: number) => v.toFixed(0)}
               width={48}
               label={{
                 value: "Stress (MPa)",
@@ -174,12 +201,14 @@ export function StressStrainChart() {
               }}
               fontSize={11}
             />
+            {/* No popup box (it grows huge with many curves) — just a thin
+                cursor line. Hovering a curve shows its name in the chip above.
+                The Tooltip element is kept so recharts still reports the active
+                x to the drag-zoom handlers. */}
             <Tooltip
-              formatter={(value: number, name: string) => [`${value.toFixed(2)}`, name]}
-              labelFormatter={(x: number) => `${x.toFixed(2)} %`}
-              contentStyle={{ fontSize: 12, borderRadius: 8 }}
+              content={() => null}
+              cursor={{ stroke: "#94a3b8", strokeWidth: 1, strokeDasharray: "3 3" }}
             />
-            <Legend wrapperStyle={{ fontSize: 11 }} />
 
             {/* Shaded modulus window. */}
             <ReferenceArea
@@ -194,7 +223,7 @@ export function StressStrainChart() {
               <Line
                 key={specimen.id}
                 name={specimen.label}
-                type="monotone"
+                type="linear"
                 data={data}
                 dataKey="y"
                 stroke={color}
@@ -202,60 +231,33 @@ export function StressStrainChart() {
                 strokeOpacity={specimen.excluded ? 0.35 : 0.9}
                 strokeDasharray={specimen.excluded ? "4 3" : undefined}
                 dot={false}
-                activeDot={{ r: 3 }}
+                activeDot={false}
                 isAnimationActive={false}
-                legendType={curves.length > 8 ? "none" : "line"}
+                onMouseEnter={() => hover.show(specimen.label)}
+                onMouseMove={() => hover.show(specimen.label)}
               />
             ))}
 
-            {/* Modulus + offset fit lines for the focused specimen. */}
-            {focus && (
-              <>
-                <Line
-                  name="Modulus fit"
-                  type="linear"
-                  data={focus.elastic}
-                  dataKey="y"
-                  stroke="#111827"
-                  strokeWidth={1.5}
-                  dot={false}
-                  activeDot={false}
-                  isAnimationActive={false}
-                  legendType="none"
-                />
-                <Line
-                  name="0.2% offset"
-                  type="linear"
-                  data={focus.offset}
-                  dataKey="y"
-                  stroke="#111827"
-                  strokeWidth={1.2}
-                  strokeDasharray="5 4"
-                  dot={false}
-                  activeDot={false}
-                  isAnimationActive={false}
-                  legendType="none"
-                />
-                {focus.offsetCross && (
-                  <ReferenceDot
-                    x={focus.offsetCross.x}
-                    y={focus.offsetCross.y}
-                    r={4}
-                    fill="#111827"
-                    stroke="#fff"
-                    ifOverflow="extendDomain"
-                  />
-                )}
-                {!zoom && Number.isFinite(focus.uts.y) && (
-                  <Scatter
-                    name="UTS"
-                    data={[focus.uts]}
-                    dataKey="y"
-                    fill="#dc2626"
-                    isAnimationActive={false}
-                  />
-                )}
-              </>
+            {/* UTS marker for the focused specimen. */}
+            {utsMarker && (
+              <Scatter
+                name="UTS"
+                data={[{ x: utsMarker.x, y: utsMarker.y }]}
+                dataKey="y"
+                fill="#dc2626"
+                isAnimationActive={false}
+              />
+            )}
+
+            {/* The in-progress drag-zoom rectangle. */}
+            {zoom.refArea && (
+              <ReferenceArea
+                x1={zoom.refArea.x1}
+                x2={zoom.refArea.x2}
+                fill="#2563eb"
+                fillOpacity={0.15}
+                ifOverflow="extendDomain"
+              />
             )}
           </ComposedChart>
         </ResponsiveContainer>

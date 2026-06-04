@@ -1,5 +1,6 @@
-import { Check, GitMerge, Layers, Pencil, Scissors, X } from "lucide-react";
+import { Check, GitMerge, Layers, Pencil, Scissors } from "lucide-react";
 import { useState } from "react";
+import { CollapsibleSection } from "@/components/tensile/CollapsibleSection";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
@@ -34,29 +35,25 @@ export function MaterialsPanel() {
 
   const selectedSpecimens = selection.specimenIds.length;
 
-  return (
-    <div className="flex flex-col gap-3">
-      <div className="flex items-center justify-between">
-        <h3 className="flex items-center gap-2 text-sm font-semibold text-foreground">
-          <Layers className="h-4 w-4 text-primary" />
-          Materials
-          <span className="text-xs font-normal text-muted-foreground">
-            ({materialViews.length})
-          </span>
-        </h3>
-        {selectedSpecimens > 0 && (
-          <Button
-            size="sm"
-            variant="outline"
-            className="h-7 gap-1 text-xs"
-            onClick={() => createMaterialFrom(selection.specimenIds, "New material")}
-          >
-            <Scissors className="h-3 w-3" />
-            New from selected ({selectedSpecimens})
-          </Button>
-        )}
-      </div>
+  const newFromSelected = selectedSpecimens > 0 && (
+    <Button
+      size="sm"
+      variant="outline"
+      className="h-7 gap-1 text-xs"
+      onClick={() => createMaterialFrom(selection.specimenIds, "New material")}
+    >
+      <Scissors className="h-3 w-3" />
+      New from selected ({selectedSpecimens})
+    </Button>
+  );
 
+  return (
+    <CollapsibleSection
+      title="Materials"
+      icon={Layers}
+      count={materialViews.length}
+      headerRight={newFromSelected || undefined}
+    >
       <div className="flex flex-col gap-3">
         {materialViews.map((mv) => (
           <MaterialCard
@@ -75,7 +72,7 @@ export function MaterialsPanel() {
           </p>
         )}
       </div>
-    </div>
+    </CollapsibleSection>
   );
 }
 

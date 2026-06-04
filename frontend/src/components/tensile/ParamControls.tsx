@@ -1,6 +1,7 @@
 import * as SliderPrimitive from "@radix-ui/react-slider";
 import { RotateCcw, SlidersHorizontal } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { CollapsibleSection } from "@/components/tensile/CollapsibleSection";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -91,19 +92,20 @@ export function ParamControls() {
   const preset = detectPreset(local);
   const breakMode = local.breakDefinition.mode;
 
-  return (
-    <div className="flex flex-col gap-5 rounded-2xl border border-border/70 bg-card p-4 shadow-card">
-      <div className="flex items-center justify-between">
-        <h3 className="flex items-center gap-2 text-sm font-semibold text-foreground">
-          <SlidersHorizontal className="h-4 w-4 text-primary" />
-          Analysis parameters
-        </h3>
-        <Button variant="ghost" size="sm" className="h-7 gap-1 text-xs" onClick={reset}>
-          <RotateCcw className="h-3 w-3" />
-          Reset
-        </Button>
-      </div>
+  const resetButton = (
+    <Button variant="ghost" size="sm" className="h-7 gap-1 text-xs" onClick={reset}>
+      <RotateCcw className="h-3 w-3" />
+      Reset
+    </Button>
+  );
 
+  return (
+    <CollapsibleSection
+      title="Analysis parameters"
+      icon={SlidersHorizontal}
+      headerRight={resetButton}
+      contentClassName="flex flex-col gap-5"
+    >
       {/* Preset */}
       <div className="grid gap-1.5">
         <Label className="text-xs text-muted-foreground">Preset</Label>
@@ -229,7 +231,7 @@ export function ParamControls() {
           </SelectContent>
         </Select>
       </div>
-    </div>
+    </CollapsibleSection>
   );
 }
 

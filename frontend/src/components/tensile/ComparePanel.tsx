@@ -23,6 +23,7 @@ import {
   OverlaidCurvesChart,
   ScatterCompareChart,
 } from "@/components/tensile/charts";
+import { CollapsibleSection } from "@/components/tensile/CollapsibleSection";
 import { downloadChartPng, downloadChartSvg } from "@/lib/tensile/chart-image";
 import { buildBars, buildCurves, buildDistribution, buildScatter } from "@/lib/tensile/compare";
 import { PROPERTY_META } from "@/lib/tensile/compute";
@@ -91,10 +92,12 @@ export function ComparePanel() {
     return specimens.filter((s) => ids.has(s.id));
   }, [specimens, shownMaterials, selection.specimenIds]);
 
-  const curves = useMemo(
-    () => buildCurves(materialViews, shownSpecimens, params),
-    [materialViews, shownSpecimens, params],
-  );
+  const curves = useMemo(() => {
+    // Lower the per-curve point budget as more curves are overlaid, to keep the
+    // chart responsive with a lot of data loaded.
+    const cap = shownSpecimens.length > 24 ? 120 : shownSpecimens.length > 12 ? 200 : 400;
+    return buildCurves(materialViews, shownSpecimens, params, cap);
+  }, [materialViews, shownSpecimens, params]);
   const bars = useMemo(() => buildBars(shownMaterials, property), [shownMaterials, property]);
   const scatter = useMemo(
     () => buildScatter(shownMaterials, xKey, yKey),
@@ -119,27 +122,28 @@ export function ComparePanel() {
 
   const empty = curves.length === 0 && shownMaterials.length === 0;
 
-  return (
-    <div className="flex flex-col gap-3 rounded-2xl border border-border/70 bg-card p-4 shadow-card">
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <h3 className="flex items-center gap-2 text-sm font-semibold text-foreground">
-          <GitCompare className="h-4 w-4 text-primary" />
-          Compare
-        </h3>
-        <DropdownMenu>
-          <DropdownMenuTrigger asChild>
-            <Button variant="outline" size="sm" className="h-8 gap-1 text-xs">
-              <Download className="h-3.5 w-3.5" />
-              This figure
-            </Button>
-          </DropdownMenuTrigger>
-          <DropdownMenuContent align="end">
-            <DropdownMenuItem onClick={() => download("png")}>Download PNG</DropdownMenuItem>
-            <DropdownMenuItem onClick={() => download("svg")}>Download SVG</DropdownMenuItem>
-          </DropdownMenuContent>
-        </DropdownMenu>
-      </div>
+  const downloadMenu = (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <Button variant="outline" size="sm" className="h-8 gap-1 text-xs">
+          <Download className="h-3.5 w-3.5" />
+          This figure
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end">
+        <DropdownMenuItem onClick={() => download("png")}>Download PNG</DropdownMenuItem>
+        <DropdownMenuItem onClick={() => download("svg")}>Download SVG</DropdownMenuItem>
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
 
+  return (
+    <CollapsibleSection
+      title="Compare"
+      icon={GitCompare}
+      headerRight={downloadMenu}
+      contentClassName="flex flex-col gap-3"
+    >
       <Tabs value={view} onValueChange={(v) => setView(v as View)}>
         <div className="flex flex-wrap items-center justify-between gap-2">
           <TabsList className="h-9">
@@ -212,6 +216,6 @@ export function ComparePanel() {
           )}
         </div>
       </Tabs>
-    </div>
+    </CollapsibleSection>
   );
 }
