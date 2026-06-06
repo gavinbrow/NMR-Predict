@@ -8,7 +8,7 @@
 
 import ExcelJS from "exceljs";
 import { jsPDF } from "jspdf";
-import { adductById } from "./adducts";
+import { adductById, neutralMass } from "./adducts";
 import type { EndGroupCandidate } from "./endgroups";
 import type { Finding } from "./interpret";
 import type { LossEvent } from "./losses";
@@ -211,6 +211,165 @@ function topPeaks(peaks: Peak[], limit: number): Peak[] {
     .sort((a, b) => (a.centroid ?? a.mz) - (b.centroid ?? b.mz));
 }
 
+// --- End-group regression (mass vs oligomer number) --------------------------
+
+/** A least-squares fit of neutral mass against oligomer number n for one end
+ *  group: slope ≈ the repeat unit, intercept ≈ the end-group neutral mass, and R²
+ *  measures how cleanly the ladder obeys mass = endGroup + n·repeat. */
+export interface EndGroupFit {
+  /** Adduct label, e.g. "[M+Na]+". */
+  adductLabel: string;
+  /** Residual end-group mass (mod repeat) the candidate was clustered on. */
+  residualMass: number;
+  /** Nearest library end group, if any. */
+  libraryMatch?: string;
+  /** Fitted slope — the apparent repeat-unit mass (Da). */
+  repeatFit: number;
+  /** Fitted intercept — the apparent end-group neutral mass (Da). */
+  endGroupFit: number;
+  /** Coefficient of determination, 0..1. */
+  r2: number;
+  /** The per-oligomer points used in the fit. */
+  points: { n: number; mass: number; predicted: number }[];
+}
+
+/** Ordinary least squares of y on x, plus R². */
+function linearFit(xs: number[], ys: number[]): { slope: number; intercept: number; r2: number } {
+  const n = xs.length;
+  const xbar = xs.reduce((a, b) => a + b, 0) / n;
+  const ybar = ys.reduce((a, b) => a + b, 0) / n;
+  let sxx = 0;
+  let sxy = 0;
+  let syy = 0;
+  for (let i = 0; i < n; i += 1) {
+    const dx = xs[i] - xbar;
+    const dy = ys[i] - ybar;
+    sxx += dx * dx;
+    sxy += dx * dy;
+    syy += dy * dy;
+  }
+  const slope = sxx > 0 ? sxy / sxx : 0;
+  const intercept = ybar - slope * xbar;
+  let ssRes = 0;
+  for (let i = 0; i < n; i += 1) {
+    const pred = intercept + slope * xs[i];
+    ssRes += (ys[i] - pred) ** 2;
+  }
+  const r2 = syy > 0 ? Math.max(0, 1 - ssRes / syy) : 1;
+  return { slope, intercept, r2 };
+}
+
+/**
+ * Build a mass-vs-n regression for each end group in the report. Prefers the
+ * solved end-group candidates (each is one end group); if none were solved, falls
+ * back to the assigned series (each carries its own end group + adduct). Returns
+ * fits best-first, skipping any with fewer than three points.
+ */
+export function collectEndGroupFits(payload: ReportPayload): EndGroupFit[] {
+  const sources: { adductId: string; residualMass: number; libraryMatch?: string; members: { peakId: string; n: number }[] }[] =
+    payload.endGroupCandidates && payload.endGroupCandidates.length
+      ? payload.endGroupCandidates.map((c) => ({
+          adductId: c.adductId,
+          residualMass: c.residualMass,
+          libraryMatch: c.libraryMatch,
+          members: c.members ?? [],
+        }))
+      : payload.series.map((s) => ({
+          adductId: s.adductId,
+          residualMass: s.endGroupMass,
+          members: s.members,
+        }));
+
+  const peakById = new Map(payload.peaks.map((p) => [p.id, p] as const));
+  const fits: EndGroupFit[] = [];
+  for (const src of sources) {
+    const adduct = adductById(payload.adducts, src.adductId);
+    const xs: number[] = [];
+    const ys: number[] = [];
+    for (const m of src.members) {
+      const peak = peakById.get(m.peakId);
+      if (!peak) continue;
+      xs.push(m.n);
+      ys.push(neutralMass(peak.centroid ?? peak.mz, adduct));
+    }
+    if (xs.length < 3 || new Set(xs).size < 2) continue;
+    const { slope, intercept, r2 } = linearFit(xs, ys);
+    const points = xs
+      .map((n, i) => ({ n, mass: ys[i], predicted: intercept + slope * n }))
+      .sort((a, b) => a.n - b.n);
+    fits.push({
+      adductLabel: adduct.label,
+      residualMass: src.residualMass,
+      libraryMatch: src.libraryMatch,
+      repeatFit: slope,
+      endGroupFit: intercept,
+      r2,
+      points,
+    });
+  }
+  // Best-fitting (highest R², then most points) first.
+  fits.sort((a, b) => b.r2 - a.r2 || b.points.length - a.points.length);
+  return fits;
+}
+
+/** Draw one mass-vs-n scatter + fit line with its R² into the PDF. */
+function drawRegressionChart(
+  doc: jsPDF,
+  x0: number,
+  y0: number,
+  w: number,
+  fit: EndGroupFit,
+): void {
+  const titleH = 12;
+  const chartH = 104;
+  const pad = 6;
+  // Title.
+  doc.setFont("helvetica", "bold");
+  doc.setFontSize(9);
+  doc.setTextColor(0);
+  const lib = fit.libraryMatch ? ` (${fit.libraryMatch})` : "";
+  doc.text(`${fit.adductLabel} · end ${fit.residualMass.toFixed(2)} Da${lib}`.slice(0, 64), x0, y0 + 9);
+
+  const bx = x0;
+  const by = y0 + titleH;
+  const bw = w;
+  const bh = chartH;
+  doc.setDrawColor(205);
+  doc.setLineWidth(0.5);
+  doc.rect(bx, by, bw, bh);
+
+  const ns = fit.points.map((p) => p.n);
+  const ms = fit.points.map((p) => p.mass);
+  let xMin = Math.min(...ns);
+  let xMax = Math.max(...ns);
+  let yMin = Math.min(...ms);
+  let yMax = Math.max(...ms);
+  if (xMax === xMin) xMax = xMin + 1;
+  if (yMax === yMin) yMax = yMin + 1;
+  const px = (n: number) => bx + pad + ((n - xMin) / (xMax - xMin)) * (bw - 2 * pad);
+  const py = (m: number) => by + bh - pad - ((m - yMin) / (yMax - yMin)) * (bh - 2 * pad);
+
+  // Fit line across the n-range.
+  doc.setDrawColor(14, 165, 233);
+  doc.setLineWidth(1);
+  doc.line(px(xMin), py(fit.endGroupFit + fit.repeatFit * xMin), px(xMax), py(fit.endGroupFit + fit.repeatFit * xMax));
+
+  // Data points.
+  doc.setFillColor(217, 70, 239);
+  for (const p of fit.points) doc.circle(px(p.n), py(p.mass), 1.4, "F");
+
+  // Stats line under the chart.
+  doc.setFont("helvetica", "normal");
+  doc.setFontSize(8);
+  doc.setTextColor(90);
+  doc.text(
+    `repeat ${fit.repeatFit.toFixed(3)} Da · end group ${fit.endGroupFit.toFixed(2)} Da · R² ${fit.r2.toFixed(4)} · ${fit.points.length} pts`,
+    bx,
+    by + bh + 10,
+  );
+  doc.setTextColor(0);
+}
+
 /** Generate a publication-style PDF report of the current analysis. */
 export function exportReportPdf(payload: ReportPayload): void {
   const doc = new jsPDF({ unit: "pt", format: "a4" });
@@ -314,6 +473,35 @@ export function exportReportPdf(payload: ReportPayload): void {
     y += 8;
   }
 
+  // End-group regression (mass = end group + n × repeat), with R² per end group.
+  const egFits = collectEndGroupFits(payload).slice(0, 6);
+  if (egFits.length) {
+    ensureSpace(40);
+    doc.setFont("helvetica", "bold");
+    doc.setFontSize(12);
+    doc.setTextColor(0);
+    doc.text("End-group regression", margin, y);
+    y += 12;
+    doc.setFont("helvetica", "normal");
+    doc.setFontSize(8);
+    doc.setTextColor(120);
+    doc.text("neutral mass = end group + n × repeat unit; R² gauges how cleanly each ladder fits", margin, y);
+    doc.setTextColor(0);
+    y += 14;
+
+    const gap = 18;
+    const cellW = (contentWidth - gap) / 2;
+    const rowH = 12 + 104 + 18; // title + chart + stats/padding
+    for (let i = 0; i < egFits.length; i += 2) {
+      ensureSpace(rowH);
+      const rowY = y;
+      drawRegressionChart(doc, margin, rowY, cellW, egFits[i]);
+      if (egFits[i + 1]) drawRegressionChart(doc, margin + cellW + gap, rowY, cellW, egFits[i + 1]);
+      y = rowY + rowH;
+    }
+    y += 4;
+  }
+
   // Peak table (top by intensity).
   const peaks = topPeaks(payload.peaks, 40);
   if (peaks.length) {
@@ -404,6 +592,39 @@ export async function exportReportExcel(payload: ReportPayload): Promise<void> {
       }
     }
     seriesSheet.columns.forEach((c) => (c.width = 14));
+  }
+
+  // End-group regression: per-end-group stats + the mass-vs-n points (so the user
+  // can re-plot in Excel), each annotated with the fitted repeat, end group and R².
+  const egFits = collectEndGroupFits(payload);
+  if (egFits.length) {
+    const egSheet = wb.addWorksheet("End groups");
+    egSheet.addRow(["End-group regression: neutral mass = end group + n × repeat"]).font = { bold: true };
+    egSheet.addRow([]);
+    // Summary table.
+    egSheet.addRow(["adduct", "end group (mod repeat)", "repeat fit (Da)", "end group fit (Da)", "R²", "points", "library match"]).font = { bold: true };
+    for (const f of egFits) {
+      egSheet.addRow([
+        f.adductLabel,
+        Number(f.residualMass.toFixed(4)),
+        Number(f.repeatFit.toFixed(4)),
+        Number(f.endGroupFit.toFixed(4)),
+        Number(f.r2.toFixed(5)),
+        f.points.length,
+        f.libraryMatch ?? "",
+      ]);
+    }
+    egSheet.addRow([]);
+    // Per-fit point tables (for charting in Excel).
+    for (const f of egFits) {
+      egSheet.addRow([`${f.adductLabel} · end ${f.residualMass.toFixed(2)} Da · R² ${f.r2.toFixed(4)}`]).font = { bold: true };
+      egSheet.addRow(["n", "observed mass (Da)", "predicted mass (Da)", "residual (Da)"]).font = { bold: true };
+      for (const p of f.points) {
+        egSheet.addRow([p.n, Number(p.mass.toFixed(4)), Number(p.predicted.toFixed(4)), Number((p.mass - p.predicted).toFixed(4))]);
+      }
+      egSheet.addRow([]);
+    }
+    egSheet.columns.forEach((c) => (c.width = 20));
   }
 
   // Spectrum image.

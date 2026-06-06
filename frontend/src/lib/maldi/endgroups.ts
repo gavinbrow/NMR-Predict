@@ -7,6 +7,7 @@
 // masses, which we match against a small library of common termini.
 
 import { neutralMass } from "./adducts";
+import { linkByRepeat, seriesTolerance } from "./polymers";
 import type { Adduct, Peak } from "./types";
 
 export interface EndGroupLibraryEntry {
@@ -48,6 +49,8 @@ export interface EndGroupOptions {
   libraryToleranceDa?: number;
   /** Max candidates returned. Default 12. */
   maxCandidates?: number;
+  /** Bridge up to this many missing rungs when linking a ladder. Default 1. */
+  maxGap?: number;
 }
 
 export interface EndGroupCandidate {
@@ -63,6 +66,39 @@ export interface EndGroupCandidate {
   libraryMatch?: string;
   /** 0..1 confidence from support count and fit error. */
   confidence: number;
+  /** The peaks supporting this end group, with their oligomer number n. Used to
+   *  highlight the ladder in the viewer and to regress mass vs n for the report. */
+  members: { peakId: string; n: number }[];
+  /** End-group neutral mass read as the Y-intercept of a least-squares fit of
+   *  neutral mass vs oligomer number n (slope ≈ the repeat). This is the value the
+   *  report regresses; surfaced here so the panel can show the same number. */
+  endGroupFit?: number;
+  /** Coefficient of determination (0..1) of that mass-vs-n fit. */
+  r2?: number;
+}
+
+/** Ordinary least squares of y on x, returning slope, intercept and R². */
+function linearFit(xs: number[], ys: number[]): { slope: number; intercept: number; r2: number } {
+  const n = xs.length;
+  if (n < 2) return { slope: 0, intercept: ys[0] ?? 0, r2: 1 };
+  const xbar = xs.reduce((a, b) => a + b, 0) / n;
+  const ybar = ys.reduce((a, b) => a + b, 0) / n;
+  let sxx = 0;
+  let sxy = 0;
+  let syy = 0;
+  for (let i = 0; i < n; i += 1) {
+    const dx = xs[i] - xbar;
+    const dy = ys[i] - ybar;
+    sxx += dx * dx;
+    sxy += dx * dy;
+    syy += dy * dy;
+  }
+  const slope = sxx > 0 ? sxy / sxx : 0;
+  const intercept = ybar - slope * xbar;
+  let ssRes = 0;
+  for (let i = 0; i < n; i += 1) ssRes += (ys[i] - (intercept + slope * xs[i])) ** 2;
+  const r2 = syy > 0 ? Math.max(0, 1 - ssRes / syy) : 1;
+  return { slope, intercept, r2 };
 }
 
 let candidateCounter = 0;
@@ -87,51 +123,69 @@ export function solveEndGroups(
   adducts: Adduct[],
   options: EndGroupOptions = {},
 ): EndGroupCandidate[] {
-  const tol = options.toleranceDa ?? 0.5;
+  const tol = seriesTolerance(peaks, options.toleranceDa ?? 0.5);
   const minOligomers = options.minOligomers ?? 3;
   const libTol = options.libraryToleranceDa ?? 0.3;
   const maxCandidates = options.maxCandidates ?? 12;
+  const maxGap = options.maxGap ?? 1;
   if (!(repeatMass > 0) || adducts.length === 0) return [];
 
-  const pts = peaks.filter((p) => p.accepted !== false && !p.ignored && p.flag !== "isotope");
+  const pts = peaks
+    .filter((p) => p.accepted !== false && !p.ignored && p.flag !== "isotope")
+    .slice()
+    .sort((a, b) => peakMz(a) - peakMz(b));
+  if (pts.length < minOligomers) return [];
+
+  // Ladders are linked by m/z spacing (adduct-independent and robust to unit-
+  // resolution rounding drift); the adduct only sets the end-group residual.
+  const components = linkByRepeat(pts, repeatMass, tol, maxGap);
   const out: EndGroupCandidate[] = [];
 
   for (const adduct of adducts) {
-    const residuals: number[] = [];
-    for (const peak of pts) {
-      const neutral = neutralMass(peakMz(peak), adduct);
-      if (neutral <= 0) continue;
-      residuals.push(neutral - Math.floor(neutral / repeatMass) * repeatMass);
-    }
-    if (residuals.length < minOligomers) continue;
-    residuals.sort((a, b) => a - b);
+    for (const component of components) {
+      if (component.length < minOligomers) continue;
+      const items = component
+        .map((peak) => ({ peak, neutral: neutralMass(peakMz(peak), adduct) }))
+        .filter((x) => x.neutral > 0)
+        .sort((a, b) => a.neutral - b.neutral);
+      if (items.length < minOligomers) continue;
 
-    // Cluster residuals (with wraparound across the 0/repeat seam).
-    const clusters: number[][] = [];
-    let current: number[] = [];
-    for (const r of residuals) {
-      if (current.length === 0 || r - current[current.length - 1] <= tol) current.push(r);
-      else {
-        clusters.push(current);
-        current = [r];
+      // Assign an oligomer number n from the spacing; keep the most intense peak
+      // per n so isotope/duplicate peaks don't double-count a rung.
+      const base = items[0].neutral;
+      const byN = new Map<number, { peak: Peak; neutral: number }>();
+      for (const it of items) {
+        const n = Math.round((it.neutral - base) / repeatMass);
+        const existing = byN.get(n);
+        if (!existing || it.peak.intensity > existing.peak.intensity) byN.set(n, it);
       }
-    }
-    if (current.length) clusters.push(current);
-    if (clusters.length > 1) {
-      const last = clusters[clusters.length - 1];
-      const first = clusters[0];
-      if (repeatMass - last[last.length - 1] + first[0] <= tol) {
-        clusters.pop();
-        clusters[0] = [...last.map((v) => v - repeatMass), ...first];
-      }
-    }
+      if (byN.size < minOligomers) continue;
 
-    for (const cluster of clusters) {
-      if (cluster.length < minOligomers) continue;
-      const mean = cluster.reduce((s, v) => s + v, 0) / cluster.length;
-      const residualMass = ((mean % repeatMass) + repeatMass) % repeatMass;
-      const variance = cluster.reduce((s, v) => s + (v - mean) ** 2, 0) / cluster.length;
-      const meanErrorDa = Math.sqrt(variance);
+      // Estimate the end-group residual from the (0-based) spacing so we can recover
+      // the ABSOLUTE oligomer number of each rung.
+      let residSum = 0;
+      for (const [n, it] of byN) residSum += it.neutral - n * repeatMass;
+      const residual0 = (((residSum / byN.size) % repeatMass) + repeatMass) % repeatMass;
+      const n0 = Math.max(0, Math.round((base - residual0) / repeatMass));
+
+      // Y-intercept reading: least-squares fit of neutral mass vs the ABSOLUTE
+      // oligomer number n (slope ≈ repeat). The intercept is then the end-group
+      // neutral mass itself — exactly the value the user reads off their plot — and
+      // R² gauges how cleanly mass = endGroup + n·repeat holds.
+      const relNs = [...byN.keys()];
+      const xs = relNs.map((n) => n + n0);
+      const ys = relNs.map((n) => byN.get(n)!.neutral);
+      const fit = linearFit(xs, ys);
+      const residualMass = ((fit.intercept % repeatMass) + repeatMass) % repeatMass;
+      let sse = 0;
+      for (let i = 0; i < xs.length; i += 1) {
+        const err = ys[i] - (fit.intercept + fit.slope * xs[i]);
+        sse += err * err;
+      }
+      const meanErrorDa = Math.sqrt(sse / xs.length);
+      const members = [...byN.entries()]
+        .sort((a, b) => a[0] - b[0])
+        .map(([n, m]) => ({ peakId: m.peak.id, n: n + n0 }));
 
       let libraryMatch: string | undefined;
       let bestDelta = libTol;
@@ -144,7 +198,7 @@ export function solveEndGroups(
         }
       }
 
-      const supportTerm = cluster.length / (cluster.length + 3);
+      const supportTerm = byN.size / (byN.size + 3);
       const errorTerm = Math.max(0, 1 - meanErrorDa / tol);
       const confidence = Number((supportTerm * errorTerm).toFixed(4));
 
@@ -152,10 +206,13 @@ export function solveEndGroups(
         id: candidateId(),
         residualMass,
         adductId: adduct.id,
-        matchedOligomers: cluster.length,
+        matchedOligomers: byN.size,
         meanErrorDa,
         libraryMatch,
         confidence,
+        members,
+        endGroupFit: fit.intercept,
+        r2: fit.r2,
       });
     }
   }

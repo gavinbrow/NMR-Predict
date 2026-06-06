@@ -83,6 +83,8 @@ export interface Series {
   /** Scoring breakdown surfaced in the UI. */
   score: number;
   meanErrorDa?: number;
+  /** R² of the neutral-mass-vs-n regression (how cleanly the ladder fits). */
+  r2?: number;
 }
 
 // ---------------------------------------------------------------------------

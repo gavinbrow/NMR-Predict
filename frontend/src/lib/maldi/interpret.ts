@@ -57,7 +57,9 @@ export function interpretSpectrum(input: InterpretationInput): Finding[] {
     findings.push({
       tone: "good",
       text: `Dominant repeat spacing ≈ ${topRepeat.repeatMass.toFixed(3)} Da${
-        match ? `, consistent with ${match.name} (${match.formula})` : " (no library match)"
+        match
+          ? `, consistent with ${match.name}${match.formula ? ` (${match.formula})` : ""}`
+          : " (no library match)"
       }.`,
     });
     if (input.repeatCandidates && input.repeatCandidates.length > 1) {

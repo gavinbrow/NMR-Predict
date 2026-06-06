@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
 import { BUILTIN_ADDUCTS } from "../adducts";
-import { assignSeries, detectRepeatUnits, peaksForRepeat, seriesForRepeat } from "../polymers";
+import {
+  assignSeries,
+  detectRepeatUnits,
+  fitLadder,
+  peaksForRepeat,
+  seriesForRepeat,
+} from "../polymers";
 import type { Peak } from "../types";
 import { pickPegPeaks, PEG_REPEAT } from "./fixtures";
 
@@ -13,6 +19,37 @@ describe("detectRepeatUnits", () => {
     expect(candidates.length).toBeGreaterThan(0);
     expect(candidates[0].repeatMass).toBeCloseTo(PEG_REPEAT, 1);
     expect(candidates[0].score).toBe(1); // normalized top score
+  });
+
+  // A ladder whose isotope satellites survive into the analysis produces three
+  // near-identical spacings: repeat (mono→mono) and repeat ± one ¹³C step
+  // (mono→A+1 of the next oligomer, and vice-versa). These are NOT distinct
+  // repeat units — they are the same repeat measured between isotopologues.
+  function isotopeContaminatedLadder(): Peak[] {
+    const repeat = 100;
+    const end = 200;
+    const step = 1.0033548;
+    const peaks: Peak[] = [];
+    let id = 0;
+    for (let n = 0; n <= 10; n += 1) {
+      const base = end + n * repeat;
+      peaks.push({ id: `m${id++}`, mz: base, intensity: 1000, accepted: true });
+      peaks.push({ id: `i${id++}`, mz: base + step, intensity: 350, accepted: true });
+    }
+    return peaks;
+  }
+
+  it("folds isotope-shifted spacings into one repeat unit when isotope-aware (default)", () => {
+    const cands = detectRepeatUnits(isotopeContaminatedLadder(), { isotopeAware: true });
+    const inBand = cands.filter((c) => Math.abs(c.repeatMass - 100) < 1.5);
+    expect(inBand.length).toBe(1);
+    expect(inBand[0].repeatMass).toBeCloseTo(100, 1);
+  });
+
+  it("keeps the isotope-shifted spacings separate when isotope-awareness is off", () => {
+    const cands = detectRepeatUnits(isotopeContaminatedLadder(), { isotopeAware: false });
+    const inBand = cands.filter((c) => Math.abs(c.repeatMass - 100) < 1.5);
+    expect(inBand.length).toBeGreaterThanOrEqual(2);
   });
 });
 
@@ -104,5 +141,64 @@ describe("assignSeries", () => {
     const { peaks } = pegPeaks();
     const series = assignSeries(peaks, 13.37, BUILTIN_ADDUCTS, { minConsecutive: 5 });
     expect(series.length).toBe(0);
+  });
+});
+
+// Linear-mode MALDI polymers are often exported at unit (integer) m/z resolution.
+// The ±0.5 Da rounding makes a single 224-spacing ladder drift across a ~1 Da
+// residual band (adjacent rungs differ by 224 or 225 Da), which the tight 0.5 Da
+// high-res tolerance would split into fragments and drop — the "obvious series
+// members being ignored" bug. Tolerance is widened automatically for such data.
+describe("unit-resolution (integer m/z) ladders", () => {
+  const H = BUILTIN_ADDUCTS.find((a) => a.id === "H")!;
+  const REPEAT = 224;
+  const ladder = [695, 919, 1143, 1368, 1592, 1816, 2040, 2264, 2488];
+  const mk = (mz: number): Peak => ({ id: `p${mz}`, mz, intensity: 1000, accepted: true });
+
+  it("links a rounding-drifted ladder into one series via seriesForRepeat", () => {
+    const groups = seriesForRepeat(ladder.map(mk), REPEAT);
+    expect(groups.length).toBe(1);
+    expect(groups[0].peakIds.length).toBe(ladder.length);
+  });
+
+  it("assigns every member of the drifted ladder to one series (none ignored)", () => {
+    const series = assignSeries(ladder.map(mk), REPEAT, [H]);
+    expect(series.length).toBeGreaterThanOrEqual(1);
+    expect(series[0].members.length).toBe(ladder.length);
+  });
+
+  it("keeps two interleaved unit-resolution ladders separate", () => {
+    const a = [695, 919, 1143, 1368, 1592].map(mk);
+    const b = [978, 1202, 1426, 1650, 1874].map((m) => ({ ...mk(m), id: `b${m}` }));
+    const groups = seriesForRepeat([...a, ...b], REPEAT);
+    expect(groups.length).toBe(2);
+    for (const g of groups) {
+      const fromB = g.peakIds.filter((id) => id.startsWith("b")).length;
+      expect(fromB === 0 || fromB === g.peakIds.length).toBe(true);
+    }
+  });
+});
+
+describe("fitLadder", () => {
+  const H = BUILTIN_ADDUCTS.find((a) => a.id === "H")!;
+  const REPEAT = 224;
+  const ladder = [695, 919, 1143, 1368, 1592, 1816, 2040, 2264, 2488];
+
+  it("reads the end group as the Y-intercept of neutral mass vs n", () => {
+    const peaks: Peak[] = ladder.map((mz) => ({ id: `p${mz}`, mz, intensity: 1000, accepted: true }));
+    const fit = fitLadder(peaks, peaks.map((p) => p.id), REPEAT, H);
+    expect(fit).not.toBeNull();
+    expect(fit!.members.length).toBe(ladder.length);
+    // Consecutive, ascending oligomer numbers.
+    const ns = fit!.members.map((m) => m.n);
+    expect(ns).toEqual([...ns].sort((x, y) => x - y));
+    expect(ns[ns.length - 1] - ns[0]).toBe(ladder.length - 1);
+    // End group ≈ 22–23 Da (mod the 224 repeat) for this ladder.
+    expect(fit!.endGroupMass).toBeGreaterThan(20);
+    expect(fit!.endGroupMass).toBeLessThan(24);
+  });
+
+  it("returns null when no member resolves to a positive neutral mass", () => {
+    expect(fitLadder([], [], REPEAT, H)).toBeNull();
   });
 });

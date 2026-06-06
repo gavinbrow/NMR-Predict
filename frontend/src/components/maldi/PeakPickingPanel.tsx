@@ -114,12 +114,50 @@ export function PeakPickingPanel({
             onChange={(e) => set({ maxWidth: Number(e.target.value), preset: undefined })}
           />
         </Field>
+        <Field label="Min prominence (S/N)">
+          <Input
+            type="number"
+            step={0.5}
+            className="h-7 text-xs"
+            value={params.minProminence ?? params.minSnr}
+            onChange={(e) => set({ minProminence: Number(e.target.value), preset: undefined })}
+          />
+        </Field>
+        <Field label="Min separation (0=auto)">
+          <Input
+            type="number"
+            step={0.05}
+            className="h-7 text-xs"
+            value={params.minSeparation ?? 0}
+            onChange={(e) => set({ minSeparation: Number(e.target.value), preset: undefined })}
+          />
+        </Field>
+        <Field label="Smoothing (pts)">
+          <Input
+            type="number"
+            className="h-7 text-xs"
+            value={params.smoothing ?? 0}
+            onChange={(e) => set({ smoothing: Number(e.target.value), preset: undefined })}
+          />
+        </Field>
       </div>
 
       <div className="flex flex-col gap-1.5 rounded-lg border border-border/60 bg-background/60 p-2.5">
         <Toggle label="Centroid refinement" checked={params.centroid} onChange={(v) => set({ centroid: v, preset: undefined })} />
         <Toggle label="Isotope-aware (flag satellites)" checked={params.isotopeAware} onChange={(v) => set({ isotopeAware: v, preset: undefined })} />
         <Toggle label="Detect shoulders" checked={params.detectShoulders} onChange={(v) => set({ detectShoulders: v, preset: undefined })} />
+      </div>
+
+      <div className="flex flex-col gap-1 rounded-lg border border-primary/30 bg-primary/5 p-2.5">
+        <Toggle
+          label="Monoisotopic peaks only"
+          checked={params.monoisotopicOnly ?? false}
+          onChange={(v) => set({ monoisotopicOnly: v })}
+        />
+        <p className="text-[10px] leading-snug text-muted-foreground">
+          Within each isotope cluster, keep only the left-most (monoisotopic) peak — the one without
+          ¹³C / deuterium — and drop the satellites. Use before fitting repeat units and end groups.
+        </p>
       </div>
 
       <div className="flex items-center gap-2">

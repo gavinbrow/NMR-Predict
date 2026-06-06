@@ -1,4 +1,4 @@
-import { AlertTriangle, Layers, Loader2, Search, Sparkles } from "lucide-react";
+import { AlertTriangle, Atom, Layers, Loader2, Search, Sparkles } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -18,6 +18,9 @@ export interface RepeatGroupItem {
 interface SeriesPanelProps {
   repeatCandidates: RepeatCandidate[];
   onDetectRepeats: () => void;
+  /** Fold isotope-shifted spacings (~1 Da apart) into one repeat unit on detect. */
+  isotopeAware: boolean;
+  onToggleIsotopeAware: (on: boolean) => void;
   repeatMass: number;
   onRepeatMassChange: (value: number) => void;
   /** Click a candidate chip: select the repeat AND highlight its peaks (falls
@@ -47,6 +50,8 @@ interface SeriesPanelProps {
 export function SeriesPanel({
   repeatCandidates,
   onDetectRepeats,
+  isotopeAware,
+  onToggleIsotopeAware,
   repeatMass,
   onRepeatMassChange,
   onSelectRepeatCandidate,
@@ -78,6 +83,14 @@ export function SeriesPanel({
         {detectingRepeats ? <Loader2 className="mr-1.5 h-4 w-4 animate-spin" /> : <Search className="mr-1.5 h-4 w-4" />}
         Detect repeat units
       </Button>
+
+      <label className="flex items-center justify-between gap-2 rounded-md border border-border/60 bg-background/60 px-2.5 py-1.5">
+        <span className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+          <Atom className="h-3.5 w-3.5" />
+          Merge isotope-shifted repeats
+        </span>
+        <Switch checked={isotopeAware} onCheckedChange={onToggleIsotopeAware} />
+      </label>
 
       <label className="flex items-center justify-between gap-2 rounded-md border border-border/60 bg-background/60 px-2.5 py-1.5">
         <span className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
@@ -134,6 +147,9 @@ export function SeriesPanel({
           Assign
         </Button>
       </div>
+      <p className="text-[11px] text-muted-foreground">
+        Type a known repeat unit to highlight its ladder, then Assign / Solve end groups to compute against it.
+      </p>
       {adducts.length === 0 && (
         <p className="text-[11px] text-amber-600">Select at least one adduct first.</p>
       )}
@@ -222,6 +238,7 @@ export function SeriesPanel({
                       <span>end-group {s.endGroupMass.toFixed(3)}</span>
                       <span>{s.members.length} oligomers</span>
                       <span>err {s.meanErrorDa != null ? `${s.meanErrorDa.toFixed(3)} Da` : "—"}</span>
+                      {s.r2 != null && <span>R² {s.r2.toFixed(4)}</span>}
                     </div>
                     {(lowConfidence || shortRun) && (
                       <div className="mt-1 flex flex-wrap gap-1">

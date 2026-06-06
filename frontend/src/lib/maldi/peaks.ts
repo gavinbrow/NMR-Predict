@@ -40,6 +40,36 @@ export interface PeakPickParams {
   detectShoulders: boolean;
   /** Assumed charge state, for isotope spacing. */
   charge: number;
+  /**
+   * Minimum topographic prominence as a multiple of local noise — how far a peak
+   * must rise above the higher of its two neighbouring valleys. This is the
+   * primary reliability gate: it rejects baseline wiggles (≈0 prominence) and
+   * stops a peak's noisy flank/top from being picked twice, while keeping real
+   * isotopes (each rises well out of the inter-isotope valley). Optional so old
+   * saved params still load; defaults to `minSnr` when absent.
+   */
+  minProminence?: number;
+  /**
+   * Merge accepted peaks closer than this in m/z, keeping the taller — collapses
+   * the duplicate maxima a single noisy peak top produces. 0 = auto (derived from
+   * the median peak width, clamped below the isotope spacing). Optional.
+   */
+  minSeparation?: number;
+  /**
+   * Detection-only smoothing window in points (0 = none). Peaks are *found* on the
+   * smoothed trace, but intensity/width/centroid/S/N are always measured on the
+   * original signal. Optional.
+   */
+  smoothing?: number;
+  /**
+   * Monoisotopic-only mode. After picking, collapse each isotope envelope to its
+   * left-most (monoisotopic) peak — the ¹²C/¹H species without ¹³C or deuterium —
+   * and drop the A+1, A+2… satellites. This is the peak you fit repeat units and
+   * end groups against. Unlike isotope *flagging* it is intensity-independent, so
+   * it stays correct for polymer envelopes where a satellite out-towers the
+   * monoisotopic peak. Optional; default off.
+   */
+  monoisotopicOnly?: boolean;
 }
 
 /** Mass spacing between adjacent isotopologues (¹³C − ¹²C), per charge. */
@@ -58,6 +88,9 @@ export const PEAK_PRESETS: Record<PeakPreset, PeakPickParams> = {
     isotopeAware: false,
     detectShoulders: false,
     charge: 1,
+    minProminence: 5,
+    minSeparation: 0,
+    smoothing: 0,
   },
   balanced: {
     preset: "balanced",
@@ -71,6 +104,9 @@ export const PEAK_PRESETS: Record<PeakPreset, PeakPickParams> = {
     isotopeAware: false,
     detectShoulders: false,
     charge: 1,
+    minProminence: 3.5,
+    minSeparation: 0,
+    smoothing: 0,
   },
   sensitive: {
     preset: "sensitive",
@@ -84,6 +120,9 @@ export const PEAK_PRESETS: Record<PeakPreset, PeakPickParams> = {
     isotopeAware: false,
     detectShoulders: false,
     charge: 1,
+    minProminence: 2.5,
+    minSeparation: 0,
+    smoothing: 3,
   },
   lowResLinear: {
     preset: "lowResLinear",
@@ -97,6 +136,9 @@ export const PEAK_PRESETS: Record<PeakPreset, PeakPickParams> = {
     isotopeAware: false,
     detectShoulders: false,
     charge: 1,
+    minProminence: 4,
+    minSeparation: 0,
+    smoothing: 5,
   },
   highResReflectron: {
     preset: "highResReflectron",
@@ -110,6 +152,9 @@ export const PEAK_PRESETS: Record<PeakPreset, PeakPickParams> = {
     isotopeAware: true,
     detectShoulders: true,
     charge: 1,
+    minProminence: 4,
+    minSeparation: 0,
+    smoothing: 0,
   },
   isotopeResolved: {
     preset: "isotopeResolved",
@@ -123,6 +168,9 @@ export const PEAK_PRESETS: Record<PeakPreset, PeakPickParams> = {
     isotopeAware: true,
     detectShoulders: true,
     charge: 1,
+    minProminence: 3,
+    minSeparation: 0,
+    smoothing: 0,
   },
 };
 
@@ -141,10 +189,19 @@ function median(values: number[]): number {
 }
 
 /**
- * Robust local noise per point: split into blocks of `noiseWindow` points, take
- * the MAD (median absolute deviation × 1.4826 ≈ σ) of each block, and assign it
- * to every point in the block. MAD ignores the peaks themselves, so it estimates
- * the baseline noise rather than being inflated by signal.
+ * Robust local noise per point. We split into blocks of `noiseWindow` points and,
+ * within each, estimate σ from the *successive differences* of the signal rather
+ * than the spread of its values:
+ *
+ *   σ ≈ 1.4826 · MAD(Δy) / √2   where Δy[i] = y[i+1] − y[i]
+ *
+ * This is the key reliability fix. A value-based MAD balloons wherever peaks are
+ * tall and densely packed (the block becomes mostly signal), so real peaks there
+ * score a low S/N and get dropped — exactly the "not sensitive enough on the
+ * isotopes" failure. The successive-difference estimator is immune to peak
+ * amplitude *and* to smooth slopes (a constant-slope flank has near-zero Δy
+ * spread), so it tracks only the high-frequency noise floor — small under tall
+ * peaks and small on a quiet baseline alike.
  */
 export function localNoise(intensity: Float64Array, noiseWindow: number): Float64Array {
   const n = intensity.length;
@@ -152,17 +209,22 @@ export function localNoise(intensity: Float64Array, noiseWindow: number): Float6
   const noise = new Float64Array(n);
   for (let start = 0; start < n; start += block) {
     const end = Math.min(n, start + block);
-    const window: number[] = [];
-    for (let i = start; i < end; i += 1) window.push(intensity[i]);
-    const med = median(window);
-    const deviations = window.map((v) => Math.abs(v - med));
-    const mad = median(deviations) * 1.4826;
-    // Guard against a flat block (mad=0): fall back to a tiny fraction of the
-    // block mean so S/N stays finite.
-    let mean = 0;
-    for (const v of window) mean += v;
-    mean /= window.length || 1;
-    const level = mad > 0 ? mad : Math.max(mean * 1e-3, 1e-9);
+    const diffs: number[] = [];
+    for (let i = start + 1; i < end; i += 1) diffs.push(intensity[i] - intensity[i - 1]);
+    let level = 0;
+    if (diffs.length >= 2) {
+      const med = median(diffs);
+      const deviations = diffs.map((d) => Math.abs(d - med));
+      level = (median(deviations) * 1.4826) / Math.SQRT2;
+    }
+    // Guard against a flat/constant block (level=0): fall back to a tiny fraction
+    // of the block mean so S/N stays finite.
+    if (!(level > 0)) {
+      let mean = 0;
+      for (let i = start; i < end; i += 1) mean += intensity[i];
+      mean /= end - start || 1;
+      level = Math.max(mean * 1e-3, 1e-9);
+    }
     for (let i = start; i < end; i += 1) noise[i] = level;
   }
   return noise;
@@ -174,31 +236,127 @@ function maxOf(values: Float64Array): number {
   return m;
 }
 
-/** True if index i dominates its [i-r, i+r] neighborhood (and beats one side). */
-function isLocalMax(intensity: Float64Array, i: number, r: number): boolean {
+/** True if index i dominates its [i-r, i+r] neighborhood (no neighbor taller). */
+function dominatesRadius(intensity: Float64Array, i: number, r: number): boolean {
   const n = intensity.length;
   const v = intensity[i];
-  let strictlyGreaterSomewhere = false;
   for (let j = Math.max(0, i - r); j <= Math.min(n - 1, i + r); j += 1) {
-    if (j === i) continue;
-    if (intensity[j] > v) return false;
-    if (v > intensity[j]) strictlyGreaterSomewhere = true;
+    if (j !== i && intensity[j] > v) return false;
   }
-  return strictlyGreaterSomewhere;
+  return true;
 }
 
-/** FWHM in m/z plus the half-max index bounds, via linear interpolation. */
+/** O(n) centered moving average (via a prefix sum). `window` ≤ 1 returns input. */
+function movingAverage(y: Float64Array, window: number): Float64Array {
+  const w = Math.max(1, Math.round(window));
+  if (w <= 1) return y;
+  const n = y.length;
+  const half = w >> 1;
+  const prefix = new Float64Array(n + 1);
+  for (let i = 0; i < n; i += 1) prefix[i + 1] = prefix[i] + y[i];
+  const out = new Float64Array(n);
+  for (let i = 0; i < n; i += 1) {
+    const lo = Math.max(0, i - half);
+    const hi = Math.min(n - 1, i + half);
+    out[i] = (prefix[hi + 1] - prefix[lo]) / (hi - lo + 1);
+  }
+  return out;
+}
+
+/**
+ * Plateau-aware local maxima: indices where the trace strictly ascends into a
+ * (possibly flat) top and then strictly descends. A flat top yields ONE index at
+ * the plateau centre, so a noisy peak crest never produces several adjacent
+ * "maxima". Each is additionally required to dominate its ±r neighbourhood.
+ */
+function findMaxima(y: Float64Array, r: number): number[] {
+  const n = y.length;
+  const out: number[] = [];
+  let i = 1;
+  while (i < n - 1) {
+    if (y[i] > y[i - 1]) {
+      // Ascending into i; walk across any flat top of equal values.
+      let ahead = i + 1;
+      while (ahead < n && y[ahead] === y[i]) ahead += 1;
+      if (ahead < n && y[ahead] < y[i]) {
+        const center = (i + ahead - 1) >> 1; // plateau is [i, ahead-1]
+        if (dominatesRadius(y, center, r)) out.push(center);
+      }
+      i = ahead;
+    } else {
+      i += 1;
+    }
+  }
+  return out;
+}
+
+/**
+ * Topographic prominence of a peak: its height above the higher of the two
+ * neighbouring valley floors. We descend each side to the lowest point reached
+ * before encountering a taller sample (a higher peak) or the search cap, then
+ * return height − max(leftFloor, rightFloor). Capped to keep this O(n·cap) rather
+ * than O(n²) on long monotonic runs; the cap only needs to span the local valleys
+ * (isotopes sit ~1 Da apart) for prominence to separate real peaks from wiggles.
+ */
+function prominence(y: Float64Array, peak: number, cap: number): number {
+  const n = y.length;
+  const h = y[peak];
+  let leftFloor = h;
+  for (let i = peak - 1, s = 0; i >= 0 && s < cap; i -= 1, s += 1) {
+    if (y[i] > h) break;
+    if (y[i] < leftFloor) leftFloor = y[i];
+  }
+  let rightFloor = h;
+  for (let i = peak + 1, s = 0; i < n && s < cap; i += 1, s += 1) {
+    if (y[i] > h) break;
+    if (y[i] < rightFloor) rightFloor = y[i];
+  }
+  return h - Math.max(leftFloor, rightFloor);
+}
+
+/**
+ * Local basin of a maximum: the indices of the adjacent valleys (local minima) on
+ * each side, found on the (smoothed) detection trace and bounded by `cap` points
+ * so a long monotonic flank can't run away. Confining width/centroid to this basin
+ * is the fix for overlapping isotopes: when inter-isotope valleys sit *above* a
+ * peak's half-max (a barely-resolved envelope), a half-max search would walk
+ * straight across them into the neighbour, smearing every isotope's centroid onto
+ * the envelope's centre of mass. The basin stops at the valley, so each isotope
+ * keeps its own m/z.
+ */
+function basinBounds(detect: Float64Array, i: number, cap: number): { lo: number; hi: number } {
+  const n = detect.length;
+  let lo = i;
+  for (let s = 0; lo > 0 && s < cap; s += 1) {
+    if (detect[lo - 1] > detect[lo]) break; // going further left would climb → valley
+    lo -= 1;
+  }
+  let hi = i;
+  for (let s = 0; hi < n - 1 && s < cap; s += 1) {
+    if (detect[hi + 1] > detect[hi]) break;
+    hi += 1;
+  }
+  return { lo, hi };
+}
+
+/**
+ * FWHM in m/z plus the basin index bounds. The half-max crossing is searched only
+ * *within* the basin [lo,hi]; if a valley sits above half-max the width is clamped
+ * at the valley rather than leaking into the adjacent isotope. Returns the basin
+ * bounds (not the half-max bounds) so the centroid integrates over one isotope.
+ */
 function measureWidth(
   spectrum: SpectrumData,
   i: number,
+  lo: number,
+  hi: number,
 ): { width: number; left: number; right: number } {
   const { mz, intensity } = spectrum;
-  const n = intensity.length;
   const half = intensity[i] / 2;
   let left = i;
-  while (left > 0 && intensity[left] > half) left -= 1;
+  while (left > lo && intensity[left] > half) left -= 1;
   let right = i;
-  while (right < n - 1 && intensity[right] > half) right += 1;
+  while (right < hi && intensity[right] > half) right += 1;
 
   // Interpolate the half-max crossing for a sub-sample width estimate.
   const interp = (a: number, b: number): number => {
@@ -210,19 +368,32 @@ function measureWidth(
   };
   const leftMz = left < i ? interp(left, left + 1) : mz[i];
   const rightMz = right > i ? interp(right, right - 1) : mz[i];
-  return { width: Math.abs(rightMz - leftMz), left, right };
+  return { width: Math.abs(rightMz - leftMz), left: lo, right: hi };
 }
 
-/** Intensity-weighted centroid m/z over the peak's [left, right] region. */
+/**
+ * Intensity-weighted centroid m/z over the peak's basin [lo, right]. Intensities
+ * are taken relative to the higher of the two valley floors (the pedestal the
+ * isotope sits on), so only the part of the peak *above* its neighbours' valleys
+ * contributes — this keeps the centroid on the apex instead of sliding down a
+ * shared flank toward a taller neighbour.
+ */
 function centroidMz(spectrum: SpectrumData, left: number, right: number): number {
   const { mz, intensity } = spectrum;
+  const floor = Math.max(intensity[left], intensity[right]);
   let num = 0;
   let den = 0;
   for (let i = left; i <= right; i += 1) {
-    num += mz[i] * intensity[i];
-    den += intensity[i];
+    const w = intensity[i] - floor;
+    if (w <= 0) continue;
+    num += mz[i] * w;
+    den += w;
   }
-  return den > 0 ? num / den : mz[(left + right) >> 1];
+  if (den > 0) return num / den;
+  // Degenerate basin (flat or single point): fall back to the apex sample.
+  let apex = left;
+  for (let i = left + 1; i <= right; i += 1) if (intensity[i] > intensity[apex]) apex = i;
+  return mz[apex];
 }
 
 /** Map S/N to a 0..1 confidence with a soft knee around the threshold. */
@@ -241,19 +412,33 @@ export function pickPeaks(spectrum: SpectrumData, params: PeakPickParams): Peak[
   const n = intensity.length;
   if (n < 3) return [];
 
+  // Backward-compatible defaults for the prominence/separation/smoothing fields
+  // (older saved projects predate them).
+  const minProminence = params.minProminence ?? params.minSnr;
+  const smoothing = params.smoothing ?? 0;
+
   const noise = localNoise(intensity, params.noiseWindow);
   const basePeak = maxOf(intensity) || 1;
   const minIntensity = params.minRelIntensity * basePeak;
   const r = Math.max(1, Math.round(params.localMaxRadius));
+  // Peaks are FOUND on a (optionally) smoothed trace so noise wiggles don't form
+  // spurious maxima; everything is MEASURED on the original signal.
+  const detect = movingAverage(intensity, smoothing);
+  const promCap = Math.max(params.noiseWindow, 64);
 
-  const peaks: Peak[] = [];
-  for (let i = 1; i < n - 1; i += 1) {
+  let peaks: Peak[] = [];
+  for (const i of findMaxima(detect, r)) {
     if (intensity[i] < minIntensity) continue;
-    if (!isLocalMax(intensity, i, r)) continue;
     const snr = intensity[i] / noise[i];
     if (snr < params.minSnr) continue;
+    // Primary reliability gate: prominence above the local valleys, in σ units.
+    const promRatio = prominence(detect, i, promCap) / noise[i];
+    if (promRatio < minProminence) continue;
 
-    const { width, left, right } = measureWidth(spectrum, i);
+    // Confine width/centroid to this peak's basin (valley-to-valley) so adjacent
+    // isotopes don't smear together; bounds come from the smoothed detect trace.
+    const { lo, hi } = basinBounds(detect, i, promCap);
+    const { width, left, right } = measureWidth(spectrum, i, lo, hi);
     if (params.minWidth > 0 && width < params.minWidth) continue;
     if (params.maxWidth > 0 && width > params.maxWidth) continue;
 
@@ -265,7 +450,7 @@ export function pickPeaks(spectrum: SpectrumData, params: PeakPickParams): Peak[
       snr,
       width,
       centroid,
-      confidence: snrConfidence(snr, params.minSnr),
+      confidence: snrConfidence(promRatio, minProminence),
       accepted: true,
     });
   }
@@ -273,9 +458,48 @@ export function pickPeaks(spectrum: SpectrumData, params: PeakPickParams): Peak[
   if (params.detectShoulders) {
     appendShoulders(spectrum, noise, peaks, params, minIntensity);
   }
-  peaks.sort((a, b) => a.mz - b.mz);
+  peaks.sort((a, b) => (a.centroid ?? a.mz) - (b.centroid ?? b.mz));
+  peaks = mergeCloserThan(peaks, resolveSeparation(params, peaks));
   if (params.isotopeAware) flagIsotopes(peaks, params.charge);
+  // Monoisotopic-only: collapse each isotope envelope to its left-most member.
+  if (params.monoisotopicOnly) peaks = dropIsotopeSatellites(peaks, params.charge);
   return peaks;
+}
+
+/**
+ * Resolve the effective minimum peak separation in m/z. An explicit value is used
+ * as-is; 0 means "auto": ~0.6× the median measured peak width, but clamped well
+ * under the isotope spacing so genuine isotopes are never merged.
+ */
+function resolveSeparation(params: PeakPickParams, peaks: Peak[]): number {
+  const explicit = params.minSeparation ?? 0;
+  if (explicit > 0) return explicit;
+  const widths = peaks
+    .map((p) => p.width)
+    .filter((w): w is number => w != null && Number.isFinite(w) && w > 0);
+  if (widths.length === 0) return 0;
+  const isoSpacing = ISOTOPE_SPACING / Math.max(1, params.charge);
+  return Math.min(0.6 * median(widths), 0.8 * isoSpacing);
+}
+
+/**
+ * Collapse runs of peaks closer than `sep` (m/z) into the tallest of the run —
+ * the cleanup for a single noisy peak top that yielded several near-duplicate
+ * maxima. Expects `peaks` sorted ascending by display m/z.
+ */
+function mergeCloserThan(peaks: Peak[], sep: number): Peak[] {
+  if (sep <= 0 || peaks.length < 2) return peaks;
+  const kept: Peak[] = [];
+  for (const p of peaks) {
+    const last = kept[kept.length - 1];
+    const pm = p.centroid ?? p.mz;
+    if (last && pm - (last.centroid ?? last.mz) < sep) {
+      if (p.intensity > last.intensity) kept[kept.length - 1] = p;
+    } else {
+      kept.push(p);
+    }
+  }
+  return kept;
 }
 
 /**
@@ -310,7 +534,8 @@ function appendShoulders(
     if (curvature[i] <= 0) continue;
     const snr = intensity[i] / noise[i];
     if (snr < params.minSnr) continue;
-    const { width } = measureWidth(spectrum, i);
+    const { lo, hi } = basinBounds(intensity, i, Math.max(params.noiseWindow, 64));
+    const { width } = measureWidth(spectrum, i, lo, hi);
     const tol = Math.max(width, 0.5);
     if (nearExisting(mz[i], tol)) continue;
     peaks.push({
@@ -348,6 +573,36 @@ function flagIsotopes(peaks: Peak[], charge: number): void {
       }
     }
   }
+}
+
+/**
+ * Collapse each isotope envelope to its monoisotopic (left-most) peak. Walking
+ * ascending in m/z, any peak sitting ~one ¹³C spacing above its immediate
+ * predecessor is treated as an isotope satellite (A+1, A+2, …) and dropped; the
+ * first peak of each ~1-Da-spaced run is kept.
+ *
+ * This is intensity-independent, which is the whole point: isotope *flagging*
+ * keys off "a taller neighbour one spacing below", but in a polymer envelope the
+ * A+1 or A+2 isotopologue routinely out-towers the monoisotopic peak, so an
+ * intensity rule would keep the wrong one. Spacing alone is robust. `peaks` must
+ * be sorted ascending by display m/z (as it is at the call site).
+ */
+function dropIsotopeSatellites(peaks: Peak[], charge: number): Peak[] {
+  if (peaks.length < 2) return peaks;
+  const spacing = ISOTOPE_SPACING / Math.max(1, charge);
+  // Generous enough to catch integer (unit-resolution) and centroided spacings
+  // alike, but well under the 2-Da gap that separates a real non-isotope peak.
+  const tol = 0.3 / Math.max(1, charge);
+  const kept: Peak[] = [peaks[0]];
+  let prevMz = peaks[0].centroid ?? peaks[0].mz;
+  for (let i = 1; i < peaks.length; i += 1) {
+    const mz = peaks[i].centroid ?? peaks[i].mz;
+    // Within one isotope spacing of the previous peak → satellite, drop it. We
+    // still advance prevMz so a run A, A+1, A+2… collapses entirely onto A.
+    if (Math.abs(mz - prevMz - spacing) > tol) kept.push(peaks[i]);
+    prevMz = mz;
+  }
+  return kept;
 }
 
 /** Construct a manually-added peak (used by the table's "add peak" action). */

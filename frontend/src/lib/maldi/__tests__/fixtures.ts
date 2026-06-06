@@ -139,6 +139,15 @@ export function pickPegPeaks(options: PegFixtureOptions = {}): {
     { id: "s", kind: "smooth", enabled: true, params: { method: "savitzkyGolay", windowSize: 9, polynomial: 3 } },
   ];
   const processed = applyProcessing(fixture.spectrum, steps);
-  const peaks = pickPeaks(processed, { ...PEAK_PRESETS.conservative, isotopeAware: true });
+  // minRelIntensity 0.05 keeps this helper's contract — a CLEAN monoisotopic
+  // ladder (the 25 true oligomers + their flagged satellites). The picker's
+  // successive-difference noise estimate reads the SG-smoothed trace as very
+  // quiet, so the default conservative cutoff would also admit sub-5% noise
+  // bumps; the downstream repeat/series tests want only the real ladder.
+  const peaks = pickPeaks(processed, {
+    ...PEAK_PRESETS.conservative,
+    isotopeAware: true,
+    minRelIntensity: 0.05,
+  });
   return { fixture, peaks };
 }

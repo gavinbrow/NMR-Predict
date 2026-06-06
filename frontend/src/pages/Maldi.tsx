@@ -46,7 +46,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { ALL_BUILTIN_ADDUCTS } from "@/lib/maldi/adducts";
+import { adductById, ALL_BUILTIN_ADDUCTS } from "@/lib/maldi/adducts";
 import type { EndGroupCandidate } from "@/lib/maldi/endgroups";
 import {
   exportPeaksCsv,
@@ -62,8 +62,8 @@ import { interpretSpectrum, type Finding } from "@/lib/maldi/interpret";
 import type { LossEvent } from "@/lib/maldi/losses";
 import { summarizeMolWeight } from "@/lib/maldi/molweight";
 import type { ParseMeta } from "@/lib/maldi/parse";
-import { PEAK_PRESETS, type PeakPickParams } from "@/lib/maldi/peaks";
-import { peaksForRepeat, seriesForRepeat } from "@/lib/maldi/polymers";
+import { manualPeak, PEAK_PRESETS, type PeakPickParams } from "@/lib/maldi/peaks";
+import { fitLadder, peaksForRepeat, seriesForRepeat } from "@/lib/maldi/polymers";
 import type { CopolymerSeries, RepeatCandidate, RepeatSeriesGroup } from "@/lib/maldi/polymers";
 import {
   createProject,
@@ -163,7 +163,13 @@ const Maldi = () => {
   const [series, setSeries] = useState<Series[]>([]);
   const [endGroupCandidates, setEndGroupCandidates] = useState<EndGroupCandidate[]>([]);
   const [selectedSeriesId, setSelectedSeriesId] = useState<string | null>(null);
+  const [selectedEndGroupId, setSelectedEndGroupId] = useState<string | null>(null);
   const [highlightedPeakIds, setHighlightedPeakIds] = useState<Set<string> | undefined>();
+  // Hide non-highlighted peaks while a series/end-group is selected, so the
+  // chosen ladder stands alone. Controlled here (the plot's switch reflects it).
+  const [isolateSelection, setIsolateSelection] = useState(false);
+  // Fold isotope-shifted spacings (~1 Da apart) into one repeat unit on detect.
+  const [repeatIsotopeAware, setRepeatIsotopeAware] = useState(true);
   // Split-series preview: a picked repeat unit broken into its distinct ladders.
   const [splitSeries, setSplitSeries] = useState(false);
   const [repeatGroups, setRepeatGroups] = useState<RepeatSeriesGroup[]>([]);
@@ -322,6 +328,7 @@ const Maldi = () => {
   const highlightPeaks = useCallback((ids: Set<string> | undefined) => {
     setRepeatGroups([]);
     setSelectedGroupKey(null);
+    setIsolateSelection(false); // series/end-group handlers re-enable after this
     setHighlightedPeakIds(ids);
   }, []);
 
@@ -340,6 +347,8 @@ const Maldi = () => {
     setRepeatGroups([]);
     setSelectedGroupKey(null);
     setSelectedSeriesId(null);
+    setSelectedEndGroupId(null);
+    setIsolateSelection(false);
     setSelectedCopolymerId(null);
   }, []);
 
@@ -384,6 +393,8 @@ const Maldi = () => {
     setRepeatGroups([]);
     setSelectedGroupKey(null);
     setSelectedSeriesId(null);
+    setSelectedEndGroupId(null);
+    setIsolateSelection(false);
     setSelectedCopolymerId(null);
     setParseMeta(null);
   }, []);
@@ -478,14 +489,19 @@ const Maldi = () => {
     setPicking(true);
     try {
       const result = await pickPeaks(target, pickParams);
-      const flagged = await flagBackground(result.peaks, { preserveExisting: true });
-      setPeaks(flagged.peaks);
       setSeries([]);
       setLosses([]);
       setCopolymerSeries([]);
+      setSelectedSeriesId(null);
+      setSelectedEndGroupId(null);
       highlightPeaks(undefined);
+      const flagged = await flagBackground(result.peaks, { preserveExisting: true });
+      setPeaks(flagged.peaks);
       const bg = Object.values(flagged.counts).reduce((a, b) => a + b, 0);
-      toast.success(`Picked ${result.peaks.length} peaks${bg ? ` · flagged ${bg} background` : ""}`);
+      const mono = pickParams.monoisotopicOnly ? " · monoisotopic only" : "";
+      toast.success(
+        `Picked ${result.peaks.length} peaks${bg ? ` · flagged ${bg} background` : ""}${mono}`,
+      );
     } catch (error) {
       if (!isCancelledError(error)) {
         console.error(error);
@@ -496,25 +512,58 @@ const Maldi = () => {
     }
   }, [processed, raw, pickParams, highlightPeaks]);
 
+  // Manual peak picking from the plot: add at a clicked apex, or remove a peak.
+  const handleAddPeak = useCallback((mz: number, intensity: number) => {
+    setPeaks((prev) => {
+      // Ignore a click that lands on an existing peak (≈ same m/z).
+      if (prev.some((p) => Math.abs((p.centroid ?? p.mz) - mz) < 1e-6)) return prev;
+      return [...prev, manualPeak(mz, intensity)].sort(
+        (a, b) => (a.centroid ?? a.mz) - (b.centroid ?? b.mz),
+      );
+    });
+  }, []);
+
+  const handleRemovePeak = useCallback((id: string) => {
+    setPeaks((prev) => prev.filter((p) => p.id !== id));
+  }, []);
+
   // --- Repeat / series / end-groups ------------------------------------------
-  const handleDetectRepeats = useCallback(async () => {
-    setDetecting(true);
-    try {
-      const result = await detectRepeatUnits(peaks);
-      setRepeatCandidates(result.candidates);
-      if (result.candidates.length > 0) {
-        const top = Number(result.candidates[0].repeatMass.toFixed(4));
-        setRepeatMass((current) => (current > 0 ? current : top));
-        setBaseRepeat((current) => (current > 0 ? current : top));
+  const runDetectRepeats = useCallback(
+    async (isotopeAware: boolean) => {
+      setDetecting(true);
+      try {
+        const result = await detectRepeatUnits(peaks, { isotopeAware });
+        setRepeatCandidates(result.candidates);
+        if (result.candidates.length > 0) {
+          const top = Number(result.candidates[0].repeatMass.toFixed(4));
+          setRepeatMass((current) => (current > 0 ? current : top));
+          setBaseRepeat((current) => (current > 0 ? current : top));
+        }
+        toast.success(`${result.candidates.length} candidate repeat units`);
+      } catch (error) {
+        console.error(error);
+        toast.error("Repeat detection failed");
+      } finally {
+        setDetecting(false);
       }
-      toast.success(`${result.candidates.length} candidate repeat units`);
-    } catch (error) {
-      console.error(error);
-      toast.error("Repeat detection failed");
-    } finally {
-      setDetecting(false);
-    }
-  }, [peaks]);
+    },
+    [peaks],
+  );
+
+  const handleDetectRepeats = useCallback(
+    () => runDetectRepeats(repeatIsotopeAware),
+    [runDetectRepeats, repeatIsotopeAware],
+  );
+
+  // Toggle isotope-aware merging and immediately re-detect (with the new flag) so
+  // the candidate list reflects the choice without a second click.
+  const handleToggleIsotopeAware = useCallback(
+    (on: boolean) => {
+      setRepeatIsotopeAware(on);
+      if (peaks.length >= 3) void runDetectRepeats(on);
+    },
+    [peaks, runDetectRepeats],
+  );
 
   // Preview the peaks that fit a repeat unit: either one lumped highlight, or —
   // when "split" is on — the distinct interleaved ladders, each its own colour.
@@ -547,6 +596,19 @@ const Maldi = () => {
       previewRepeat(mass, splitSeries);
     },
     [previewRepeat, splitSeries],
+  );
+
+  // Typing a known repeat unit: adopt it and live-preview its ladder, so the user
+  // can enter their expected repeat mass and immediately see (and then Assign /
+  // Solve against) the peaks it explains.
+  const handleRepeatMassChange = useCallback(
+    (mass: number) => {
+      setRepeatMass(mass);
+      setBaseRepeat(mass);
+      if (mass > 0) previewRepeat(mass, splitSeries);
+      else highlightPeaks(undefined);
+    },
+    [previewRepeat, splitSeries, highlightPeaks],
   );
 
   // Toggle split mode and re-preview the current repeat in the new mode.
@@ -583,6 +645,7 @@ const Maldi = () => {
     try {
       const result = await solveEndGroups(peaks, repeatMass, selectedAdducts);
       setEndGroupCandidates(result.candidates);
+      setSelectedEndGroupId(null);
       if (result.candidates[0]) setEndGroupMass((cur) => (cur > 0 ? cur : Number(result.candidates[0].residualMass.toFixed(4))));
       toast.success(`${result.candidates.length} end-group candidates`);
     } catch (error) {
@@ -592,6 +655,18 @@ const Maldi = () => {
       setSolving(false);
     }
   }, [peaks, repeatMass, selectedAdducts]);
+
+  // Click an end-group candidate: highlight its ladder and isolate it (hide the
+  // other peaks), mirroring the series interaction.
+  const handleSelectEndGroup = useCallback(
+    (candidate: EndGroupCandidate | null) => {
+      setSelectedEndGroupId(candidate?.id ?? null);
+      setSelectedSeriesId(null);
+      highlightPeaks(candidate ? new Set(candidate.members.map((m) => m.peakId)) : undefined);
+      setIsolateSelection(candidate != null);
+    },
+    [highlightPeaks],
+  );
 
   const handleDetectLosses = useCallback(async () => {
     setDetectingLosses(true);
@@ -633,9 +708,44 @@ const Maldi = () => {
 
   const handleSelectSeries = useCallback((s: Series | null) => {
     setSelectedSeriesId(s?.id ?? null);
+    setSelectedEndGroupId(null);
     setSelectedCopolymerId(null);
     highlightPeaks(s ? new Set(s.members.map((m) => m.peakId)) : undefined);
+    setIsolateSelection(s != null); // hide the other peaks while one series is shown
   }, [highlightPeaks]);
+
+  // Manual ladder editing: click a peak in the plot to add/remove it from the
+  // selected series. The end group (Y-intercept), error and score are re-fit live,
+  // and the highlight follows the new membership.
+  const handleToggleSeriesMember = useCallback(
+    (peakId: string) => {
+      if (!selectedSeriesId) return;
+      const s = series.find((x) => x.id === selectedSeriesId);
+      if (!s) return;
+      const has = s.members.some((m) => m.peakId === peakId);
+      const ids = has
+        ? s.members.filter((m) => m.peakId !== peakId).map((m) => m.peakId)
+        : [...s.members.map((m) => m.peakId), peakId];
+      const fit = fitLadder(peaks, ids, s.repeatMass, adductById(allAdducts, s.adductId));
+      const members = fit?.members ?? [];
+      setSeries((prev) =>
+        prev.map((x) =>
+          x.id === s.id
+            ? {
+                ...x,
+                members,
+                endGroupMass: fit?.endGroupMass ?? x.endGroupMass,
+                meanErrorDa: fit?.meanErrorDa ?? x.meanErrorDa,
+                score: fit?.score ?? 0,
+                r2: fit?.r2 ?? x.r2,
+              }
+            : x,
+        ),
+      );
+      setHighlightedPeakIds(new Set(members.map((m) => m.peakId)));
+    },
+    [selectedSeriesId, series, peaks, allAdducts],
+  );
 
   const handleHighlightAllSeries = useCallback(
     (all: boolean) => {
@@ -1079,8 +1189,10 @@ const Maldi = () => {
                 <SeriesPanel
                   repeatCandidates={repeatCandidates}
                   onDetectRepeats={handleDetectRepeats}
+                  isotopeAware={repeatIsotopeAware}
+                  onToggleIsotopeAware={handleToggleIsotopeAware}
                   repeatMass={repeatMass}
-                  onRepeatMassChange={setRepeatMass}
+                  onRepeatMassChange={handleRepeatMassChange}
                   onSelectRepeatCandidate={handleSelectRepeatCandidate}
                   splitSeries={splitSeries}
                   onToggleSplitSeries={handleToggleSplitSeries}
@@ -1099,7 +1211,15 @@ const Maldi = () => {
                 />
               </SidebarCard>
               <SidebarCard title="End groups">
-                <EndGroupPanel repeatMass={repeatMass} candidates={endGroupCandidates} onSolve={handleSolveEndGroups} adducts={selectedAdducts} busy={solving} />
+                <EndGroupPanel
+                  repeatMass={repeatMass}
+                  candidates={endGroupCandidates}
+                  onSolve={handleSolveEndGroups}
+                  adducts={selectedAdducts}
+                  busy={solving}
+                  selectedId={selectedEndGroupId}
+                  onSelect={handleSelectEndGroup}
+                />
               </SidebarCard>
               <SidebarCard title="Copolymer">
                 <CopolymerPanel
@@ -1152,6 +1272,11 @@ const Maldi = () => {
                         highlightedPeakIds={highlightedPeakIds}
                         highlightGroups={plotHighlightGroups}
                         overlaySticks={overlay?.sticks ?? null}
+                        onAddPeak={handleAddPeak}
+                        onRemovePeak={handleRemovePeak}
+                        onToggleSeriesMember={selectedSeriesId ? handleToggleSeriesMember : undefined}
+                        isolate={isolateSelection}
+                        onIsolateChange={setIsolateSelection}
                       />
                     ) : (
                       <StackedSpectraPlot spectra={docSpectra} mode={viewMode} />

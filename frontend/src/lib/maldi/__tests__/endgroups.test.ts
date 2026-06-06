@@ -15,9 +15,26 @@ describe("solveEndGroups", () => {
     const best = candidates[0];
     expect(best.adductId).toBe("Na");
     expect(best.residualMass).toBeCloseTo(18.0106, 1);
+
+    // Y-intercept reading: the regression intercept is the end-group neutral mass
+    // and the fit is essentially perfect for a clean ladder.
+    expect(best.endGroupFit).toBeCloseTo(18.0106, 0);
+    expect(best.r2).toBeGreaterThan(0.999);
     expect(best.matchedOligomers).toBeGreaterThanOrEqual(10);
     expect(best.libraryMatch).toMatch(/H \/ OH/);
     expect(best.confidence).toBeGreaterThan(0.5);
+
+    // The candidate carries its member peaks (with oligomer n) so the ladder can
+    // be highlighted and regressed (mass vs n) in the report.
+    expect(best.members.length).toBeGreaterThanOrEqual(10);
+    const ids = new Set(peaks.map((p) => p.id));
+    for (const m of best.members) {
+      expect(ids.has(m.peakId)).toBe(true);
+      expect(Number.isInteger(m.n)).toBe(true);
+    }
+    // n increases monotonically with member m/z order (a clean ladder).
+    const ns = best.members.map((m) => m.n);
+    expect([...ns].sort((a, b) => a - b)).toEqual(ns);
   });
 
   it("includes alkoxide-base end groups (KOtBu) in the library", () => {

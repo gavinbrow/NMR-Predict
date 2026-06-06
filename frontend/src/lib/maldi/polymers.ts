@@ -34,6 +34,56 @@ export interface RepeatDetectOptions {
   binWidth?: number;
   /** Max candidates to return. Default 8. */
   maxCandidates?: number;
+  /**
+   * Fold candidates that differ from a stronger candidate by ~k isotope steps
+   * (¹³C−¹²C ≈ 1.0034 Da) into that candidate, so a single repeat unit measured
+   * between different isotopologues doesn't surface as several near-identical
+   * "different" repeats. Default true. {@link isotopeStep} and
+   * {@link isotopeMergeTol} tune the band. */
+  isotopeAware?: boolean;
+  /** Isotope spacing used by {@link isotopeAware} merging (Da). Default 1.0033548. */
+  isotopeStep?: number;
+  /** Tolerance around k·isotopeStep for the merge (Da). Default 0.15. */
+  isotopeMergeTol?: number;
+}
+
+/** ¹³C − ¹²C mass difference: the spacing between adjacent isotope peaks. */
+export const ISOTOPE_STEP = 1.0033548;
+
+/**
+ * Fold isotope-shifted duplicates into their parent repeat. Two candidates that
+ * differ by ~k·isotopeStep (k ≥ 1) are the *same* repeat unit measured between
+ * different isotopologues (e.g. oligomer n's monoisotopic peak to oligomer n+1's
+ * A+1 satellite). Iterating strongest-first, each weaker candidate within the
+ * isotope band of an already-kept (stronger) one is merged into it — its votes
+ * add to the parent's score but the parent's mass (the better-determined one) is
+ * preserved. Candidates a non-integer-Da apart (genuinely different repeats) are
+ * untouched, so 44 vs 58 vs 224 all survive.
+ */
+function mergeIsotopeShiftedCandidates(
+  candidates: RepeatCandidate[],
+  step: number,
+  tol: number,
+  maxShift = 4,
+): RepeatCandidate[] {
+  const byScore = [...candidates].sort((a, b) => b.score - a.score);
+  const kept: RepeatCandidate[] = [];
+  for (const cand of byScore) {
+    const parent = kept.find((k) => {
+      const diff = Math.abs(k.repeatMass - cand.repeatMass);
+      if (diff < step - tol) return false; // same bin, not an isotope shift
+      const ratio = diff / step;
+      const nearest = Math.round(ratio);
+      return nearest >= 1 && nearest <= maxShift && Math.abs(diff - nearest * step) <= tol;
+    });
+    if (parent) {
+      parent.count += cand.count;
+      parent.score += cand.score;
+    } else {
+      kept.push({ ...cand });
+    }
+  }
+  return kept;
 }
 
 /** Peaks eligible for analysis: accepted, not ignored, not flagged background. */
@@ -54,6 +104,36 @@ function peakMz(p: Peak): number {
 }
 
 /**
+ * Heuristic: does the spectrum look like unit (integer) m/z resolution? Linear-mode
+ * MALDI of a polymer is often exported at unit resolution, so every m/z is an
+ * integer-rounded value. That rounding (±0.5 Da per peak) smears a ladder's
+ * residual-mod-repeat across a ~1 Da band and can make adjacent rungs differ by a
+ * full Dalton — which the tight high-res tolerance (0.5 Da) reads as *two* series,
+ * silently dropping members. We detect the case so callers can widen tolerance.
+ */
+export function looksUnitResolution(peaks: Peak[]): boolean {
+  const pts = analyzablePeaks(peaks);
+  if (pts.length < 3) return false;
+  let near = 0;
+  for (const p of pts) {
+    const m = peakMz(p);
+    if (Math.abs(m - Math.round(m)) < 0.06) near += 1;
+  }
+  return near / pts.length >= 0.8;
+}
+
+/**
+ * Effective spacing/clustering tolerance for series & end-group work. For ordinary
+ * (high-res) data the caller's tolerance is used as-is; for unit-resolution data it
+ * is widened to ≥1.1 Da so a single rounding-drifted ladder links/clusters as one
+ * series instead of fragmenting. Distinct end groups sit many Da apart, so the
+ * wider band does not merge genuinely different ladders.
+ */
+export function seriesTolerance(peaks: Peak[], baseTol: number): number {
+  return looksUnitResolution(peaks) ? Math.max(baseTol, 1.1) : baseTol;
+}
+
+/**
  * Detect candidate repeat units from the pairwise Δm distribution. Each pair of
  * peaks within [minRepeat, maxRepeat] votes (weighted by the geometric mean of
  * the two intensities) into a histogram; clusters of votes become candidates.
@@ -66,6 +146,9 @@ export function detectRepeatUnits(
   const maxRepeat = options.maxRepeat ?? 400;
   const binWidth = options.binWidth ?? 0.05;
   const maxCandidates = options.maxCandidates ?? 8;
+  const isotopeAware = options.isotopeAware ?? true;
+  const isotopeStep = options.isotopeStep ?? ISOTOPE_STEP;
+  const isotopeMergeTol = options.isotopeMergeTol ?? 0.15;
 
   const pts = analyzablePeaks(peaks)
     .slice()
@@ -119,8 +202,11 @@ export function detectRepeatUnits(
     candidates.push({ repeatMass: deltaSum / weight, count, score: weight });
   }
 
-  candidates.sort((a, b) => b.score - a.score);
-  const top = candidates.slice(0, maxCandidates);
+  const merged = isotopeAware
+    ? mergeIsotopeShiftedCandidates(candidates, isotopeStep, isotopeMergeTol)
+    : candidates;
+  merged.sort((a, b) => b.score - a.score);
+  const top = merged.slice(0, maxCandidates);
   const maxScore = top.length ? top[0].score : 1;
   return top.map((c) => ({ ...c, score: c.score / maxScore }));
 }
@@ -139,14 +225,15 @@ export function peaksForRepeat(
 ): Set<string> {
   const ids = new Set<string>();
   if (!(repeatMass > 0)) return ids;
+  const tol = seriesTolerance(peaks, toleranceDa);
   const pts = analyzablePeaks(peaks)
     .slice()
     .sort((a, b) => peakMz(a) - peakMz(b));
   for (let i = 0; i < pts.length; i += 1) {
     for (let j = i + 1; j < pts.length; j += 1) {
       const delta = peakMz(pts[j]) - peakMz(pts[i]);
-      if (delta > repeatMass + toleranceDa) break;
-      if (Math.abs(delta - repeatMass) <= toleranceDa) {
+      if (delta > repeatMass + tol) break;
+      if (Math.abs(delta - repeatMass) <= tol) {
         ids.add(pts[i].id);
         ids.add(pts[j].id);
       }
@@ -188,22 +275,23 @@ export interface RepeatSeriesOptions {
  * ladders. Unlike {@link assignSeries} this is adduct-agnostic and works on m/z
  * directly, so it is an instant preview the moment a repeat unit is picked.
  */
-export function seriesForRepeat(
-  peaks: Peak[],
+/**
+ * Link peaks into homologous ladders by *m/z spacing*: two peaks join when their
+ * m/z differ by ~k·repeat (k = 1..maxGap+1, so one missing rung doesn't break a
+ * ladder). The connected components are the ladders. Linking by spacing — rather
+ * than by residual-mod-repeat — is what makes this robust on unit-resolution data:
+ * a wide tolerance can't chain unrelated peaks together (they must actually sit a
+ * repeat apart), so rounding drift is bridged without merging different ladders.
+ * `pts` must be sorted ascending by m/z; each returned component is too.
+ */
+export function linkByRepeat(
+  pts: Peak[],
   repeatMass: number,
-  options: RepeatSeriesOptions = {},
-): RepeatSeriesGroup[] {
-  const tol = options.toleranceDa ?? 0.3;
-  const minMembers = options.minMembers ?? 3;
-  const maxGap = options.maxGap ?? 1;
-  if (!(repeatMass > 0)) return [];
-
-  const pts = analyzablePeaks(peaks)
-    .slice()
-    .sort((a, b) => peakMz(a) - peakMz(b));
-  if (pts.length < minMembers) return [];
-
-  // Union–find: link peaks separated by ~k·repeat (k = 1..maxGap+1).
+  tol: number,
+  maxGap: number,
+): Peak[][] {
+  const n = pts.length;
+  if (n === 0 || !(repeatMass > 0)) return [];
   const parent = pts.map((_, i) => i);
   const find = (i: number): number => {
     let r = i;
@@ -220,33 +308,46 @@ export function seriesForRepeat(
     const rb = find(b);
     if (ra !== rb) parent[ra] = rb;
   };
-
   const maxSpacing = (maxGap + 1) * repeatMass + tol;
-  for (let i = 0; i < pts.length; i += 1) {
+  for (let i = 0; i < n; i += 1) {
     const mzi = peakMz(pts[i]);
-    for (let j = i + 1; j < pts.length; j += 1) {
+    for (let j = i + 1; j < n; j += 1) {
       const delta = peakMz(pts[j]) - mzi;
       if (delta > maxSpacing) break; // sorted: no further j can be in range
       const k = Math.round(delta / repeatMass);
-      if (k >= 1 && k <= maxGap + 1 && Math.abs(delta - k * repeatMass) <= tol) {
-        union(i, j);
-      }
+      if (k >= 1 && k <= maxGap + 1 && Math.abs(delta - k * repeatMass) <= tol) union(i, j);
     }
   }
-
-  // Gather connected components (peak indices stay ascending in m/z).
   const byRoot = new Map<number, number[]>();
-  for (let i = 0; i < pts.length; i += 1) {
+  for (let i = 0; i < n; i += 1) {
     const r = find(i);
     const arr = byRoot.get(r);
     if (arr) arr.push(i);
     else byRoot.set(r, [i]);
   }
+  return [...byRoot.values()].map((idxs) => idxs.map((i) => pts[i]));
+}
+
+export function seriesForRepeat(
+  peaks: Peak[],
+  repeatMass: number,
+  options: RepeatSeriesOptions = {},
+): RepeatSeriesGroup[] {
+  const tol = seriesTolerance(peaks, options.toleranceDa ?? 0.3);
+  const minMembers = options.minMembers ?? 3;
+  const maxGap = options.maxGap ?? 1;
+  if (!(repeatMass > 0)) return [];
+
+  const pts = analyzablePeaks(peaks)
+    .slice()
+    .sort((a, b) => peakMz(a) - peakMz(b));
+  if (pts.length < minMembers) return [];
+
+  const components = linkByRepeat(pts, repeatMass, tol, maxGap);
 
   const groups: RepeatSeriesGroup[] = [];
-  for (const idxs of byRoot.values()) {
-    if (idxs.length < minMembers) continue;
-    const members = idxs.map((i) => pts[i]);
+  for (const members of components) {
+    if (members.length < minMembers) continue;
     const startMz = peakMz(members[0]);
     const endMz = peakMz(members[members.length - 1]);
     const offset = ((startMz % repeatMass) + repeatMass) % repeatMass;
@@ -266,12 +367,8 @@ export interface AssignOptions {
   minConsecutive?: number;
   /** Maximum number of series to return. Default 12. */
   maxSeries?: number;
-}
-
-interface ResidualMember {
-  peak: Peak;
-  neutral: number;
-  residual: number;
+  /** Bridge up to this many missing rungs when linking a ladder. Default 1. */
+  maxGap?: number;
 }
 
 let seriesCounter = 0;
@@ -306,93 +403,65 @@ export function assignSeries(
   adducts: Adduct[],
   options: AssignOptions = {},
 ): Series[] {
-  const tol = options.toleranceDa ?? 0.5;
+  const tol = seriesTolerance(peaks, options.toleranceDa ?? 0.5);
   const minMembers = options.minMembers ?? 3;
   const minConsecutive = options.minConsecutive ?? 3;
   const maxSeries = options.maxSeries ?? 12;
+  const maxGap = options.maxGap ?? 1;
   if (!(repeatMass > 0) || adducts.length === 0) return [];
 
-  const pts = analyzablePeaks(peaks);
+  const pts = analyzablePeaks(peaks)
+    .slice()
+    .sort((a, b) => peakMz(a) - peakMz(b));
   if (pts.length < minMembers) return [];
 
+  // Ladders are defined by m/z spacing and are adduct-independent (the adduct only
+  // shifts the end-group residual and the absolute oligomer numbering). Linking by
+  // spacing — not residual-mod — is robust on unit-resolution data where rounding
+  // drifts the residual a full Dalton across the mass range.
+  const components = linkByRepeat(pts, repeatMass, tol, maxGap);
   const out: Series[] = [];
 
   for (const adduct of adducts) {
-    const members: ResidualMember[] = [];
-    for (const peak of pts) {
-      const neutral = neutralMass(peakMz(peak), adduct);
-      if (neutral <= 0) continue;
-      const residual = neutral - Math.floor(neutral / repeatMass) * repeatMass;
-      members.push({ peak, neutral, residual });
-    }
-    if (members.length < minMembers) continue;
+    for (const component of components) {
+      if (component.length < minMembers) continue;
+      const items = component
+        .map((peak) => ({ peak, neutral: neutralMass(peakMz(peak), adduct) }))
+        .filter((x) => x.neutral > 0)
+        .sort((a, b) => a.neutral - b.neutral);
+      if (items.length < minMembers) continue;
 
-    // Cluster residuals on a circle of circumference `repeatMass`.
-    members.sort((a, b) => a.residual - b.residual);
-    const clusters: ResidualMember[][] = [];
-    let current: ResidualMember[] = [];
-    for (const m of members) {
-      if (current.length === 0) {
-        current.push(m);
-        continue;
-      }
-      if (m.residual - current[current.length - 1].residual <= tol) {
-        current.push(m);
-      } else {
-        clusters.push(current);
-        current = [m];
-      }
-    }
-    if (current.length) clusters.push(current);
-    // Wraparound: a residual just below `repeatMass` and one just above 0 belong
-    // to the same series, so merge the last cluster into the first if the gap
-    // across the 0/repeatMass seam is within tolerance.
-    if (clusters.length > 1) {
-      const last = clusters[clusters.length - 1];
-      const first = clusters[0];
-      const seamGap = repeatMass - last[last.length - 1].residual + first[0].residual;
-      if (seamGap <= tol) {
-        clusters.pop();
-        clusters[0] = [...last, ...first];
-      }
-    }
-
-    for (const cluster of clusters) {
-      if (cluster.length < minMembers) continue;
-
-      // Reference residual (median) to assign integer oligomer counts.
-      const residuals = cluster.map((m) => m.residual).sort((a, b) => a - b);
-      const refResidual = residuals[residuals.length >> 1];
-      const endGroup = refResidual;
-
-      // Assign n; keep the most intense peak per n.
-      const byN = new Map<number, ResidualMember>();
-      for (const m of cluster) {
-        const n = Math.round((m.neutral - endGroup) / repeatMass);
-        if (n < 0) continue;
+      // Assign oligomer numbers from the spacing; keep the most intense peak per n.
+      const base = items[0].neutral;
+      const byN = new Map<number, { peak: Peak; neutral: number }>();
+      for (const it of items) {
+        const n = Math.round((it.neutral - base) / repeatMass);
         const existing = byN.get(n);
-        if (!existing || m.peak.intensity > existing.peak.intensity) byN.set(n, m);
+        if (!existing || it.peak.intensity > existing.peak.intensity) byN.set(n, it);
       }
       if (byN.size < minMembers) continue;
-
-      const ns = [...byN.keys()].sort((a, b) => a - b);
-      const longestRun = longestConsecutiveRun(ns);
+      const longestRun = longestConsecutiveRun([...byN.keys()]);
       if (longestRun < minConsecutive) continue;
 
-      // Residual error of the fit (Da, RMS).
+      // End group = Y-intercept (mean of neutral − n·repeat) reduced modulo repeat.
+      let interceptSum = 0;
+      for (const [n, it] of byN) interceptSum += it.neutral - n * repeatMass;
+      const intercept = interceptSum / byN.size;
+      const endGroup = ((intercept % repeatMass) + repeatMass) % repeatMass;
       let sse = 0;
-      for (const [n, m] of byN) {
-        const predicted = endGroup + n * repeatMass;
-        const err = m.neutral - predicted;
+      for (const [n, it] of byN) {
+        const err = it.neutral - (intercept + n * repeatMass);
         sse += err * err;
       }
       const meanErrorDa = Math.sqrt(sse / byN.size);
-
+      // Re-base n onto absolute oligomer indices consistent with the end group.
+      const n0 = Math.max(0, Math.round((base - endGroup) / repeatMass));
       const members2: { peakId: string; n: number }[] = [...byN.entries()]
         .sort((a, b) => a[0] - b[0])
-        .map(([n, m]) => ({ peakId: m.peak.id, n }));
+        .map(([n, it]) => ({ peakId: it.peak.id, n: n + n0 }));
 
       const score = scoreSeries(byN.size, longestRun, meanErrorDa, tol);
+      const r2 = regressionR2([...byN.keys()], [...byN.values()].map((it) => it.neutral));
       out.push({
         id: seriesId(),
         label: `${adduct.label} · ${repeatMass.toFixed(2)} Da`,
@@ -402,12 +471,97 @@ export function assignSeries(
         members: members2,
         score,
         meanErrorDa,
+        r2,
       });
     }
   }
 
   out.sort((a, b) => b.score - a.score);
   return out.slice(0, maxSeries);
+}
+
+export interface LadderFit {
+  /** End-group mass (Y-intercept of neutral mass vs n) reduced modulo the repeat. */
+  endGroupMass: number;
+  /** RMS deviation of the members from the fitted ladder (Da). */
+  meanErrorDa: number;
+  /** 0..1 quality score (count + consecutive run, penalised by fit error). */
+  score: number;
+  /** R² of the neutral-mass-vs-n regression. */
+  r2: number;
+  /** The members with their assigned oligomer number n, ascending. */
+  members: { peakId: string; n: number }[];
+}
+
+/**
+ * Fit a homologous ladder from an explicit set of member peaks — used after the
+ * user manually adds/removes a member on the plot. Oligomer numbers n are assigned
+ * from the spacing, and the end group is the regression intercept of neutral mass
+ * vs n with the slope fixed at the repeat (mean of neutral − n·repeat), reduced
+ * modulo the repeat: exactly the "Y-intercept" reading the report uses. Returns
+ * null if no member resolves to a positive neutral mass.
+ */
+export function fitLadder(
+  peaks: Peak[],
+  peakIds: Iterable<string>,
+  repeatMass: number,
+  adduct: Adduct,
+): LadderFit | null {
+  if (!(repeatMass > 0)) return null;
+  const byId = new Map(peaks.map((p) => [p.id, p] as const));
+  const items: { peakId: string; neutral: number }[] = [];
+  for (const id of peakIds) {
+    const p = byId.get(id);
+    if (!p) continue;
+    const neutral = neutralMass(peakMz(p), adduct);
+    if (neutral > 0) items.push({ peakId: id, neutral });
+  }
+  if (items.length === 0) return null;
+  items.sort((a, b) => a.neutral - b.neutral);
+  const base = items[0].neutral;
+  const withN = items.map((it) => ({ ...it, n: Math.round((it.neutral - base) / repeatMass) }));
+  const intercept = withN.reduce((s, it) => s + (it.neutral - it.n * repeatMass), 0) / withN.length;
+  const endGroupMass = ((intercept % repeatMass) + repeatMass) % repeatMass;
+  let sse = 0;
+  for (const it of withN) {
+    const err = it.neutral - (intercept + it.n * repeatMass);
+    sse += err * err;
+  }
+  const meanErrorDa = Math.sqrt(sse / withN.length);
+  // Re-base n onto absolute oligomer indices consistent with the end group.
+  const n0 = Math.max(0, Math.round((base - endGroupMass) / repeatMass));
+  const members = withN
+    .map((it) => ({ peakId: it.peakId, n: it.n + n0 }))
+    .sort((a, b) => a.n - b.n);
+  const longestRun = longestConsecutiveRun(members.map((m) => m.n));
+  const score = scoreSeries(members.length, longestRun, meanErrorDa, seriesTolerance(peaks, 0.5));
+  const r2 = regressionR2(withN.map((it) => it.n), withN.map((it) => it.neutral));
+  return { endGroupMass, meanErrorDa, score, r2, members };
+}
+
+/** R² of an ordinary least-squares fit of ys on xs (1 if degenerate). Used to show
+ *  how cleanly a ladder obeys neutral mass = endGroup + n·repeat. */
+function regressionR2(xs: number[], ys: number[]): number {
+  const n = xs.length;
+  if (n < 2) return 1;
+  const xbar = xs.reduce((a, b) => a + b, 0) / n;
+  const ybar = ys.reduce((a, b) => a + b, 0) / n;
+  let sxx = 0;
+  let sxy = 0;
+  let syy = 0;
+  for (let i = 0; i < n; i += 1) {
+    const dx = xs[i] - xbar;
+    const dy = ys[i] - ybar;
+    sxx += dx * dx;
+    sxy += dx * dy;
+    syy += dy * dy;
+  }
+  if (syy <= 0) return 1;
+  const slope = sxx > 0 ? sxy / sxx : 0;
+  const intercept = ybar - slope * xbar;
+  let ssRes = 0;
+  for (let i = 0; i < n; i += 1) ssRes += (ys[i] - (intercept + slope * xs[i])) ** 2;
+  return Math.max(0, 1 - ssRes / syy);
 }
 
 /** Combine matched count, consecutive run, and fit error into a 0..1 score. */

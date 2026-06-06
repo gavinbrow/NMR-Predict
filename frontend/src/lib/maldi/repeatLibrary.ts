@@ -11,9 +11,9 @@ import { exactMass, parseFormula } from "./formula";
 export interface RepeatUnitEntry {
   id: string;
   name: string;
-  /** Repeat-unit molecular formula. */
-  formula: string;
-  /** Monoisotopic repeat mass (Da), derived from the formula. */
+  /** Repeat-unit molecular formula (omitted for mass-only, user-supplied entries). */
+  formula?: string;
+  /** Monoisotopic repeat mass (Da); derived from the formula when one is given. */
   mass: number;
   /** Common abbreviation, e.g. "PEG". */
   abbr?: string;
@@ -21,6 +21,11 @@ export interface RepeatUnitEntry {
 
 function entry(id: string, name: string, formula: string, abbr?: string): RepeatUnitEntry {
   return { id, name, formula, abbr, mass: exactMass(parseFormula(formula)) };
+}
+
+/** A repeat unit known only by its measured mass (no formula), e.g. user-supplied. */
+function massEntry(id: string, name: string, mass: number, abbr?: string): RepeatUnitEntry {
+  return { id, name, mass, abbr: abbr ?? name };
 }
 
 /** Common synthetic-polymer repeat units, with monoisotopic masses. */
@@ -41,6 +46,13 @@ export const REPEAT_UNIT_LIBRARY: RepeatUnitEntry[] = [
   entry("pet", "Ethylene terephthalate (PET)", "C10H8O4", "PET"),
   entry("pdmaema", "DMAEMA", "C8H15NO2", "PDMAEMA"),
   entry("pvc", "Vinyl chloride (PVC)", "C2H3Cl", "PVC"),
+  // User-supplied repeat units (measured mass only).
+  massEntry("dac0", "DAC0", 222.14),
+  massEntry("dac1", "DAC1", 224.15),
+  massEntry("dac2", "DAC2", 280.22),
+  massEntry("dc1", "DC1", 240.14),
+  massEntry("dc2", "DC2", 226.12),
+  massEntry("dc4", "DC4", 282.11),
 ];
 
 /** Nearest repeat-unit library entry to a mass, within tolerance (Da). */
@@ -113,4 +125,22 @@ export const BUILTIN_TEMPLATES: ChemistryTemplate[] = [
     builtin: true,
     note: "Non-polar; silver adduct via dithranol/DCTB.",
   },
+  // User-supplied DAC / DC repeat units (measured masses), commonly sodiated.
+  ...(
+    [
+      ["dac0", "DAC0", 222.14],
+      ["dac1", "DAC1", 224.15],
+      ["dac2", "DAC2", 280.22],
+      ["dc1", "DC1", 240.14],
+      ["dc2", "DC2", 226.12],
+      ["dc4", "DC4", 282.11],
+    ] as const
+  ).map(([id, name, mass]) => ({
+    id: `tpl-${id}`,
+    name: `${name} (${mass}), Na/K`,
+    repeatMass: mass,
+    adductIds: ["Na", "K", "H"],
+    builtin: true,
+    note: "User-supplied repeat unit.",
+  })),
 ];
