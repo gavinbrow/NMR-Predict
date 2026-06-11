@@ -1,7 +1,10 @@
-import { ChevronDown, Download, FileSpreadsheet, FileText, Play } from "lucide-react";
+import { Download, FileSpreadsheet, FileText, Play } from "lucide-react";
 import { useMemo, useRef, useState } from "react";
 import type { Series } from "uplot";
+import { FigurePopout } from "@/components/ir/figure/FigureDialog";
 import { IrChart, type IrChartHandle } from "@/components/ir/IrChart";
+import { Section } from "@/components/ir/Section";
+import { TrendlineControls } from "@/components/ir/TrendlineControls";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -14,7 +17,20 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { correctBaseline } from "@/lib/ir/baseline";
+import {
+  PALETTE,
+  type FigureAnnotation,
+  type FigureData,
+  type FigureSeriesData,
+} from "@/lib/ir/figure";
 import { analyze, fitOrders, measurePeak } from "@/lib/ir/kinetics";
+import {
+  defaultTrendlineConfig,
+  fitTrendline,
+  type TrendlineConfig,
+  type TrendlineFit,
+  type TrendlineStyle,
+} from "@/lib/ir/trendline";
 import { interp, naturalCompare } from "@/lib/ir/numerics";
 import {
   downloadKineticsCsv,
@@ -39,13 +55,6 @@ import {
 interface KineticsProps {
   spectra: Spectrum[];
 }
-
-/** Distinct line colours, cycled across the overlaid spectra. */
-const PALETTE = [
-  "#2563eb", "#dc2626", "#16a34a", "#d97706", "#7c3aed",
-  "#0891b2", "#db2777", "#65a30d", "#ea580c", "#0d9488",
-  "#9333ea", "#ca8a04", "#0284c7", "#e11d48", "#4f46e5",
-];
 
 const TRACK_FILL = "rgba(251, 146, 60, 0.18)"; // light salmon — tracked window
 const REF_FILL = "rgba(34, 197, 94, 0.16)"; //   light green  — reference window
@@ -72,39 +81,6 @@ interface RunState {
   refPeak?: PeakConfig;
   useReference: boolean;
   signature: string;
-}
-
-/** A collapsible step container. */
-function Section({
-  title,
-  caption,
-  defaultOpen = true,
-  children,
-}: {
-  title: string;
-  caption?: string;
-  defaultOpen?: boolean;
-  children: React.ReactNode;
-}) {
-  const [open, setOpen] = useState(defaultOpen);
-  return (
-    <div className="rounded-2xl border border-border/60 bg-card shadow-card">
-      <button
-        type="button"
-        onClick={() => setOpen((o) => !o)}
-        className="flex w-full items-center justify-between gap-3 px-5 py-4 text-left"
-      >
-        <div>
-          <h3 className="text-sm font-semibold text-foreground">{title}</h3>
-          {caption && <p className="mt-0.5 text-xs text-muted-foreground">{caption}</p>}
-        </div>
-        <ChevronDown
-          className={`h-4 w-4 shrink-0 text-muted-foreground transition-transform ${open ? "rotate-180" : ""}`}
-        />
-      </button>
-      {open && <div className="border-t border-border/50 px-5 py-4">{children}</div>}
-    </div>
-  );
 }
 
 /** A small labelled numeric input. */
@@ -570,6 +546,37 @@ export function Kinetics({ spectra }: KineticsProps) {
 /** A line-less, markers-only path builder for scatter series. */
 const NO_PATH = (() => null) as unknown as Series["paths"];
 
+/** uPlot dash array for a trendline style (solid = no dash). */
+function uplotDash(style: TrendlineStyle): number[] | undefined {
+  if (style === "dashed") return [6, 4];
+  if (style === "dotted") return [2, 3];
+  return undefined;
+}
+
+/**
+ * Evaluate a fitted trendline across the chart's x. Non-finite predictions
+ * become NaN gaps; the whole line is dropped (null) unless at least two finite
+ * points remain, so a degenerate fit can never feed an all-NaN series into the
+ * chart's autorange.
+ */
+function trendOverX(
+  xs: number[],
+  enabled: boolean,
+  fit: TrendlineFit,
+): number[] | null {
+  if (!enabled || !fit.ok) return null;
+  let finite = 0;
+  const ys = xs.map((x) => {
+    const v = fit.predict(x);
+    if (Number.isFinite(v)) {
+      finite += 1;
+      return v;
+    }
+    return NaN;
+  });
+  return finite >= 2 ? ys : null;
+}
+
 function ResultPlots({
   run,
   timeUnit,
@@ -583,6 +590,35 @@ function ResultPlots({
 }) {
   const { result } = run;
 
+  // Customizable lines of best fit (persist across "Update analysis").
+  const [peakTrend, setPeakTrend] = useState<TrendlineConfig>(() => defaultTrendlineConfig());
+  const [convTrend, setConvTrend] = useState<TrendlineConfig>(() => defaultTrendlineConfig());
+
+  // Conversion as a percentage — the y the conversion plot (and its fit) uses.
+  const convPct = useMemo(() => result.conversion.map((c) => c * 100), [result]);
+
+  // Measured-point x-extent, shown as the fit-range placeholder.
+  const timeExtent = useMemo(() => {
+    let lo = Infinity;
+    let hi = -Infinity;
+    for (const t of result.time) {
+      if (!Number.isFinite(t)) continue;
+      if (t < lo) lo = t;
+      if (t > hi) hi = t;
+    }
+    return { lo: lo === Infinity ? 0 : lo, hi: hi === -Infinity ? 0 : hi };
+  }, [result]);
+
+  // The regressions themselves, fitted to the measured scatter points.
+  const peakFit = useMemo(
+    () => fitTrendline(result.time, result.signal, peakTrend),
+    [result, peakTrend],
+  );
+  const convFit = useMemo(
+    () => fitTrendline(result.time, convPct, convTrend),
+    [result, convPct, convTrend],
+  );
+
   // Shared x for each chart = union of the measured times and the dense fit grid.
   const peak = useMemo(() => {
     const tFit = result.tFit ?? [];
@@ -591,12 +627,7 @@ function ResultPlots({
     const fitAt = new Map(tFit.map((t, i) => [t, (result.sFit ?? [])[i]]));
     const markers = xs.map((x) => (sigAt.has(x) ? (sigAt.get(x) as number) : NaN));
     const line = xs.map((x) => (fitAt.has(x) ? (fitAt.get(x) as number) : NaN));
-    const data = [xs, markers, line] as [number[], ...number[][]];
-    const series: Series[] = [
-      { label: "measured", stroke: "#2563eb", points: { show: true, size: 7 }, paths: NO_PATH },
-      { label: "fit", stroke: "#dc2626", width: 1.5, dash: [6, 4], points: { show: false } },
-    ];
-    return { data, series };
+    return { xs, markers, line };
   }, [result]);
 
   const conv = useMemo(() => {
@@ -609,45 +640,214 @@ function ResultPlots({
     const markers = xs.map((x) => (convAt.has(x) ? (convAt.get(x) as number) : NaN));
     const trend = xs.map((x) => (trendAt.has(x) ? (trendAt.get(x) as number) : NaN));
     const finalLine = xs.map(() => (Number.isFinite(result.finalConversion) ? result.finalConversion * 100 : NaN));
-    const data = [xs, markers, trend, finalLine] as [number[], ...number[][]];
+    return { xs, markers, trend, finalLine };
+  }, [result]);
+
+  // Trendline y evaluated over each chart's x (null when off / unfittable).
+  const peakTrendY = useMemo(
+    () => trendOverX(peak.xs, peakTrend.enabled, peakFit),
+    [peak, peakTrend.enabled, peakFit],
+  );
+  const convTrendY = useMemo(
+    () => trendOverX(conv.xs, convTrend.enabled, convFit),
+    [conv, convTrend.enabled, convFit],
+  );
+
+  // Inline uPlot charts: measured scatter + model line + optional best-fit line.
+  const peakChart = useMemo(() => {
+    const data: number[][] = [peak.xs, peak.markers, peak.line];
+    const series: Series[] = [
+      { label: "measured", stroke: "#2563eb", points: { show: true, size: 7 }, paths: NO_PATH },
+      { label: "fit", stroke: "#dc2626", width: 1.5, dash: [6, 4], points: { show: false } },
+    ];
+    if (peakTrendY) {
+      data.push(peakTrendY);
+      series.push({
+        label: "best fit",
+        stroke: peakTrend.color,
+        width: peakTrend.width,
+        dash: uplotDash(peakTrend.style),
+        points: { show: false },
+      });
+    }
+    return { data: data as [number[], ...number[][]], series };
+  }, [peak, peakTrendY, peakTrend.color, peakTrend.width, peakTrend.style]);
+
+  const convChart = useMemo(() => {
+    const data: number[][] = [conv.xs, conv.markers, conv.trend, conv.finalLine];
     const series: Series[] = [
       { label: "conversion", stroke: "#16a34a", points: { show: true, size: 7 }, paths: NO_PATH },
       { label: "first-order", stroke: "#dc2626", width: 1.5, dash: [6, 4], points: { show: false } },
       { label: "final", stroke: "#64748b", width: 1, dash: [2, 3], points: { show: false } },
     ];
-    return { data, series };
-  }, [result]);
+    if (convTrendY) {
+      data.push(convTrendY);
+      series.push({
+        label: "best fit",
+        stroke: convTrend.color,
+        width: convTrend.width,
+        dash: uplotDash(convTrend.style),
+        points: { show: false },
+      });
+    }
+    return { data: data as [number[], ...number[][]], series };
+  }, [conv, convTrendY, convTrend.color, convTrend.width, convTrend.style]);
 
   const dataFinal = result.conversion.reduce(
     (m, v) => (Number.isFinite(v) && v > m ? v : m),
     -Infinity,
   );
 
+  const peakYLabel = run.useReference
+    ? "peak signal (ratio to ref)"
+    : `peak signal (${run.signalUnit})`;
+
+  // The same plots in the figure maker's neutral shape (scatter + fit lines),
+  // with the optional best-fit line and its equation carried into exports.
+  const peakFigure = useMemo<FigureData>(() => {
+    const series: FigureSeriesData[] = [
+      {
+        id: "measured",
+        label: "measured",
+        y: peak.markers,
+        styleHints: { color: "#2563eb", lineStyle: "none", markers: true },
+      },
+      { id: "fit", label: "fit", y: peak.line, styleHints: { color: "#dc2626", lineStyle: "dashed" } },
+    ];
+    const annotations: FigureAnnotation[] = [];
+    if (peakTrendY) {
+      series.push({
+        id: "trend",
+        label: "best fit",
+        y: peakTrendY,
+        styleHints: {
+          color: peakTrend.color,
+          lineStyle: peakTrend.style,
+          lineWidth: peakTrend.width,
+          markers: false,
+        },
+      });
+      if (peakTrend.showEquation && peakFit.ok) {
+        annotations.push({
+          id: "trend-eq",
+          text: `${peakFit.equation}   R² = ${peakFit.r2.toFixed(3)}`,
+          x: 0.03,
+          y: 0.08,
+          color: peakTrend.color,
+        });
+      }
+    }
+    return {
+      x: peak.xs,
+      series,
+      xLabel: `time (${timeUnit})`,
+      yLabel: peakYLabel,
+      sourceName: "peak_decay",
+      annotations,
+    };
+  }, [peak, peakTrendY, peakTrend, peakFit, timeUnit, peakYLabel]);
+
+  const convFigure = useMemo<FigureData>(() => {
+    const series: FigureSeriesData[] = [
+      {
+        id: "conversion",
+        label: "conversion",
+        y: conv.markers,
+        styleHints: { color: "#16a34a", lineStyle: "none", markers: true },
+      },
+      {
+        id: "first-order",
+        label: "first-order",
+        y: conv.trend,
+        styleHints: { color: "#dc2626", lineStyle: "dashed" },
+      },
+      {
+        id: "final",
+        label: "final",
+        y: conv.finalLine,
+        styleHints: { color: "#64748b", lineStyle: "dotted", lineWidth: 1 },
+      },
+    ];
+    const annotations: FigureAnnotation[] = [];
+    if (convTrendY) {
+      series.push({
+        id: "trend",
+        label: "best fit",
+        y: convTrendY,
+        styleHints: {
+          color: convTrend.color,
+          lineStyle: convTrend.style,
+          lineWidth: convTrend.width,
+          markers: false,
+        },
+      });
+      if (convTrend.showEquation && convFit.ok) {
+        annotations.push({
+          id: "trend-eq",
+          text: `${convFit.equation}   R² = ${convFit.r2.toFixed(3)}`,
+          x: 0.03,
+          y: 0.08,
+          color: convTrend.color,
+        });
+      }
+    }
+    return {
+      x: conv.xs,
+      series,
+      xLabel: `time (${timeUnit})`,
+      yLabel: "conversion (%)",
+      sourceName: "conversion",
+      annotations,
+    };
+  }, [conv, convTrendY, convTrend, convFit, timeUnit]);
+
   return (
     <Section title="6 · Result plots & fit summary">
       <div className="grid gap-4 lg:grid-cols-2">
         <div className="rounded-xl border border-border/50 p-3">
-          <p className="mb-1 text-xs font-medium text-foreground">Peak disappearance</p>
+          <div className="mb-1 flex items-center justify-between gap-2">
+            <p className="text-xs font-medium text-foreground">Peak disappearance</p>
+            <FigurePopout data={peakFigure} />
+          </div>
           <IrChart
             ref={peakChartRef}
-            data={peak.data}
-            series={peak.series}
+            data={peakChart.data}
+            series={peakChart.series}
             xLabel={`time (${timeUnit})`}
-            yLabel={run.useReference ? "peak signal (ratio to ref)" : `peak signal (${run.signalUnit})`}
+            yLabel={peakYLabel}
             legend
             height={300}
           />
+          <TrendlineControls
+            config={peakTrend}
+            onChange={setPeakTrend}
+            fit={peakFit}
+            dataMin={timeExtent.lo}
+            dataMax={timeExtent.hi}
+            unit={timeUnit}
+          />
         </div>
         <div className="rounded-xl border border-border/50 p-3">
-          <p className="mb-1 text-xs font-medium text-foreground">Conversion</p>
+          <div className="mb-1 flex items-center justify-between gap-2">
+            <p className="text-xs font-medium text-foreground">Conversion</p>
+            <FigurePopout data={convFigure} />
+          </div>
           <IrChart
             ref={convChartRef}
-            data={conv.data}
-            series={conv.series}
+            data={convChart.data}
+            series={convChart.series}
             xLabel={`time (${timeUnit})`}
             yLabel="conversion (%)"
             legend
             height={300}
+          />
+          <TrendlineControls
+            config={convTrend}
+            onChange={setConvTrend}
+            fit={convFit}
+            dataMin={timeExtent.lo}
+            dataMax={timeExtent.hi}
+            unit={timeUnit}
           />
         </div>
       </div>
@@ -703,6 +903,32 @@ function OrderComparison({ run }: { run: RunState }) {
       { label: "linear fit", stroke: "#dc2626", width: 1.5, points: { show: false } },
     ];
     return { data, series };
+  }, [chosen]);
+
+  // Figure-maker shape for the selected order. The ids carry the order number,
+  // so switching orders re-seeds the two series instead of keeping stale styles.
+  const orderFigure = useMemo<FigureData | null>(() => {
+    if (!chosen || !chosen.ok) return null;
+    return {
+      x: chosen.t,
+      series: [
+        {
+          id: `data-${chosen.order}`,
+          label: chosen.transform,
+          y: chosen.y,
+          styleHints: { color: "#2563eb", lineStyle: "none", markers: true },
+        },
+        {
+          id: `fit-${chosen.order}`,
+          label: "linear fit",
+          y: chosen.yFit,
+          styleHints: { color: "#dc2626" },
+        },
+      ],
+      xLabel: "time",
+      yLabel: chosen.transform,
+      sourceName: `order_${chosen.order}`,
+    };
   }, [chosen]);
 
   return (
@@ -772,9 +998,12 @@ function OrderComparison({ run }: { run: RunState }) {
             </div>
             {plot ? (
               <>
-                <p className="mb-1 text-[11px] text-muted-foreground">
-                  {chosen?.label} · R² = {chosen?.r2.toFixed(4)}
-                </p>
+                <div className="mb-1 flex items-center justify-between gap-2">
+                  <p className="text-[11px] text-muted-foreground">
+                    {chosen?.label} · R² = {chosen?.r2.toFixed(4)}
+                  </p>
+                  {orderFigure && <FigurePopout data={orderFigure} />}
+                </div>
                 <IrChart
                   data={plot.data}
                   series={plot.series}

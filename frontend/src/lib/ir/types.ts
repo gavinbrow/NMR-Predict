@@ -39,8 +39,18 @@ export interface Spectrum {
 /** Which axis the overlay charts plot. */
 export type YAxis = "%T" | "Absorbance";
 
-/** Full-spectrum baseline methods (§6). All operate in absorbance space. */
-export type BaselineMethod = "None" | "Offset" | "Linear (2-point)" | "Rubberband";
+/**
+ * Full-spectrum baseline methods (§6). All operate in absorbance space.
+ * "Manual (draw)" subtracts a single user-drawn polyline baseline (see
+ * `BaselinePoint`) and is offered only in View & Export, so it is intentionally
+ * absent from `BASELINE_METHODS` (the shared automatic-method list).
+ */
+export type BaselineMethod =
+  | "None"
+  | "Offset"
+  | "Linear (2-point)"
+  | "Rubberband"
+  | "Manual (draw)";
 
 export const BASELINE_METHODS: BaselineMethod[] = [
   "None",
@@ -48,6 +58,14 @@ export const BASELINE_METHODS: BaselineMethod[] = [
   "Linear (2-point)",
   "Rubberband",
 ];
+
+/** One anchor of a hand-drawn baseline: wavenumber (cm⁻¹) × absorbance. */
+export interface BaselinePoint {
+  /** Wavenumber, cm⁻¹. */
+  x: number;
+  /** Absorbance value of the baseline at this wavenumber. */
+  y: number;
+}
 
 // ---------------------------------------------------------------------------
 // Kinetics — peak measurement configuration

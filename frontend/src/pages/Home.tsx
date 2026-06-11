@@ -99,7 +99,7 @@ const Home = () => {
           href="/ir"
           icon={Waves}
           eyebrow="Infrared"
-          title="IR Kinetics"
+          title="IR"
           description="Read Shimadzu IRAffinity-1S .ispd files, overlay and export spectra, and track an IR peak's disappearance over time to fit reaction kinetics."
         />
         <WorkspaceCard

@@ -4,7 +4,7 @@
 
 import { correctBaseline } from "./baseline";
 import { interp } from "./numerics";
-import type { BaselineMethod, Spectrum, YAxis } from "./types";
+import type { BaselineMethod, BaselinePoint, Spectrum, YAxis } from "./types";
 
 /** The wavenumber grid of the densest spectrum (most points). */
 export function commonGrid(specs: Spectrum[]): number[] {
@@ -26,8 +26,9 @@ export function displayY(
   method: BaselineMethod,
   p1?: number,
   p2?: number,
+  anchors?: BaselinePoint[],
 ): number[] {
-  const corrected = correctBaseline(method, spec.wavenumber, spec.absorbance, p1, p2);
+  const corrected = correctBaseline(method, spec.wavenumber, spec.absorbance, p1, p2, anchors);
   if (yaxis === "Absorbance") return corrected;
   return corrected.map((a) => 100 * Math.pow(10, -a));
 }
@@ -52,10 +53,11 @@ export function buildTable(
   method: BaselineMethod,
   p1?: number,
   p2?: number,
+  anchors?: BaselinePoint[],
 ): SpectraTable {
   const grid = commonGrid(specs);
   const columns = specs.map((spec) =>
-    interp(grid, spec.wavenumber, displayY(spec, yaxis, method, p1, p2)),
+    interp(grid, spec.wavenumber, displayY(spec, yaxis, method, p1, p2, anchors)),
   );
   const headers = ["wavenumber_cm-1", ...specs.map((s) => s.name)];
   const rows = grid.map((w, r) => [w, ...columns.map((c) => c[r])]);

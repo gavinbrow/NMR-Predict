@@ -4,7 +4,7 @@
 // in order: None, Offset, Linear (2-point), Rubberband.
 
 import { convexHull, interp } from "./numerics";
-import type { BaselineMethod } from "./types";
+import type { BaselineMethod, BaselinePoint } from "./types";
 
 export { BASELINE_METHODS as METHODS } from "./types";
 
@@ -101,8 +101,28 @@ function rubberbandBaseline(wavenumber: number[], absorbance: number[]): number[
 }
 
 /**
+ * Manual (draw): a single user-drawn polyline, the same baseline for every
+ * spectrum. The anchors (x = cm⁻¹, y = absorbance) are sorted by wavenumber and
+ * linearly interpolated across the grid; `interp` clamps the ends flat. Fewer
+ * than two anchors means "no baseline" (a flat zero), so an empty draw is a
+ * no-op rather than a surprise.
+ */
+function manualBaseline(wavenumber: number[], anchors?: BaselinePoint[]): number[] {
+  const pts = (anchors ?? [])
+    .filter((p) => Number.isFinite(p.x) && Number.isFinite(p.y))
+    .sort((a, b) => a.x - b.x);
+  if (pts.length < 2) return new Array<number>(wavenumber.length).fill(0);
+  return interp(
+    wavenumber,
+    pts.map((p) => p.x),
+    pts.map((p) => p.y),
+  );
+}
+
+/**
  * Compute the baseline array for `method` over an absorbance spectrum. `p1`/`p2`
- * are the optional Linear (2-point) anchor wavenumbers (defaults: max / min wn).
+ * are the optional Linear (2-point) anchor wavenumbers (defaults: max / min wn);
+ * `anchors` is the hand-drawn polyline used by "Manual (draw)".
  */
 export function computeBaseline(
   method: BaselineMethod,
@@ -110,6 +130,7 @@ export function computeBaseline(
   absorbance: number[],
   p1?: number,
   p2?: number,
+  anchors?: BaselinePoint[],
 ): number[] {
   switch (method) {
     case "Offset":
@@ -118,6 +139,8 @@ export function computeBaseline(
       return linearBaseline(wavenumber, absorbance, p1, p2);
     case "Rubberband":
       return rubberbandBaseline(wavenumber, absorbance);
+    case "Manual (draw)":
+      return manualBaseline(wavenumber, anchors);
     case "None":
     default:
       return new Array<number>(absorbance.length).fill(0);
@@ -131,7 +154,8 @@ export function correctBaseline(
   absorbance: number[],
   p1?: number,
   p2?: number,
+  anchors?: BaselinePoint[],
 ): number[] {
-  const baseline = computeBaseline(method, wavenumber, absorbance, p1, p2);
+  const baseline = computeBaseline(method, wavenumber, absorbance, p1, p2, anchors);
   return absorbance.map((a, i) => a - baseline[i]);
 }

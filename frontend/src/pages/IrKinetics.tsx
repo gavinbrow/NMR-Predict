@@ -1,4 +1,4 @@
-import { AlertTriangle, FileUp, HardDrive, Loader2, Waves } from "lucide-react";
+import { AlertTriangle, FileUp, HardDrive, Loader2, Trash2, Waves } from "lucide-react";
 import { useRef, useState } from "react";
 import { AppShell } from "@/components/AppShell";
 import { Kinetics } from "@/components/ir/Kinetics";
@@ -27,17 +27,27 @@ const IrKinetics = () => {
   const [dragging, setDragging] = useState(false);
   const [mode, setMode] = useState<Mode>("View & Export");
 
+  // Additive: new files open alongside the loaded ones. A re-upload of the same
+  // filename replaces that spectrum; "Clear all" resets the workspace.
   const handleFiles = async (files: File[] | FileList | null) => {
     if (!files || files.length === 0) return;
     setLoading(true);
     try {
       const { spectra: loaded, errors: errs } = await loadSpectra(files);
-      loaded.sort((a, b) => naturalCompare(a.name, b.name));
-      setSpectra(loaded);
+      setSpectra((prev) => {
+        const byName = new Map(prev.map((s) => [s.name, s]));
+        for (const s of loaded) byName.set(s.name, s);
+        return [...byName.values()].sort((a, b) => naturalCompare(a.name, b.name));
+      });
       setErrors(errs);
     } finally {
       setLoading(false);
     }
+  };
+
+  const clearAll = () => {
+    setSpectra([]);
+    setErrors([]);
   };
 
   // Drop accepts the same files the browse dialog would: `.ispd` only. (The
@@ -70,7 +80,7 @@ const IrKinetics = () => {
         <aside className="lg:w-72 lg:shrink-0">
           <div className="flex flex-col gap-4 rounded-2xl border border-border/60 bg-card p-5 shadow-card">
             <div>
-              <h1 className="text-lg font-semibold tracking-tight text-foreground">IR Kinetics</h1>
+              <h1 className="text-lg font-semibold tracking-tight text-foreground">IR</h1>
               <p className="text-xs text-muted-foreground">
                 Shimadzu IRAffinity-1S .ispd reader
               </p>
@@ -103,7 +113,7 @@ const IrKinetics = () => {
               )}
               <div>
                 <p className="text-sm font-semibold text-foreground">
-                  {hasSpectra ? "Replace files" : "Load .ispd files"}
+                  {hasSpectra ? "Add files" : "Load .ispd files"}
                 </p>
                 <p className="mt-0.5 text-xs text-muted-foreground">
                   Shimadzu .ispd, multiple. Drag &amp; drop or click to browse.
@@ -115,15 +125,31 @@ const IrKinetics = () => {
                 accept=".ispd"
                 multiple
                 className="hidden"
-                onChange={(e) => handleFiles(e.target.files)}
+                onChange={(e) => {
+                  // Copy the list, then reset so picking the same file(s)
+                  // again re-fires `change`.
+                  const files = Array.from(e.target.files ?? []);
+                  e.target.value = "";
+                  void handleFiles(files);
+                }}
               />
             </button>
 
             {hasSpectra && (
               <>
-                <p className="text-xs font-medium text-foreground">
-                  {count} {count === 1 ? "spectrum" : "spectra"} loaded
-                </p>
+                <div className="flex items-center justify-between gap-2">
+                  <p className="text-xs font-medium text-foreground">
+                    {count} {count === 1 ? "spectrum" : "spectra"} loaded
+                  </p>
+                  <button
+                    type="button"
+                    onClick={clearAll}
+                    className="inline-flex items-center gap-1 rounded-lg border border-border/70 px-2 py-1 text-[11px] font-medium text-muted-foreground transition-smooth hover:border-destructive/40 hover:text-destructive"
+                  >
+                    <Trash2 className="h-3 w-3" />
+                    Clear all
+                  </button>
+                </div>
                 <div className="grid gap-2">
                   <Label className="text-xs text-muted-foreground">Mode</Label>
                   <RadioGroup value={mode} onValueChange={(v) => setMode(v as Mode)}>
@@ -184,7 +210,7 @@ function EmptyState() {
       <div className="mx-auto mb-6 flex h-14 w-14 items-center justify-center rounded-2xl bg-gradient-primary shadow-elegant">
         <Waves className="h-7 w-7 text-primary-foreground" />
       </div>
-      <h1 className="text-3xl font-semibold tracking-tight text-foreground">IR Kinetics</h1>
+      <h1 className="text-3xl font-semibold tracking-tight text-foreground">IR</h1>
       <p className="mt-2 text-sm text-muted-foreground">
         Load one or more Shimadzu .ispd files from the sidebar to begin.
       </p>

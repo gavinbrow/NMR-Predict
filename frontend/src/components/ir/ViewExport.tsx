@@ -1,7 +1,10 @@
 import { Download, FileSpreadsheet } from "lucide-react";
 import { useMemo, useState } from "react";
 import type { Series } from "uplot";
+import { FigureMaker } from "@/components/ir/figure/FigureMaker";
+import { useFigureOptions } from "@/components/ir/figure/useFigureOptions";
 import { IrChart } from "@/components/ir/IrChart";
+import { ManualBaselineEditor } from "@/components/ir/ManualBaselineEditor";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -14,21 +17,22 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { downloadSpectraCsv, downloadSpectraExcel } from "@/lib/ir/export";
+import { PALETTE, type FigureData } from "@/lib/ir/figure";
 import { interp } from "@/lib/ir/numerics";
 import { buildTable, commonGrid, displayY } from "@/lib/ir/shared";
-import { BASELINE_METHODS, type BaselineMethod, type Spectrum, type YAxis } from "@/lib/ir/types";
+import {
+  BASELINE_METHODS,
+  type BaselineMethod,
+  type BaselinePoint,
+  type Spectrum,
+  type YAxis,
+} from "@/lib/ir/types";
 
 interface ViewExportProps {
   spectra: Spectrum[];
 }
-
-/** Distinct line colours, cycled across overlaid spectra. */
-const PALETTE = [
-  "#2563eb", "#dc2626", "#16a34a", "#d97706", "#7c3aed",
-  "#0891b2", "#db2777", "#65a30d", "#ea580c", "#0d9488",
-  "#9333ea", "#ca8a04", "#0284c7", "#e11d48", "#4f46e5",
-];
 
 /** Per-method one-line help shown under the baseline picker. */
 const BASELINE_HELP: Record<BaselineMethod, string> = {
@@ -36,7 +40,11 @@ const BASELINE_HELP: Record<BaselineMethod, string> = {
   Offset: "Subtract a constant equal to each spectrum's minimum absorbance.",
   "Linear (2-point)": "Subtract a straight line between two anchor wavenumbers.",
   Rubberband: "Subtract the lower convex-hull envelope (a flexible baseline).",
+  "Manual (draw)": "Draw a baseline by hand; the same curve is subtracted from every spectrum.",
 };
+
+/** Baseline methods offered here: the shared automatic set plus hand-drawing. */
+const METHOD_OPTIONS: BaselineMethod[] = [...BASELINE_METHODS, "Manual (draw)"];
 
 /** When more than this many spectra are loaded, the overlay defaults to a subset. */
 const MANY = 15;
@@ -53,6 +61,9 @@ export function ViewExport({ spectra }: ViewExportProps) {
   const [p1, setP1] = useState<number>(gridMax);
   const [p2, setP2] = useState<number>(gridMin);
 
+  // Hand-drawn baseline anchors (only used when "Manual (draw)").
+  const [anchors, setAnchors] = useState<BaselinePoint[]>([]);
+
   // Which spectra to overlay (export always uses all). Default: a thinned subset
   // when many files are loaded, otherwise everything.
   const defaultSelected = useMemo(() => {
@@ -63,25 +74,64 @@ export function ViewExport({ spectra }: ViewExportProps) {
   }, [spectra]);
   const [selected, setSelected] = useState<Set<string>>(defaultSelected);
 
-  // Reset the selection whenever the loaded set changes.
+  // Reconcile the selection when the loaded set changes: keep the user's picks
+  // for surviving spectra and auto-select newly added ones. A huge added batch
+  // (or the first load) falls back to the thinned default instead.
   const [selectionKey, setSelectionKey] = useState("");
   const currentKey = spectra.map((s) => s.name).join("|");
   if (currentKey !== selectionKey) {
+    const prevNames = new Set(selectionKey ? selectionKey.split("|") : []);
+    const added = spectra.map((s) => s.name).filter((n) => !prevNames.has(n));
     setSelectionKey(currentKey);
-    setSelected(defaultSelected);
+    if (prevNames.size === 0 || added.length > MANY) {
+      setSelected(defaultSelected);
+    } else {
+      setSelected((prev) => {
+        const current = new Set(spectra.map((s) => s.name));
+        const next = new Set([...prev].filter((n) => current.has(n)));
+        for (const n of added) next.add(n);
+        return next;
+      });
+    }
   }
 
   const usesAnchors = method === "Linear (2-point)";
+  const usesManual = method === "Manual (draw)";
   const displayed = useMemo(
     () => spectra.filter((s) => selected.has(s.name)),
     [spectra, selected],
   );
 
-  // Overlay data on the common grid: interp each displayed spectrum's y onto it.
+  // Seed a starting (flat) baseline the first time "Manual (draw)" is chosen,
+  // so the editor opens with something to drag rather than an empty plot. Only
+  // on the method transition — clearing all points later stays cleared.
+  const [prevMethod, setPrevMethod] = useState(method);
+  if (prevMethod !== method) {
+    setPrevMethod(method);
+    if (method === "Manual (draw)" && anchors.length === 0 && grid.length >= 2 && displayed.length) {
+      let lo = Infinity;
+      for (const s of displayed) {
+        for (const a of s.absorbance) if (Number.isFinite(a) && a < lo) lo = a;
+      }
+      if (!Number.isFinite(lo)) lo = 0;
+      setAnchors([
+        { x: grid[0], y: lo },
+        { x: grid[grid.length - 1], y: lo },
+      ]);
+    }
+  }
+
+  // Each displayed spectrum's y interpolated onto the common grid.
+  const columns = useMemo(
+    () =>
+      displayed.map((spec) =>
+        interp(grid, spec.wavenumber, displayY(spec, yaxis, method, p1, p2, anchors)),
+      ),
+    [displayed, grid, yaxis, method, p1, p2, anchors],
+  );
+
+  // Overlay chart data for uPlot.
   const { data, series } = useMemo(() => {
-    const columns = displayed.map((spec) =>
-      interp(grid, spec.wavenumber, displayY(spec, yaxis, method, p1, p2)),
-    );
     const seriesDefs: Series[] = displayed.map((spec, i) => ({
       label: spec.name,
       stroke: PALETTE[i % PALETTE.length],
@@ -92,20 +142,38 @@ export function ViewExport({ spectra }: ViewExportProps) {
       data: [grid, ...columns] as [number[], ...number[][]],
       series: seriesDefs,
     };
-  }, [displayed, grid, yaxis, method, p1, p2]);
+  }, [displayed, grid, columns]);
 
   const yLabel = yaxis === "Absorbance" ? "Absorbance" : "Transmittance (%T)";
   const showLegend = displayed.length <= 20;
 
+  // The same overlay in the figure maker's neutral shape.
+  const figureData = useMemo<FigureData>(
+    () => ({
+      x: grid,
+      series: displayed.map((spec, i) => ({ id: spec.name, label: spec.name, y: columns[i] })),
+      xLabel: "Wavenumber (cm⁻¹)",
+      yLabel,
+      reversedX: true,
+      sourceName: "ir_overlay",
+    }),
+    [displayed, grid, columns, yLabel],
+  );
+  const [figureOptions, setFigureOptions] = useFigureOptions(figureData);
+
   // Export table over ALL spectra (not just the displayed subset).
   const table = useMemo(
-    () => buildTable(spectra, yaxis, method, p1, p2),
-    [spectra, yaxis, method, p1, p2],
+    () => buildTable(spectra, yaxis, method, p1, p2, anchors),
+    [spectra, yaxis, method, p1, p2, anchors],
   );
   const previewRows = table.rows.slice(0, 20);
   const [exporting, setExporting] = useState(false);
 
-  const baselineNote = usesAnchors ? `${method} (anchors ${p1}, ${p2} cm⁻¹)` : method;
+  const baselineNote = usesAnchors
+    ? `${method} (anchors ${p1}, ${p2} cm⁻¹)`
+    : usesManual
+      ? `${method} (${anchors.length} point${anchors.length === 1 ? "" : "s"})`
+      : method;
 
   const toggle = (name: string) =>
     setSelected((prev) => {
@@ -124,6 +192,13 @@ export function ViewExport({ spectra }: ViewExportProps) {
         </p>
       </header>
 
+      <Tabs defaultValue="data" className="flex flex-col gap-6">
+        <TabsList className="w-fit">
+          <TabsTrigger value="data">Data</TabsTrigger>
+          <TabsTrigger value="figure">Figure</TabsTrigger>
+        </TabsList>
+
+        <TabsContent value="data" className="mt-0 flex flex-col gap-6">
       {/* Controls */}
       <div className="grid gap-5 rounded-2xl border border-border/60 bg-card p-5 shadow-card lg:grid-cols-3">
         <div className="grid gap-2">
@@ -151,7 +226,7 @@ export function ViewExport({ spectra }: ViewExportProps) {
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
-              {BASELINE_METHODS.map((m) => (
+              {METHOD_OPTIONS.map((m) => (
                 <SelectItem key={m} value={m}>
                   {m}
                 </SelectItem>
@@ -227,6 +302,26 @@ export function ViewExport({ spectra }: ViewExportProps) {
           <p className="text-[11px] text-muted-foreground">Export always uses all spectra.</p>
         </div>
       </div>
+
+      {/* Manual baseline editor (only for the hand-drawn method) */}
+      {usesManual && (
+        <div className="rounded-2xl border border-border/60 bg-card p-5 shadow-card">
+          <h3 className="mb-3 text-sm font-semibold text-foreground">Draw baseline</h3>
+          {displayed.length === 0 ? (
+            <p className="py-10 text-center text-sm text-muted-foreground">
+              Select at least one spectrum to draw a baseline.
+            </p>
+          ) : (
+            <ManualBaselineEditor
+              spectra={displayed}
+              grid={grid}
+              anchors={anchors}
+              onChange={setAnchors}
+              reversedX
+            />
+          )}
+        </div>
+      )}
 
       {/* Overlay chart */}
       <div className="rounded-2xl border border-border/60 bg-card p-4 shadow-card">
@@ -307,6 +402,20 @@ export function ViewExport({ spectra }: ViewExportProps) {
           Preview of the first {previewRows.length} of {table.rows.length} rows.
         </p>
       </div>
+        </TabsContent>
+
+        <TabsContent value="figure" className="mt-0">
+          {displayed.length === 0 ? (
+            <div className="rounded-2xl border border-border/60 bg-card p-4 shadow-card">
+              <p className="py-20 text-center text-sm text-muted-foreground">
+                Select at least one spectrum to display (Data tab).
+              </p>
+            </div>
+          ) : (
+            <FigureMaker data={figureData} options={figureOptions} onChange={setFigureOptions} />
+          )}
+        </TabsContent>
+      </Tabs>
     </div>
   );
 }
