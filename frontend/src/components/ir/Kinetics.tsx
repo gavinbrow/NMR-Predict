@@ -577,6 +577,20 @@ function trendOverX(
   return finite >= 2 ? ys : null;
 }
 
+/**
+ * The conversion the data actually levels off at, as a percentage: the mean of
+ * the last fifth of the finite conversion points. This tracks the visible
+ * plateau, unlike the first-order model's extrapolated final conversion, which
+ * reads ~100% whenever the fit drives S∞ toward zero.
+ */
+function observedPlateauPct(conversion: number[]): number {
+  const cs = conversion.filter((c) => Number.isFinite(c));
+  if (cs.length === 0) return NaN;
+  const tail = cs.slice(Math.floor(cs.length * 0.8));
+  const used = tail.length ? tail : cs;
+  return (used.reduce((a, b) => a + b, 0) / used.length) * 100;
+}
+
 function ResultPlots({
   run,
   timeUnit,
@@ -639,8 +653,11 @@ function ResultPlots({
     const trendAt = new Map(tFit.map((t, i) => [t, s0 !== 0 ? ((s0 - (result.sFit ?? [])[i]) / s0) * 100 : NaN]));
     const markers = xs.map((x) => (convAt.has(x) ? (convAt.get(x) as number) : NaN));
     const trend = xs.map((x) => (trendAt.has(x) ? (trendAt.get(x) as number) : NaN));
-    const finalLine = xs.map(() => (Number.isFinite(result.finalConversion) ? result.finalConversion * 100 : NaN));
-    return { xs, markers, trend, finalLine };
+    // "Final" line at the OBSERVED plateau (mean of the conversion tail), so it
+    // sits where the data levels off rather than at the model's extrapolated S∞.
+    const plateau = observedPlateauPct(result.conversion);
+    const finalLine = xs.map(() => (Number.isFinite(plateau) ? plateau : NaN));
+    return { xs, markers, trend, finalLine, plateau };
   }, [result]);
 
   // Trendline y evaluated over each chart's x (null when off / unfittable).
@@ -678,7 +695,7 @@ function ResultPlots({
     const series: Series[] = [
       { label: "conversion", stroke: "#16a34a", points: { show: true, size: 7 }, paths: NO_PATH },
       { label: "first-order", stroke: "#dc2626", width: 1.5, dash: [6, 4], points: { show: false } },
-      { label: "final", stroke: "#64748b", width: 1, dash: [2, 3], points: { show: false } },
+      { label: "final (data)", stroke: "#64748b", width: 1, dash: [2, 3], points: { show: false } },
     ];
     if (convTrendY) {
       data.push(convTrendY);
@@ -692,11 +709,6 @@ function ResultPlots({
     }
     return { data: data as [number[], ...number[][]], series };
   }, [conv, convTrendY, convTrend.color, convTrend.width, convTrend.style]);
-
-  const dataFinal = result.conversion.reduce(
-    (m, v) => (Number.isFinite(v) && v > m ? v : m),
-    -Infinity,
-  );
 
   const peakYLabel = run.useReference
     ? "peak signal (ratio to ref)"
@@ -763,7 +775,7 @@ function ResultPlots({
       },
       {
         id: "final",
-        label: "final",
+        label: "final (data)",
         y: conv.finalLine,
         styleHints: { color: "#64748b", lineStyle: "dotted", lineWidth: 1 },
       },
@@ -856,13 +868,17 @@ function ResultPlots({
         <div className="mt-4 grid gap-3 sm:grid-cols-4">
           <Metric label="Rate k" value={`${g(result.k)} /${timeUnit}`} />
           <Metric label="Half-life" value={`${g(result.halfLife)} ${timeUnit}`} />
-          <Metric label="Final conversion" value={`${(result.finalConversion * 100).toFixed(1)}%`} help="From the fitted plateau S∞." />
+          <Metric
+            label="Final conversion"
+            value={Number.isFinite(conv.plateau) ? `${conv.plateau.toFixed(1)}%` : "—"}
+            help={`Observed plateau (mean of the final points). First-order model extrapolates to ${(result.finalConversion * 100).toFixed(1)}%.`}
+          />
           <Metric label="R²" value={result.r2.toFixed(4)} />
         </div>
       ) : (
         <div className="mt-4 rounded-lg border border-amber-500/40 bg-amber-500/5 px-3 py-2 text-xs text-amber-700 dark:text-amber-400">
-          First-order fit did not converge. Final conversion (data) ={" "}
-          {Number.isFinite(dataFinal) ? `${(dataFinal * 100).toFixed(1)}%` : "—"}.
+          First-order fit did not converge. Final conversion (observed plateau) ={" "}
+          {Number.isFinite(conv.plateau) ? `${conv.plateau.toFixed(1)}%` : "—"}.
         </div>
       )}
     </Section>

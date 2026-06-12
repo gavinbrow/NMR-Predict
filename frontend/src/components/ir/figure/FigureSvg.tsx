@@ -19,9 +19,8 @@ const MARKER_LIMIT = 1000;
 /** Minimum drag (viewBox px) before a gesture counts as a zoom on that axis. */
 const DRAG_MIN = 6;
 
-const FRAME_COLOR = "#334155";
+/** Title / legend / annotation text colour (axis text is user-controlled). */
 const TEXT_COLOR = "#0f172a";
-const TICK_TEXT_COLOR = "#334155";
 
 const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, v));
 
@@ -126,6 +125,7 @@ export function FigureSvg({
 
   const { visible, xAxis, yAxis, marginTop, marginLeft, plotW, plotH, paths } = fig;
   const { width, height } = options;
+  const axisWeight = options.axisBold ? 700 : 400;
 
   // Legend box geometry (corner-anchored or custom-placed inside the plot area).
   const legend = options.legend;
@@ -339,16 +339,18 @@ export function FigureSvg({
           )}
         </g>
 
-        {/* Plot frame */}
-        <rect
-          x={marginLeft}
-          y={marginTop}
-          width={plotW}
-          height={plotH}
-          fill="none"
-          stroke={FRAME_COLOR}
-          strokeWidth={1}
-        />
+        {/* Plot frame (border box) */}
+        {options.frameShow && (
+          <rect
+            x={marginLeft}
+            y={marginTop}
+            width={plotW}
+            height={plotH}
+            fill="none"
+            stroke={options.frameColor}
+            strokeWidth={options.frameWidth}
+          />
+        )}
 
         {/* X ticks + labels */}
         {xAxis.ticks.map((t) => (
@@ -358,8 +360,8 @@ export function FigureSvg({
               x2={fig.sx(t)}
               y1={marginTop + plotH}
               y2={marginTop + plotH + 5}
-              stroke={FRAME_COLOR}
-              strokeWidth={1}
+              stroke={options.frameColor}
+              strokeWidth={options.frameWidth}
             />
             {options.x.showTickLabels && (
               <text
@@ -367,7 +369,8 @@ export function FigureSvg({
                 y={marginTop + plotH + 7 + options.tickFontSize}
                 textAnchor="middle"
                 fontSize={options.tickFontSize}
-                fill={TICK_TEXT_COLOR}
+                fontWeight={axisWeight}
+                fill={options.axisColor}
               >
                 {formatTick(t, xAxis.decimals)}
               </text>
@@ -383,8 +386,8 @@ export function FigureSvg({
               x2={marginLeft}
               y1={fig.sy(t)}
               y2={fig.sy(t)}
-              stroke={FRAME_COLOR}
-              strokeWidth={1}
+              stroke={options.frameColor}
+              strokeWidth={options.frameWidth}
             />
             {options.y.showTickLabels && (
               <text
@@ -392,7 +395,8 @@ export function FigureSvg({
                 y={fig.sy(t) + options.tickFontSize * 0.35}
                 textAnchor="end"
                 fontSize={options.tickFontSize}
-                fill={TICK_TEXT_COLOR}
+                fontWeight={axisWeight}
+                fill={options.axisColor}
               >
                 {formatTick(t, yAxis.decimals)}
               </text>
@@ -407,7 +411,8 @@ export function FigureSvg({
             y={height - options.axisFontSize * 0.5}
             textAnchor="middle"
             fontSize={options.axisFontSize}
-            fill={TEXT_COLOR}
+            fontWeight={axisWeight}
+            fill={options.axisColor}
           >
             {options.x.label}
           </text>
@@ -418,7 +423,8 @@ export function FigureSvg({
             y={marginTop + plotH / 2}
             textAnchor="middle"
             fontSize={options.axisFontSize}
-            fill={TEXT_COLOR}
+            fontWeight={axisWeight}
+            fill={options.axisColor}
             transform={`rotate(-90 ${10 + options.axisFontSize * 0.8} ${marginTop + plotH / 2})`}
           >
             {options.y.label}

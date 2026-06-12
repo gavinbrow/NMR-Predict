@@ -101,6 +101,13 @@ export interface FigureOptions {
   height: number;
   background: "white" | "transparent";
   reversedX: boolean;
+  /** Plot frame: the border box around the plot area, plus the tick marks. */
+  frameShow: boolean;
+  frameColor: string;
+  frameWidth: number;
+  /** Axis label + tick label text colour and weight. */
+  axisColor: string;
+  axisBold: boolean;
   x: AxisOptions;
   y: AxisOptions;
   series: SeriesStyle[];
@@ -159,6 +166,11 @@ export function defaultFigureOptions(data: FigureData): FigureOptions {
     height: 560,
     background: "white",
     reversedX: data.reversedX ?? false,
+    frameShow: true,
+    frameColor: "#334155",
+    frameWidth: 1,
+    axisColor: "#0f172a",
+    axisBold: false,
     x: defaultAxisOptions(data.xLabel),
     y: defaultAxisOptions(data.yLabel),
     series: data.series.map(defaultSeriesStyle),

@@ -32,6 +32,8 @@ export interface IrChartProps {
   reversedX?: boolean;
   /** Show uPlot's built-in legend below the plot. */
   legend?: boolean;
+  /** Draw axis gridlines (default true). Off gives a clean look for stacked plots. */
+  grid?: boolean;
   /** Translucent windows drawn behind the data (redraw-only; no recreate). */
   bands?: IrChartBand[];
   /**
@@ -67,6 +69,7 @@ export const IrChart = forwardRef<IrChartHandle, IrChartProps>(function IrChart(
     yLabel,
     reversedX = false,
     legend = false,
+    grid = true,
     bands,
     dragMode = "zoom",
     onSelectWindow,
@@ -103,6 +106,7 @@ export const IrChart = forwardRef<IrChartHandle, IrChartProps>(function IrChart(
     yLabel,
     reversedX,
     legend,
+    grid,
     dragMode,
     height,
   });
@@ -142,8 +146,8 @@ export const IrChart = forwardRef<IrChartHandle, IrChartProps>(function IrChart(
       // drag rectangle but leave the scale alone and report the window instead.
       cursor: { drag: { x: true, y: false, setScale: dragMode === "zoom" } },
       axes: [
-        { label: xLabel, labelGap: 8, grid: AXIS_GRID },
-        { label: yLabel, grid: AXIS_GRID },
+        { label: xLabel, labelGap: 8, grid: grid ? AXIS_GRID : { show: false } },
+        { label: yLabel, grid: grid ? AXIS_GRID : { show: false } },
       ],
       series: [{}, ...series],
       hooks: {

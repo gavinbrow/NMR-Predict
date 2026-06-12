@@ -503,6 +503,47 @@ export function FigureControls({ data, options, onChange }: FigureControlsProps)
         </div>
       </Section>
 
+      <Section title="Axes & frame" defaultOpen={false}>
+        <div className="grid gap-3">
+          <CheckLine
+            label="Show border box"
+            checked={options.frameShow}
+            onChange={(v) => patch({ frameShow: v })}
+          />
+          <div className="grid grid-cols-2 items-end gap-2">
+            <ColorField
+              label="Axis & border colour"
+              value={options.frameColor}
+              onChange={(v) => patch({ frameColor: v })}
+            />
+            <NumField
+              label="Border / tick width"
+              value={options.frameWidth}
+              onChange={(v) => patch({ frameWidth: v })}
+              step={0.5}
+              min={0.5}
+            />
+          </div>
+          <div className="grid grid-cols-2 items-end gap-2">
+            <ColorField
+              label="Axis text colour"
+              value={options.axisColor}
+              onChange={(v) => patch({ axisColor: v })}
+            />
+            <div className="pb-2">
+              <CheckLine
+                label="Bold axis text"
+                checked={options.axisBold}
+                onChange={(v) => patch({ axisBold: v })}
+              />
+            </div>
+          </div>
+          <p className="text-[11px] text-muted-foreground">
+            Turn off the border for an open look; gridlines are toggled per-axis below.
+          </p>
+        </div>
+      </Section>
+
       <Section title="X axis" defaultOpen={false}>
         <AxisControls
           axis={options.x}

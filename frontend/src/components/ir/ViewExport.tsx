@@ -53,6 +53,11 @@ export function ViewExport({ spectra }: ViewExportProps) {
   const [yaxis, setYaxis] = useState<YAxis>("%T");
   const [method, setMethod] = useState<BaselineMethod>("None");
 
+  // Vertical stacking (waterfall) offset between displayed spectra. 0 = overlaid.
+  const [stackOffset, setStackOffset] = useState(0);
+  // Overlay-chart gridlines (off gives a clean look for stacked comparisons).
+  const [chartGrid, setChartGrid] = useState(true);
+
   const grid = useMemo(() => commonGrid(spectra), [spectra]);
   const gridMin = grid.length ? Math.round(grid[0]) : 0;
   const gridMax = grid.length ? Math.round(grid[grid.length - 1]) : 0;
@@ -130,6 +135,35 @@ export function ViewExport({ spectra }: ViewExportProps) {
     [displayed, grid, yaxis, method, p1, p2, anchors],
   );
 
+  // A "nice" auto offset = the largest single-spectrum span, so a stack just
+  // clears each trace. Seeds the Auto button; scales with %T vs Absorbance.
+  const autoOffset = useMemo(() => {
+    let span = 0;
+    for (const col of columns) {
+      let lo = Infinity;
+      let hi = -Infinity;
+      for (const v of col) {
+        if (!Number.isFinite(v)) continue;
+        if (v < lo) lo = v;
+        if (v > hi) hi = v;
+      }
+      if (hi > lo) span = Math.max(span, hi - lo);
+    }
+    return span > 0 ? Number(span.toPrecision(3)) : 0;
+  }, [columns]);
+
+  // Displayed columns shifted into a waterfall: spectrum i lifted by i·offset
+  // (display only — exports below stay on the true, unstacked data).
+  const stackedColumns = useMemo(
+    () =>
+      stackOffset === 0
+        ? columns
+        : columns.map((col, i) =>
+            col.map((v) => (Number.isFinite(v) ? v + i * stackOffset : v)),
+          ),
+    [columns, stackOffset],
+  );
+
   // Overlay chart data for uPlot.
   const { data, series } = useMemo(() => {
     const seriesDefs: Series[] = displayed.map((spec, i) => ({
@@ -139,10 +173,10 @@ export function ViewExport({ spectra }: ViewExportProps) {
       points: { show: false },
     }));
     return {
-      data: [grid, ...columns] as [number[], ...number[][]],
+      data: [grid, ...stackedColumns] as [number[], ...number[][]],
       series: seriesDefs,
     };
-  }, [displayed, grid, columns]);
+  }, [displayed, grid, stackedColumns]);
 
   const yLabel = yaxis === "Absorbance" ? "Absorbance" : "Transmittance (%T)";
   const showLegend = displayed.length <= 20;
@@ -151,13 +185,13 @@ export function ViewExport({ spectra }: ViewExportProps) {
   const figureData = useMemo<FigureData>(
     () => ({
       x: grid,
-      series: displayed.map((spec, i) => ({ id: spec.name, label: spec.name, y: columns[i] })),
+      series: displayed.map((spec, i) => ({ id: spec.name, label: spec.name, y: stackedColumns[i] })),
       xLabel: "Wavenumber (cm⁻¹)",
-      yLabel,
+      yLabel: stackOffset === 0 ? yLabel : `${yLabel} (stacked)`,
       reversedX: true,
       sourceName: "ir_overlay",
     }),
-    [displayed, grid, columns, yLabel],
+    [displayed, grid, stackedColumns, stackOffset, yLabel],
   );
   const [figureOptions, setFigureOptions] = useFigureOptions(figureData);
 
@@ -325,6 +359,46 @@ export function ViewExport({ spectra }: ViewExportProps) {
 
       {/* Overlay chart */}
       <div className="rounded-2xl border border-border/60 bg-card p-4 shadow-card">
+        {displayed.length >= 1 && (
+          <div className="mb-3 flex flex-wrap items-center gap-2">
+            {displayed.length >= 2 && (
+              <>
+                <Label className="text-xs text-muted-foreground">Stack offset</Label>
+                <Input
+                  type="number"
+                  value={stackOffset}
+                  step={autoOffset > 0 ? Number((autoOffset / 10).toPrecision(2)) : 1}
+                  onChange={(e) => setStackOffset(Number(e.target.value) || 0)}
+                  className="h-8 w-28"
+                />
+                <span className="text-[11px] text-muted-foreground">{yaxis}</span>
+                <Button variant="outline" size="sm" onClick={() => setStackOffset(autoOffset)}>
+                  Auto
+                </Button>
+                {stackOffset !== 0 && (
+                  <Button variant="ghost" size="sm" onClick={() => setStackOffset(0)}>
+                    Reset
+                  </Button>
+                )}
+                <span className="mx-1 h-5 w-px bg-border" />
+              </>
+            )}
+            <label className="flex items-center gap-2 text-xs text-foreground">
+              <input
+                type="checkbox"
+                checked={chartGrid}
+                onChange={(e) => setChartGrid(e.target.checked)}
+                className="h-3.5 w-3.5"
+              />
+              Gridlines
+            </label>
+            {displayed.length >= 2 && (
+              <p className="ml-auto text-[11px] text-muted-foreground">
+                Stacking is display only — exports use raw data.
+              </p>
+            )}
+          </div>
+        )}
         {displayed.length === 0 ? (
           <p className="py-20 text-center text-sm text-muted-foreground">
             Select at least one spectrum to display.
@@ -335,7 +409,8 @@ export function ViewExport({ spectra }: ViewExportProps) {
             series={series}
             reversedX
             legend={showLegend}
-            yLabel={yLabel}
+            grid={chartGrid}
+            yLabel={stackOffset === 0 ? yLabel : `${yLabel} (stacked)`}
             height={560}
           />
         )}
