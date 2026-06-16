@@ -19,6 +19,7 @@ import { BatchPanel } from "@/components/maldi/BatchPanel";
 import { CompareView, type ComparisonSpectrum } from "@/components/maldi/CompareView";
 import { CopolymerPanel } from "@/components/maldi/CopolymerPanel";
 import { EndGroupPanel } from "@/components/maldi/EndGroupPanel";
+import { MaldiFigurePanel } from "@/components/maldi/figure/MaldiFigurePanel";
 import { FormulaTools, type IsotopeOverlay } from "@/components/maldi/FormulaTools";
 import { ImportPanel } from "@/components/maldi/ImportPanel";
 import { InterpretationPanel, type ExportKind } from "@/components/maldi/InterpretationPanel";
@@ -250,6 +251,12 @@ const Maldi = () => {
       })
       .filter((x): x is StackSpectrum => x !== null);
   }, [documents, activeDocId, processed, raw]);
+
+  // Other open spectra (excluding the active one) — overlayable in the figure maker.
+  const otherFigureSpectra = useMemo(
+    () => docSpectra.filter((d) => d.id !== activeDocId),
+    [docSpectra, activeDocId],
+  );
 
   // Verify the compute worker — with retries. A single transient miss (e.g. the
   // Vite dev re-optimization that fires the first time MALDI's worker-only deps
@@ -1290,6 +1297,7 @@ const Maldi = () => {
                   <Tabs defaultValue="table">
                     <TabsList className="flex flex-wrap">
                       <TabsTrigger value="table">Peak table</TabsTrigger>
+                      <TabsTrigger value="figure">Figure</TabsTrigger>
                       <TabsTrigger value="kendrick">Kendrick</TabsTrigger>
                       <TabsTrigger value="formula">Formula</TabsTrigger>
                       <TabsTrigger value="mw">Mol. weight</TabsTrigger>
@@ -1305,6 +1313,15 @@ const Maldi = () => {
                           onSelectPeak={(id) => highlightPeaks(new Set([id]))}
                         />
                       </div>
+                    </TabsContent>
+                    <TabsContent value="figure" className="mt-3">
+                      <MaldiFigurePanel
+                        active={processed ?? raw}
+                        activeName={sourceName || projectName}
+                        peaks={peaks}
+                        highlightedPeakIds={highlightedPeakIds}
+                        otherSpectra={otherFigureSpectra}
+                      />
                     </TabsContent>
                     <TabsContent value="kendrick" className="mt-3">
                       <div className="h-[420px]">

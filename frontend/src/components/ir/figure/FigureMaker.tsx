@@ -86,7 +86,8 @@ export function FigureMaker({ data, options, onChange }: FigureMakerProps) {
         <div className="rounded-2xl border border-border/60 bg-card p-4 shadow-card">
           <div className="mb-2 flex items-center justify-between gap-2">
             <p className="text-[11px] text-muted-foreground">
-              Drag across the plot to zoom (drag sideways for x-only) · drag the legend to move it.
+              Scroll to scale the y-axis (bring peaks up / down) · drag to zoom in · double-click to
+              reset · drag the legend to move it.
             </p>
             <Button variant="ghost" size="sm" disabled={!zoomed} onClick={resetZoom}>
               <RotateCcw className="mr-1.5 h-3.5 w-3.5" />
@@ -102,6 +103,7 @@ export function FigureMaker({ data, options, onChange }: FigureMakerProps) {
               options={options}
               interactive
               onZoom={handleZoom}
+              onResetZoom={resetZoom}
               onLegendMove={handleLegendMove}
               className="h-auto w-full"
             />

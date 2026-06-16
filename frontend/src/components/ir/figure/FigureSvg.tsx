@@ -1,10 +1,13 @@
-import { useId, useMemo, useRef, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 import {
   dashArray,
   decimateMinMax,
   formatTick,
+  pickVisibleLabels,
   resolveAxis,
   seriesPathD,
+  sticksPathD,
+  windowSlice,
   type FigureData,
   type FigureOptions,
   type FigureSeriesData,
@@ -24,6 +27,11 @@ const TEXT_COLOR = "#0f172a";
 
 const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, v));
 
+/** Scroll-up / scroll-down y-axis scale factors (smaller max → taller peaks),
+ *  matching the live MALDI viewer's wheel behaviour. */
+const Y_SCALE_IN = 0.8;
+const Y_SCALE_OUT = 1.25;
+
 /** A drag in progress on the interactive preview. Coordinates are viewBox px. */
 type Drag =
   | { kind: "zoom"; x0: number; y0: number; x1: number; y1: number }
@@ -41,6 +49,8 @@ export interface FigureSvgProps {
   interactive?: boolean;
   /** A drag-zoom committed a new range (an axis is omitted if barely dragged). */
   onZoom?: (next: { x?: { min: number; max: number }; y?: { min: number; max: number } }) => void;
+  /** Scrolling fully back out asks the host to clear manual bounds (auto fit). */
+  onResetZoom?: () => void;
   /** The legend was dropped; position is the box top-left as plot-area fractions. */
   onLegendMove?: (custom: { x: number; y: number }) => void;
   className?: string;
@@ -50,9 +60,10 @@ export interface FigureSvgProps {
  * The figure renderer: a pure SVG drawing of the data under the user's options.
  * The on-screen preview and the exported file come from this one component, so
  * what you see is exactly what you save (SVG = serialization, PNG = raster of
- * the same SVG). When `interactive`, the preview also supports drag-to-zoom and
- * a draggable legend; both write back through the callbacks into `options`, so
- * exports faithfully reproduce the zoom and legend placement.
+ * the same SVG). When `interactive`, the preview also supports scroll-to-zoom
+ * (wheel = zoom x around the cursor, shift/horizontal = pan, alt = zoom y),
+ * drag-to-zoom, and a draggable legend; all write back through the callbacks
+ * into `options`, so exports faithfully reproduce the zoom and legend placement.
  */
 export function FigureSvg({
   data,
@@ -60,12 +71,16 @@ export function FigureSvg({
   decimate = true,
   interactive = false,
   onZoom,
+  onResetZoom,
   onLegendMove,
   className,
 }: FigureSvgProps) {
   // useId() returns ":r1:"-style ids; strip the colons for url(#…) references.
   const clipId = `figclip-${useId().replace(/[^a-zA-Z0-9_-]/g, "")}`;
   const svgRef = useRef<SVGSVGElement | null>(null);
+  // The wheel handler is attached as a non-passive native listener (so it can
+  // preventDefault the page scroll); this ref always holds the latest closure.
+  const wheelRef = useRef<((e: WheelEvent) => void) | null>(null);
   const [drag, setDrag] = useState<Drag | null>(null);
 
   const fig = useMemo(() => {
@@ -73,11 +88,13 @@ export function FigureSvg({
       .map((st) => ({ st, sd: data.series.find((s) => s.id === st.id) }))
       .filter((p): p is { st: SeriesStyle; sd: FigureSeriesData } => p.st.visible && !!p.sd);
 
-    const xAxis = resolveAxis(options.x, data.x);
-    const yAxis = resolveAxis(
-      options.y,
-      visible.flatMap((v) => v.sd.y),
-    );
+    // Series may carry their own x (mass-spectra overlays / stick series); the
+    // x-axis spans the union, falling back to the shared grid when none do.
+    const anyOwnX = visible.some((v) => v.sd.x);
+    const xValues = anyOwnX ? visible.flatMap((v) => v.sd.x ?? data.x) : data.x;
+    const yValues = visible.flatMap((v) => v.sd.y);
+    const xAxis = resolveAxis(options.x, xValues);
+    const yAxis = resolveAxis(options.y, yValues);
 
     // Margins sized from the fonts and what's shown on each side.
     const titleH = options.title ? options.titleFontSize * 1.6 : 0;
@@ -101,14 +118,39 @@ export function FigureSvg({
     const sx = (v: number) =>
       marginLeft + ((options.reversedX ? xAxis.hi - v : v - xAxis.lo) / xSpan) * plotW;
     const sy = (v: number) => marginTop + ((yAxis.hi - v) / ySpan) * plotH;
+    // Stems grow from the zero line when it is in view, else from the axis floor.
+    const stickBaseY = sy(yAxis.lo <= 0 && yAxis.hi >= 0 ? 0 : yAxis.lo);
 
     const paths = visible.map(({ st, sd }) => {
-      let xs = data.x;
+      const ownX = sd.x ?? data.x;
+      if (st.kind === "sticks") {
+        // Stems are the sparse peak set already — never decimated.
+        const d = sticksPathD(ownX, sd.y, sx, sy, stickBaseY);
+        const markers =
+          st.markers && sd.y.length <= MARKER_LIMIT
+            ? ownX
+                .map((xv, i) => ({ cx: sx(xv), cy: sy(sd.y[i]), ok: Number.isFinite(xv) && Number.isFinite(sd.y[i]) }))
+                .filter((p) => p.ok)
+            : [];
+        return { st, d, markers };
+      }
+      let xs = ownX;
       let ys = sd.y;
-      if (decimate && ys.length > DECIMATE_ABOVE) {
-        const dec = decimateMinMax(xs, ys, DECIMATE_BUCKETS);
-        xs = dec.x;
-        ys = dec.y;
+      if (decimate) {
+        // Clip to the visible x-window FIRST, then decimate only that window to
+        // roughly one column-pair per on-screen pixel. Decimating the whole
+        // series (as before) meant a zoomed-in view drew from a handful of
+        // global buckets — fine structure like isotopes vanished. Now zooming
+        // in resolves it, while the full-resolution export (decimate=false) is
+        // untouched.
+        const [a, b] = windowSlice(ownX, xAxis.lo, xAxis.hi);
+        xs = ownX.slice(a, b + 1);
+        ys = sd.y.slice(a, b + 1);
+        if (xs.length > DECIMATE_ABOVE) {
+          const dec = decimateMinMax(xs, ys, Math.max(DECIMATE_BUCKETS, Math.ceil(plotW)));
+          xs = dec.x;
+          ys = dec.y;
+        }
       }
       const d = st.lineStyle !== "none" ? seriesPathD(xs, ys, sx, sy) : "";
       const markers =
@@ -156,23 +198,77 @@ export function FigureSvg({
   const lx = drag?.kind === "legend" ? drag.lx : baseLx;
   const ly = drag?.kind === "legend" ? drag.ly : baseLy;
 
+  // Data-anchored peak labels (m/z values etc.): project to pixels, drop those
+  // scrolled out of the x-range, then thin to the most intense non-overlapping
+  // few so a dense spectrum stays legible.
+  const peakLabelEls = useMemo(() => {
+    const pl = options.peakLabels;
+    const labels = data.peakLabels;
+    if (!pl.show || !labels || labels.length === 0) return [];
+    const eps = 0.5;
+    const projected = labels
+      .map((p) => ({
+        id: p.id,
+        px: fig.sx(p.x),
+        py: fig.sy(p.y),
+        weight: Number.isFinite(p.y) ? p.y : -Infinity,
+        text: pl.decimals >= 0 && Number.isFinite(p.x) ? p.x.toFixed(pl.decimals) : p.text,
+      }))
+      .filter(
+        (p) =>
+          Number.isFinite(p.px) &&
+          Number.isFinite(p.weight) &&
+          p.px >= marginLeft - eps &&
+          p.px <= marginLeft + plotW + eps,
+      );
+    return pickVisibleLabels(projected, pl.maxLabels, pl.minGap);
+  }, [data.peakLabels, options.peakLabels, fig, marginLeft, plotW]);
+
   // --- interactive pointer handling -------------------------------------------
 
-  const toViewbox = (e: React.PointerEvent) => {
+  // Map client (screen) coordinates into the SVG's viewBox space. The SVG scales
+  // to its container (w-full / h-auto), so divide by the measured box, not width.
+  const clientToVb = (clientX: number, clientY: number) => {
     const svg = svgRef.current;
     if (!svg) return { vx: 0, vy: 0 };
     const rect = svg.getBoundingClientRect();
     return {
-      vx: rect.width ? ((e.clientX - rect.left) / rect.width) * width : 0,
-      vy: rect.height ? ((e.clientY - rect.top) / rect.height) * height : 0,
+      vx: rect.width ? ((clientX - rect.left) / rect.width) * width : 0,
+      vy: rect.height ? ((clientY - rect.top) / rect.height) * height : 0,
     };
   };
+  const toViewbox = (e: React.PointerEvent) => clientToVb(e.clientX, e.clientY);
   const invX = (vx: number) => {
     const frac = (vx - marginLeft) / plotW;
     const span = xAxis.hi - xAxis.lo;
     return options.reversedX ? xAxis.hi - frac * span : xAxis.lo + frac * span;
   };
   const invY = (vy: number) => yAxis.hi - ((vy - marginTop) / plotH) * (yAxis.hi - yAxis.lo);
+
+  // Scroll = scale the intensity (y) axis with its floor pinned, so peaks grow
+  // and shrink from the baseline — the same gesture as the live MALDI viewer
+  // (scroll up → smaller max → taller peaks, revealing small ones; down →
+  // shorter). The x-axis is left to drag-to-zoom. Kept in a ref + native
+  // non-passive listener so we can preventDefault the page scroll over the plot.
+  wheelRef.current = (e: WheelEvent) => {
+    if (!interactive || !onZoom || e.deltaY === 0) return;
+    const { vx, vy } = clientToVb(e.clientX, e.clientY);
+    const inPlot =
+      vx >= marginLeft && vx <= marginLeft + plotW && vy >= marginTop && vy <= marginTop + plotH;
+    if (!inPlot) return;
+    e.preventDefault();
+    const floor = yAxis.lo;
+    const max = floor + (yAxis.hi - floor) * (e.deltaY < 0 ? Y_SCALE_IN : Y_SCALE_OUT);
+    if (max > floor) onZoom({ y: { min: floor, max } });
+  };
+
+  useEffect(() => {
+    const svg = svgRef.current;
+    if (!svg || !interactive) return;
+    const handler = (e: WheelEvent) => wheelRef.current?.(e);
+    svg.addEventListener("wheel", handler, { passive: false });
+    return () => svg.removeEventListener("wheel", handler);
+  }, [interactive]);
 
   const onPointerDown = (e: React.PointerEvent) => {
     if (!interactive) return;
@@ -258,6 +354,8 @@ export function FigureSvg({
         onPointerMove,
         onPointerUp: endDrag,
         onPointerCancel: () => setDrag(null),
+        // Double-click anywhere on the plot snaps both axes back to auto-fit.
+        onDoubleClick: () => onResetZoom?.(),
         style: { cursor: "crosshair", touchAction: "none" as const },
       }
     : {};
@@ -504,6 +602,29 @@ export function FigureSvg({
             {a.text}
           </text>
         ))}
+
+        {/* Data-anchored peak labels (m/z values over mass-spectrum peaks) */}
+        {peakLabelEls.map((p) => {
+          const labelY = Math.max(marginTop + options.peakLabels.fontSize, p.py - options.peakLabels.offset);
+          return (
+            <text
+              key={`pl-${p.id}`}
+              x={p.px}
+              y={labelY}
+              textAnchor={options.peakLabels.rotation === 0 ? "middle" : "start"}
+              fontSize={options.peakLabels.fontSize}
+              fontWeight={options.peakLabels.bold ? 700 : 400}
+              fill={options.peakLabels.color}
+              transform={
+                options.peakLabels.rotation
+                  ? `rotate(${options.peakLabels.rotation} ${p.px} ${labelY})`
+                  : undefined
+              }
+            >
+              {p.text}
+            </text>
+          );
+        })}
 
         {/* Rubber-band zoom rectangle */}
         {drag?.kind === "zoom" && (

@@ -5,10 +5,13 @@ import {
   defaultFigureOptions,
   formatTick,
   niceTicks,
+  pickVisibleLabels,
   reconcileFigureOptions,
   resolveAxis,
   seriesPathD,
+  sticksPathD,
   tickDecimals,
+  windowSlice,
   type FigureData,
 } from "../figure";
 
@@ -168,6 +171,32 @@ describe("decimateMinMax", () => {
   });
 });
 
+describe("windowSlice", () => {
+  const x = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9];
+
+  it("clips to the window with one-point padding on each side", () => {
+    // 3..6 are indices 3..6; padded out by one → 2..7.
+    expect(windowSlice(x, 3, 6)).toEqual([2, 7]);
+  });
+
+  it("returns the whole range when the window covers all the data", () => {
+    expect(windowSlice(x, -5, 100)).toEqual([0, 9]);
+  });
+
+  it("keeps the bracketing points when the window lands between samples", () => {
+    // Nothing sits in (12,18); the slice still spans the 10 and 20 either side.
+    expect(windowSlice([0, 10, 20, 30], 12, 18)).toEqual([1, 2]);
+  });
+
+  it("yields an empty slice for an empty array", () => {
+    expect(windowSlice([], 0, 1)).toEqual([0, -1]);
+  });
+
+  it("does not clip a non-ascending series (degrades to the full range)", () => {
+    expect(windowSlice([9, 8, 7, 6], 7, 8)).toEqual([0, 3]);
+  });
+});
+
 describe("seriesPathD", () => {
   const id = (v: number) => v;
 
@@ -182,6 +211,94 @@ describe("seriesPathD", () => {
 
   it("returns an empty path with no finite points", () => {
     expect(seriesPathD([0, 1], [NaN, NaN], id, id)).toBe("");
+  });
+});
+
+describe("sticksPathD", () => {
+  const id = (v: number) => v;
+
+  it("draws an isolated vertical stem from the baseline to each point", () => {
+    expect(sticksPathD([0, 1], [3, 5], id, id, 0)).toBe("M0 0L0 3M1 0L1 5");
+  });
+
+  it("skips non-finite points (no stem)", () => {
+    expect(sticksPathD([0, 1, 2], [3, NaN, 4], id, id, 0)).toBe("M0 0L0 3M2 0L2 4");
+  });
+
+  it("uses the provided baseline y for every stem", () => {
+    expect(sticksPathD([2], [7], id, id, 10)).toBe("M2 10L2 7");
+  });
+});
+
+describe("pickVisibleLabels", () => {
+  it("keeps the most intense when labels crowd within minGap", () => {
+    const items = [
+      { px: 10, weight: 1 },
+      { px: 12, weight: 5 }, // within 20px of both neighbours; tallest wins
+      { px: 14, weight: 2 },
+    ];
+    const kept = pickVisibleLabels(items, 10, 20);
+    expect(kept).toEqual([{ px: 12, weight: 5 }]);
+  });
+
+  it("keeps well-separated labels and returns them in original order", () => {
+    const items = [
+      { px: 0, weight: 1 },
+      { px: 100, weight: 3 },
+      { px: 200, weight: 2 },
+    ];
+    const kept = pickVisibleLabels(items, 10, 20);
+    expect(kept.map((k) => k.px)).toEqual([0, 100, 200]);
+  });
+
+  it("caps at maxLabels (the most intense survive)", () => {
+    const items = [
+      { px: 0, weight: 1 },
+      { px: 100, weight: 9 },
+      { px: 200, weight: 5 },
+    ];
+    const kept = pickVisibleLabels(items, 2, 10);
+    expect(kept.map((k) => k.weight)).toEqual([9, 5]); // px 0 (weight 1) dropped
+  });
+
+  it("returns nothing for a zero cap", () => {
+    expect(pickVisibleLabels([{ px: 1, weight: 1 }], 0, 10)).toEqual([]);
+  });
+
+  it("ignores spacing when minGap is 0", () => {
+    const items = [
+      { px: 5, weight: 1 },
+      { px: 5, weight: 2 },
+    ];
+    expect(pickVisibleLabels(items, 10, 0)).toHaveLength(2);
+  });
+});
+
+describe("sticks & peak-label defaults", () => {
+  it("series default to line; a styleHint can request sticks", () => {
+    const data = makeData(["a", "b"]);
+    data.series[1].styleHints = { kind: "sticks" };
+    const opts = defaultFigureOptions(data);
+    expect(opts.series[0].kind).toBe("line");
+    expect(opts.series[1].kind).toBe("sticks");
+  });
+
+  it("peak labels turn on only when the host supplies them", () => {
+    expect(defaultFigureOptions(makeData(["a"])).peakLabels.show).toBe(false);
+    const withLabels: FigureData = {
+      ...makeData(["a"]),
+      peakLabels: [{ id: "p", x: 1, y: 2, text: "1.00" }],
+    };
+    expect(defaultFigureOptions(withLabels).peakLabels.show).toBe(true);
+  });
+
+  it("reconcile preserves the series kind across data updates", () => {
+    const data = makeData(["a"]);
+    data.series[0].styleHints = { kind: "sticks" };
+    const prev = defaultFigureOptions(data);
+    const next = reconcileFigureOptions(prev, makeData(["a", "b"]));
+    expect(next.series[0].kind).toBe("sticks");
+    expect(next.series[1].kind).toBe("line");
   });
 });
 
