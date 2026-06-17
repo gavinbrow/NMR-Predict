@@ -2,20 +2,29 @@
 
 This is the production setup where the **static frontend** is served by
 **Cloudflare Pages** at `https://nmr.chembases.com`, and the **FastAPI backend**
-runs on your own Windows machine, published to `https://api.nmr.chembases.com`
+runs on your own Windows machine, published to `https://nmr-api.chembases.com`
 through a **Cloudflare Tunnel**.
+
+> **Why `nmr-api.chembases.com` and not `api.nmr.chembases.com`?** Cloudflare's
+> free Universal SSL certificate only covers the zone apex and **one** level of
+> subdomain (`chembases.com` and `*.chembases.com`). A two-level name like
+> `api.nmr.chembases.com` gets **no edge certificate**, so the TLS handshake
+> fails in the browser with `ERR_SSL_VERSION_OR_CIPHER_MISMATCH`. Keeping the
+> API on a single-level subdomain sidesteps that with no paid Advanced
+> Certificate Manager. (If you ever want the `api.nmr.…` form back, ACM is the
+> way to get a cert for it.)
 
 It's still **one git repo** — Cloudflare Pages builds only the `frontend/`
 subdirectory and ignores `backend/`. No repo split needed.
 
 ```
- Browser ──HTTPS──> nmr.chembases.com        (Cloudflare Pages: static SPA)
+ Browser ──HTTPS──> nmr.chembases.com         (Cloudflare Pages: static SPA)
     │
-    └────HTTPS(CORS)──> api.nmr.chembases.com (Cloudflare edge)
+    └────HTTPS(CORS)──> nmr-api.chembases.com  (Cloudflare edge)
                               │
                          Cloudflare Tunnel  (cloudflared on your PC)
                               │
-                         127.0.0.1:7999      (run-backend.bat → uvicorn)
+                         127.0.0.1:7999       (run-backend.bat → uvicorn)
 ```
 
 ---
@@ -52,7 +61,7 @@ Install cloudflared on the Windows box (<https://pkg.cloudflare.com>), then:
 ```
 cloudflared tunnel login                    # authorize the chembases.com zone
 cloudflared tunnel create nmr-backend       # prints a TUNNEL UUID + creds JSON
-cloudflared tunnel route dns nmr-backend api.nmr.chembases.com
+cloudflared tunnel route dns nmr-backend nmr-api.chembases.com
 ```
 
 Copy `deploy/cloudflared/config.yml` to `%USERPROFILE%\.cloudflared\config.yml`
@@ -69,7 +78,7 @@ To keep it running across reboots/logout, install it as a service:
 cloudflared service install
 ```
 
-The `tunnel route dns` command creates the `api.nmr.chembases.com` DNS record
+The `tunnel route dns` command creates the `nmr-api.chembases.com` DNS record
 (a proxied CNAME to the tunnel) automatically — you don't add it by hand.
 
 ## 3. Frontend on Cloudflare Pages
@@ -89,7 +98,7 @@ Environment variables (Pages → Settings → Environment variables → Producti
 
 | Variable             | Value                            | Why |
 | -------------------- | -------------------------------- | --- |
-| `VITE_NMR_API_URL`   | `https://api.nmr.chembases.com`  | Points the SPA's axios client at the tunnel. |
+| `VITE_NMR_API_URL`   | `https://nmr-api.chembases.com`  | Points the SPA's axios client at the tunnel. |
 | `NODE_VERSION`       | `20`                             | Match a current LTS. |
 
 The vite 8 vs `@vitejs/plugin-react-swc` peer-dependency conflict is handled by
@@ -112,7 +121,7 @@ The backend has **no built-in auth**, and it's public, so put a Cloudflare
 rate-limit rule in front of the compute endpoint.
 
 **Security → WAF → Rate limiting rules → Create**, scoped to
-`api.nmr.chembases.com`:
+`nmr-api.chembases.com`:
 
 - **Match:** `URI Path` contains `/predict` (and optionally `/validate`)
 - **Method:** `POST`
@@ -127,20 +136,26 @@ the WAF/Bot tools can be layered on later if abuse shows up.
 
 ```
 # Backend reachable through the tunnel:
-curl https://api.nmr.chembases.com/health           # -> {"status":"ok"}
+curl https://nmr-api.chembases.com/health           # -> {"status":"ok"}
 
 # ORCA is disabled in production: still listed by /engines but with
 # "ready": false (so the UI greys out its toggle); /predict refuses to run it.
-curl https://api.nmr.chembases.com/engines          # orca present, ready:false
+curl https://nmr-api.chembases.com/engines          # orca present, ready:false
 
 # Frontend loads and talks to the API:
 #   open https://nmr.chembases.com, run a CDK/CASCADE prediction,
-#   confirm the browser Network tab shows calls to api.nmr.chembases.com
+#   confirm the browser Network tab shows calls to nmr-api.chembases.com
 #   with no CORS errors.
 ```
 
 If the browser reports a CORS error, the SPA's origin isn't in
 `NMR_ALLOWED_ORIGINS` — fix the value in `run-backend.bat` and restart it.
+
+If instead you see `ERR_SSL_VERSION_OR_CIPHER_MISMATCH` on the API calls, that's
+**not** CORS — it's a missing TLS cert. Confirm the API host is a single-level
+subdomain (`nmr-api.chembases.com`, covered by Universal SSL) and that
+`VITE_NMR_API_URL` in the Pages build env points at it (then redeploy, since
+`VITE_` vars are baked in at build time).
 
 ---
 

@@ -10,7 +10,7 @@
 # ---------------------------------------------------------------------------
 #   cloudflared tunnel login                       # opens browser; authorize chembases.com
 #   cloudflared tunnel create nmr-backend          # prints a TUNNEL UUID + creates a creds JSON
-#   cloudflared tunnel route dns nmr-backend api.nmr.chembases.com
+#   cloudflared tunnel route dns nmr-backend nmr-api.chembases.com
 #
 # Then set the UUID + credentials path below and start it:
 #   cloudflared tunnel run nmr-backend
@@ -25,7 +25,13 @@ credentials-file: C:\Users\REPLACE_WINDOWS_USER\.cloudflared\REPLACE_WITH_TUNNEL
 ingress:
   # The public API hostname -> the loopback backend started by run-backend.bat.
   # "same port" as the local dev/prod backend: 7999.
-  - hostname: api.nmr.chembases.com
+  #
+  # Single-level subdomain on purpose: Cloudflare's free Universal SSL covers
+  # chembases.com and *.chembases.com (one level) but NOT a two-level name like
+  # api.nmr.chembases.com, which would fail the TLS handshake
+  # (ERR_SSL_VERSION_OR_CIPHER_MISMATCH). nmr-api.chembases.com is one level, so
+  # it gets an edge cert automatically with no Advanced Certificate Manager.
+  - hostname: nmr-api.chembases.com
     service: http://localhost:7999
 
   # Required catch-all: anything not matched above gets a 404 instead of being

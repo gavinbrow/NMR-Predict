@@ -8,7 +8,8 @@ REM  Runs ONLY the FastAPI/uvicorn backend, bound to 127.0.0.1:7999, in
 REM  production mode. No frontend build, no Vite dev server - nothing else.
 REM  The static frontend is hosted separately on Cloudflare Pages
 REM  (nmr.chembases.com); this process is what a `cloudflared` tunnel points at
-REM  to publish the API at api.nmr.chembases.com.
+REM  to publish the API at nmr-api.chembases.com (a SINGLE-level subdomain, so
+REM  Cloudflare's free Universal SSL issues it an edge cert automatically).
 REM
 REM  Why 127.0.0.1 and not 0.0.0.0: cloudflared connects from THIS machine, so
 REM  binding loopback keeps the API off the LAN and the public internet
@@ -198,7 +199,7 @@ echo ------------------------------------------------------------
 echo   This process listens on http://127.0.0.1:%PORT% only (not the LAN).
 echo   Start the tunnel in a SEPARATE window to publish the API:
 echo       cloudflared tunnel run nmr-backend
-echo   That maps api.nmr.chembases.com -^> http://localhost:%PORT%.
+echo   That maps nmr-api.chembases.com -^> http://localhost:%PORT%.
 echo   See deploy\cloudflared\config.yml and DEPLOY.md for setup.
 echo ------------------------------------------------------------
 echo.
