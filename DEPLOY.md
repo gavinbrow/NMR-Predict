@@ -90,8 +90,11 @@ Environment variables (Pages → Settings → Environment variables → Producti
 | Variable             | Value                            | Why |
 | -------------------- | -------------------------------- | --- |
 | `VITE_NMR_API_URL`   | `https://api.nmr.chembases.com`  | Points the SPA's axios client at the tunnel. |
-| `NPM_FLAGS`          | `--legacy-peer-deps`             | vite 8 vs `@vitejs/plugin-react-swc` peer range (same flag the .bat uses). |
 | `NODE_VERSION`       | `20`                             | Match a current LTS. |
+
+The vite 8 vs `@vitejs/plugin-react-swc` peer-dependency conflict is handled by
+the committed `frontend/.npmrc` (`legacy-peer-deps=true`), so `npm ci` works in
+CI without an `NPM_FLAGS` dashboard variable.
 
 Because **Root directory = `frontend`**, Pages runs the build inside that folder
 and publishes `frontend/dist`; `backend/` is cloned to the build machine but
