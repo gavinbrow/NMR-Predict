@@ -1,0 +1,7 @@
+# Cloudflare Pages SPA fallback.
+# react-router uses real paths (/maldi, /prediction, /ir, ...). Without this,
+# a hard refresh or deep link to one of those returns Pages' 404 because no
+# matching file exists. Rewrite every unmatched path to index.html (200, not a
+# redirect) so the client-side router takes over. Real asset files are served
+# directly and never reach this rule.
+/*    /index.html   200

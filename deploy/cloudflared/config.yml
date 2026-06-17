@@ -1,0 +1,38 @@
+# Cloudflare Tunnel config for the NMR Predict backend.
+#
+# Copy this file to your cloudflared config location and fill in the two
+# REPLACE_* values. On Windows that location is:
+#     %USERPROFILE%\.cloudflared\config.yml
+# (or keep it here and pass --config "<path>\deploy\cloudflared\config.yml").
+#
+# ---------------------------------------------------------------------------
+# One-time setup (terminal with cloudflared installed: https://pkg.cloudflare.com)
+# ---------------------------------------------------------------------------
+#   cloudflared tunnel login                       # opens browser; authorize chembases.com
+#   cloudflared tunnel create nmr-backend          # prints a TUNNEL UUID + creates a creds JSON
+#   cloudflared tunnel route dns nmr-backend api.nmr.chembases.com
+#
+# Then set the UUID + credentials path below and start it:
+#   cloudflared tunnel run nmr-backend
+#
+# To run it as an always-on Windows service (survives reboots/logout):
+#   cloudflared service install
+# ---------------------------------------------------------------------------
+
+tunnel: REPLACE_WITH_TUNNEL_UUID
+credentials-file: C:\Users\REPLACE_WINDOWS_USER\.cloudflared\REPLACE_WITH_TUNNEL_UUID.json
+
+ingress:
+  # The public API hostname -> the loopback backend started by run-backend.bat.
+  # "same port" as the local dev/prod backend: 7999.
+  - hostname: api.nmr.chembases.com
+    service: http://localhost:7999
+
+  # Required catch-all: anything not matched above gets a 404 instead of being
+  # proxied. cloudflared refuses to start without a final bare `service` rule.
+  - service: http_status:404
+
+# NOTE on timeouts: Cloudflare's edge caps a proxied response at ~100s on
+# non-Enterprise plans (524 error). That's fine here because the production
+# backend only exposes CDK/CASCADE (seconds); ORCA's multi-minute DFT jobs are
+# disabled in production (NMR_ENV=production) and run locally instead.
