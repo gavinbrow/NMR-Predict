@@ -44,6 +44,20 @@ DEV_FRONTEND_ORIGINS = [
     "http://127.0.0.1:5173",
 ]
 
+
+def _parse_origins(raw: str) -> list[str]:
+    """Split a comma-separated origin list, trimming whitespace and trailing slashes."""
+    return [origin.strip().rstrip("/") for origin in raw.split(",") if origin.strip()]
+
+
+# Production frontend origins are supplied via NMR_ALLOWED_ORIGINS (comma
+# separated), e.g. "https://nmr.chembases.com". They are merged with the local
+# dev origins so the same backend works in both environments. When the frontend
+# is hosted cross-origin (Cloudflare Pages) the browser sends a CORS preflight,
+# so its exact https origin must appear here or requests are blocked.
+EXTRA_FRONTEND_ORIGINS = _parse_origins(os.getenv("NMR_ALLOWED_ORIGINS", ""))
+ALLOWED_ORIGINS = DEV_FRONTEND_ORIGINS + EXTRA_FRONTEND_ORIGINS
+
 # In production (NMR_ENV=production) hide the interactive docs and the OpenAPI
 # schema so a publicly hosted instance doesn't advertise its full surface area.
 # Development leaves them enabled for convenience.
@@ -54,11 +68,22 @@ _docs_kwargs = (
     else {}
 )
 
+# Engines that must not run on a public deployment. ORCA spawns multi-minute
+# DFT subprocesses (a DoS vector, and it would hit Cloudflare's ~100s proxy
+# timeout anyway), so it is kept local-only in production. It is still listed by
+# /engines — but reported as not-ready, so the UI greys out its toggle — and
+# /predict refuses to run it. CDK and CASCADE return in seconds and stay fully
+# available.
+PUBLIC_DISABLED_ENGINES = {"orca"} if _IS_PRODUCTION else set()
+
+_DISABLED_ENGINE_REASON = "Disabled on the hosted instance — DFT runs locally only."
+
+
 app = FastAPI(title="NMR Predict", version="0.3.0", **_docs_kwargs)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=DEV_FRONTEND_ORIGINS,
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=False,
     allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["Content-Type"],
@@ -93,6 +118,9 @@ def engines() -> EnginesResponse:
     infos = []
     for engine in list_engines():
         ready, reason = engine.is_ready()
+        if engine.name in PUBLIC_DISABLED_ENGINES:
+            ready = False
+            reason = _DISABLED_ENGINE_REASON
         infos.append(
             EngineInfo(
                 name=engine.name,
@@ -192,6 +220,13 @@ def _run_engine(name: str, mol, nucleus: str, **options) -> EngineResult:
 @app.post("/api/predict", include_in_schema=False, response_model=PredictResponse)
 @app.post("/predict", response_model=PredictResponse)
 def predict(req: PredictRequest) -> PredictResponse:
+    blocked = [name for name in req.engines if name in PUBLIC_DISABLED_ENGINES]
+    if blocked:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Engine(s) not available on this server: {', '.join(sorted(blocked))}",
+        )
+
     try:
         canon = canonicalize(req.smiles, add_hs=True)
     except InvalidSmilesError as exc:

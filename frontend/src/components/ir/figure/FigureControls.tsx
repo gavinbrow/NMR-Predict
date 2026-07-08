@@ -21,6 +21,8 @@ import {
   type LegendOptions,
   type LegendPosition,
   type LineStyle,
+  type PeakLabelOptions,
+  type SeriesKind,
   type SeriesStyle,
 } from "@/lib/ir/figure";
 
@@ -39,6 +41,15 @@ const SIZE_PRESETS = [
 
 const LINE_STYLES: LineStyle[] = ["solid", "dashed", "dotted", "none"];
 const GRID_STYLES: GridStyle[] = ["solid", "dashed", "dotted"];
+const SERIES_KINDS: { value: SeriesKind; label: string }[] = [
+  { value: "line", label: "Line" },
+  { value: "sticks", label: "Sticks" },
+];
+const LABEL_ROTATIONS: { value: number; label: string }[] = [
+  { value: 0, label: "Horizontal" },
+  { value: -45, label: "Diagonal (-45°)" },
+  { value: -90, label: "Vertical (-90°)" },
+];
 const LEGEND_POSITIONS: { value: LegendPosition; label: string }[] = [
   { value: "top-left", label: "Top left" },
   { value: "top-right", label: "Top right" },
@@ -291,9 +302,12 @@ function AxisControls({
 function SeriesRow({
   style,
   onPatch,
+  showKind,
 }: {
   style: SeriesStyle;
   onPatch: (p: Partial<SeriesStyle>) => void;
+  /** Expose the line/sticks toggle (spectrum-style figures only). */
+  showKind?: boolean;
 }) {
   return (
     <div className="grid gap-2 rounded-lg border border-border/50 bg-background/40 p-2">
@@ -312,6 +326,20 @@ function SeriesRow({
           className="h-8 min-w-0 flex-1 text-xs"
           title={style.label}
         />
+        {showKind && (
+          <Select value={style.kind} onValueChange={(v) => onPatch({ kind: v as SeriesKind })}>
+            <SelectTrigger className="h-8 w-24 shrink-0" title="Draw as a line or vertical sticks">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {SERIES_KINDS.map((k) => (
+                <SelectItem key={k.value} value={k.value}>
+                  {k.label}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        )}
       </div>
       <div className="grid grid-cols-4 items-end gap-2">
         <NumField
@@ -375,13 +403,24 @@ export function FigureControls({ data, options, onChange }: FigureControlsProps)
     onChange({ ...options, series: options.series.map((s) => ({ ...s, ...p })) });
   const patchLegend = (p: Partial<LegendOptions>) =>
     onChange({ ...options, legend: { ...options.legend, ...p } });
+  const patchPeakLabels = (p: Partial<PeakLabelOptions>) =>
+    onChange({ ...options, peakLabels: { ...options.peakLabels, ...p } });
+
+  // Spectrum-style figures (the host supplied peak labels) unlock the line/sticks
+  // per-series toggle and the "Peaks & labels" section.
+  const msMode = data.peakLabels !== undefined;
 
   const presetKey =
     SIZE_PRESETS.find((s) => s.w === options.width && s.h === options.height)?.key ?? "custom";
 
-  // y-range seeding considers only the currently visible series.
+  // Range seeding considers only the currently visible series. The x seed honours
+  // per-series grids (mass-spectra overlays) when any series carries its own x.
   const visibleIds = new Set(options.series.filter((s) => s.visible).map((s) => s.id));
-  const yValues = data.series.filter((s) => visibleIds.has(s.id)).flatMap((s) => s.y);
+  const visibleSeries = data.series.filter((s) => visibleIds.has(s.id));
+  const yValues = visibleSeries.flatMap((s) => s.y);
+  const xValues = visibleSeries.some((s) => s.x)
+    ? visibleSeries.flatMap((s) => s.x ?? data.x)
+    : data.x;
 
   // Seed value for the "all line widths" control: the shared width if every
   // series matches, otherwise the first series' width (still applies to all).
@@ -547,7 +586,7 @@ export function FigureControls({ data, options, onChange }: FigureControlsProps)
       <Section title="X axis" defaultOpen={false}>
         <AxisControls
           axis={options.x}
-          values={data.x}
+          values={xValues}
           onPatch={(p) => patchAxis("x", p)}
         />
       </Section>
@@ -578,19 +617,118 @@ export function FigureControls({ data, options, onChange }: FigureControlsProps)
             <ScrollArea className="h-80 pr-3">
               <div className="grid gap-2">
                 {options.series.map((s) => (
-                  <SeriesRow key={s.id} style={s} onPatch={(p) => patchSeries(s.id, p)} />
+                  <SeriesRow key={s.id} style={s} showKind={msMode} onPatch={(p) => patchSeries(s.id, p)} />
                 ))}
               </div>
             </ScrollArea>
           ) : (
             <div className="grid gap-2">
               {options.series.map((s) => (
-                <SeriesRow key={s.id} style={s} onPatch={(p) => patchSeries(s.id, p)} />
+                <SeriesRow key={s.id} style={s} showKind={msMode} onPatch={(p) => patchSeries(s.id, p)} />
               ))}
             </div>
           )}
         </div>
       </Section>
+
+      {msMode && (
+        <Section title="Peaks & labels" caption={`${data.peakLabels?.length ?? 0} peaks`}>
+          <div className="grid gap-3">
+            <CheckLine
+              label="Label peaks (m/z)"
+              checked={options.peakLabels.show}
+              onChange={(v) => patchPeakLabels({ show: v })}
+            />
+            {options.peakLabels.show && (
+              <>
+                <div className="grid grid-cols-2 gap-2">
+                  <div className="grid gap-1">
+                    <Label className="text-[11px] text-muted-foreground">Decimals</Label>
+                    <Select
+                      value={String(options.peakLabels.decimals)}
+                      onValueChange={(v) => patchPeakLabels({ decimals: Number(v) })}
+                    >
+                      <SelectTrigger className="h-8">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="-1">As provided</SelectItem>
+                        {[0, 1, 2, 3, 4].map((n) => (
+                          <SelectItem key={n} value={String(n)}>
+                            {n}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div className="grid gap-1">
+                    <Label className="text-[11px] text-muted-foreground">Orientation</Label>
+                    <Select
+                      value={String(options.peakLabels.rotation)}
+                      onValueChange={(v) => patchPeakLabels({ rotation: Number(v) })}
+                    >
+                      <SelectTrigger className="h-8">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {LABEL_ROTATIONS.map((r) => (
+                          <SelectItem key={r.value} value={String(r.value)}>
+                            {r.label}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                </div>
+                <div className="grid grid-cols-2 items-end gap-2">
+                  <NumField
+                    label="Max labels"
+                    value={options.peakLabels.maxLabels}
+                    onChange={(v) => patchPeakLabels({ maxLabels: Math.max(0, Math.round(v)) })}
+                    step={5}
+                    min={0}
+                  />
+                  <NumField
+                    label="Min spacing (px)"
+                    value={options.peakLabels.minGap}
+                    onChange={(v) => patchPeakLabels({ minGap: Math.max(0, v) })}
+                    step={2}
+                    min={0}
+                  />
+                </div>
+                <div className="grid grid-cols-3 items-end gap-2">
+                  <NumField
+                    label="Font size"
+                    value={options.peakLabels.fontSize}
+                    onChange={(v) => patchPeakLabels({ fontSize: v })}
+                    min={6}
+                  />
+                  <NumField
+                    label="Offset (px)"
+                    value={options.peakLabels.offset}
+                    onChange={(v) => patchPeakLabels({ offset: v })}
+                    step={1}
+                  />
+                  <ColorField
+                    label="Colour"
+                    value={options.peakLabels.color}
+                    onChange={(v) => patchPeakLabels({ color: v })}
+                  />
+                </div>
+                <CheckLine
+                  label="Bold labels"
+                  checked={options.peakLabels.bold}
+                  onChange={(v) => patchPeakLabels({ bold: v })}
+                />
+                <p className="text-[11px] text-muted-foreground">
+                  Labels track the data — only the tallest, non-overlapping peaks in view are
+                  drawn (raise “Max labels” or lower “Min spacing” to show more).
+                </p>
+              </>
+            )}
+          </div>
+        </Section>
+      )}
 
       <Section title="Legend" defaultOpen={false}>
         <div className="grid gap-3">

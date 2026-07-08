@@ -9,10 +9,17 @@ export interface FigureSeriesData {
   /** Stable identity used to keep user styling across data updates. */
   id: string;
   label: string;
+  /**
+   * Optional per-series x-values, ascending. When omitted the series shares the
+   * top-level {@link FigureData.x}. Lets hosts overlay traces that live on
+   * different x grids (e.g. several mass spectra) or draw sparse stick series
+   * (peaks) alongside a dense profile trace.
+   */
+  x?: number[];
   y: number[];
-  /** Host-suggested initial styling (e.g. scatter vs dashed fit line). */
+  /** Host-suggested initial styling (e.g. scatter vs dashed fit line, sticks). */
   styleHints?: Partial<
-    Pick<SeriesStyle, "color" | "lineWidth" | "lineStyle" | "markers" | "markerSize">
+    Pick<SeriesStyle, "color" | "lineWidth" | "lineStyle" | "markers" | "markerSize" | "kind">
   >;
 }
 
@@ -28,9 +35,28 @@ export interface FigureAnnotation {
   fontSize?: number;
 }
 
+/**
+ * A label anchored to a data point — drawn above the point in data space (e.g. an
+ * m/z value over a mass-spectrum peak). Unlike {@link FigureAnnotation} (placed by
+ * plot-area fraction), these track the data through zoom/range changes, and the
+ * renderer thins them to the most intense, non-overlapping few.
+ */
+export interface PeakLabelDatum {
+  id: string;
+  /** Anchor in data coordinates (e.g. the peak's m/z). */
+  x: number;
+  /** Anchor height in data coordinates (e.g. the peak's intensity) — also the
+   *  priority used when thinning a crowded set (taller wins). */
+  y: number;
+  /** Pre-formatted fallback text, used when label decimals are set to "raw". */
+  text: string;
+  /** Optional owning series id (reserved for future per-series label styling). */
+  seriesId?: string;
+}
+
 /** The neutral plot shape both hosts feed into the figure maker. */
 export interface FigureData {
-  /** Shared x-values, ascending. */
+  /** Shared x-values, ascending. Series may override with their own x. */
   x: number[];
   series: FigureSeriesData[];
   xLabel: string;
@@ -41,6 +67,12 @@ export interface FigureData {
   sourceName?: string;
   /** Host-supplied text notes (e.g. a trendline equation), drawn on the plot. */
   annotations?: FigureAnnotation[];
+  /**
+   * Data-anchored labels (e.g. peak m/z values). When present (even if empty)
+   * the figure maker exposes the "Peaks & labels" controls; hosts that never
+   * label points leave this undefined.
+   */
+  peakLabels?: PeakLabelDatum[];
 }
 
 // --- user-editable options ----------------------------------------------------
@@ -48,6 +80,9 @@ export interface FigureData {
 export type LineStyle = "solid" | "dashed" | "dotted" | "none";
 export type GridStyle = "solid" | "dashed" | "dotted";
 export type LegendPosition = "top-left" | "top-right" | "bottom-left" | "bottom-right";
+/** How a series is drawn: a connected line (spectra/trends) or vertical stems
+ *  from the baseline to each point (centroid / stick mass spectra). */
+export type SeriesKind = "line" | "sticks";
 
 export interface AxisOptions {
   label: string;
@@ -75,6 +110,29 @@ export interface SeriesStyle {
   markers: boolean;
   /** Marker radius in px. */
   markerSize: number;
+  /** Connected line vs. vertical stems (defaults to "line"). */
+  kind: SeriesKind;
+}
+
+/** Styling for the data-anchored peak labels (see {@link PeakLabelDatum}). */
+export interface PeakLabelOptions {
+  show: boolean;
+  fontSize: number;
+  color: string;
+  bold: boolean;
+  /**
+   * Decimal places when auto-formatting the anchor's x (e.g. m/z). `-1` uses the
+   * host-supplied {@link PeakLabelDatum.text} verbatim instead.
+   */
+  decimals: number;
+  /** Rotation in degrees (0 = horizontal; -90 reads upward — fits dense peaks). */
+  rotation: number;
+  /** Gap in px between the point apex and the label. */
+  offset: number;
+  /** Draw at most this many labels — the most intense survive. */
+  maxLabels: number;
+  /** Minimum horizontal spacing in px between kept labels (thins crowding). */
+  minGap: number;
 }
 
 export interface LegendOptions {
@@ -112,6 +170,9 @@ export interface FigureOptions {
   y: AxisOptions;
   series: SeriesStyle[];
   legend: LegendOptions;
+  /** Data-anchored peak labels (m/z values etc.); inert unless the host supplies
+   *  {@link FigureData.peakLabels}. */
+  peakLabels: PeakLabelOptions;
 }
 
 // --- defaults ------------------------------------------------------------------
@@ -151,6 +212,7 @@ function defaultSeriesStyle(s: FigureSeriesData, index: number): SeriesStyle {
     lineStyle: hints.lineStyle ?? "solid",
     markers: hints.markers ?? false,
     markerSize: hints.markerSize ?? 4,
+    kind: hints.kind ?? "line",
   };
 }
 
@@ -180,6 +242,17 @@ export function defaultFigureOptions(data: FigureData): FigureOptions {
       custom: null,
       fontSize: 12,
       frame: true,
+    },
+    peakLabels: {
+      show: (data.peakLabels?.length ?? 0) > 0,
+      fontSize: 10,
+      color: "#0f172a",
+      bold: false,
+      decimals: 2,
+      rotation: 0,
+      offset: 6,
+      maxLabels: 25,
+      minGap: 26,
     },
   };
 }
@@ -308,6 +381,45 @@ export function resolveAxis(axis: AxisOptions, values: number[]): ResolvedAxis {
 // --- series geometry ---------------------------------------------------------------
 
 /**
+ * Index span `[start, end]` (inclusive) of the points whose x falls within
+ * `[lo, hi]`, padded by one point on each side so a clipped line still reaches
+ * the plot edges. Assumes x is ascending (true for spectra and IR grids); if it
+ * is not, the full range `[0, n-1]` is returned so callers draw everything
+ * rather than clip incorrectly. An empty array yields `[0, -1]` (an empty
+ * slice). This lets the preview decimate only the *visible* window when zoomed
+ * in, which is what reveals fine structure such as isotope envelopes — a global
+ * decimation would collapse them long before you could zoom to them.
+ */
+export function windowSlice(x: number[], lo: number, hi: number): [number, number] {
+  const n = x.length;
+  if (n === 0) return [0, -1];
+  const first = x[0];
+  const last = x[n - 1];
+  if (!(Number.isFinite(first) && Number.isFinite(last)) || first > last) {
+    return [0, n - 1]; // not ascending / unusable → don't clip
+  }
+  // Lower bound: first index with x >= lo.
+  let a = 0;
+  let b = n;
+  while (a < b) {
+    const mid = (a + b) >> 1;
+    if (x[mid] < lo) a = mid + 1;
+    else b = mid;
+  }
+  const loIdx = a;
+  // Upper bound: last index with x <= hi.
+  a = 0;
+  b = n;
+  while (a < b) {
+    const mid = (a + b) >> 1;
+    if (x[mid] <= hi) a = mid + 1;
+    else b = mid;
+  }
+  const hiIdx = a - 1;
+  return [Math.max(0, loIdx - 1), Math.min(n - 1, hiIdx + 1)];
+}
+
+/**
  * Min/max-bucket decimation for live previews of dense spectra: each bucket
  * keeps its extreme two points (in x order), so peaks survive. A bucket with
  * any non-finite y emits a NaN sentinel so gaps stay gaps. Inputs short enough
@@ -395,4 +507,58 @@ export function dashArray(style: LineStyle | GridStyle, width: number): string |
   if (style === "dashed") return `${4 * w} ${3 * w}`;
   if (style === "dotted") return `${w} ${2 * w}`;
   return undefined;
+}
+
+/**
+ * SVG path `d` for a stick/stem series: an isolated vertical segment from
+ * `baseY` (the projected baseline) up to each finite point. Used for centroid /
+ * stick mass spectra. Non-finite points are skipped (no stem). Unlike a line
+ * series these are never decimated — stick data is already the sparse peak set.
+ */
+export function sticksPathD(
+  x: number[],
+  y: number[],
+  sx: (v: number) => number,
+  sy: (v: number) => number,
+  baseY: number,
+): string {
+  const n = Math.min(x.length, y.length);
+  const r = (v: number) => Math.round(v * 100) / 100;
+  const b = r(baseY);
+  let d = "";
+  for (let i = 0; i < n; i += 1) {
+    if (!Number.isFinite(x[i]) || !Number.isFinite(y[i])) continue;
+    const px = r(sx(x[i]));
+    d += `M${px} ${b}L${px} ${r(sy(y[i]))}`;
+  }
+  return d;
+}
+
+/**
+ * Thin a crowded set of labels to the ones worth drawing: take the most intense
+ * first (highest `weight`), keep one only if no already-kept label sits within
+ * `minGap` px of it, and stop at `maxLabels`. Returns the kept items in their
+ * original order. Operates on already-projected x-pixels so it is pure and
+ * testable independent of the renderer.
+ */
+export function pickVisibleLabels<T extends { px: number; weight: number }>(
+  items: T[],
+  maxLabels: number,
+  minGap: number,
+): T[] {
+  const cap = Math.max(0, Math.floor(maxLabels));
+  if (cap === 0 || items.length === 0) return [];
+  // Tag with original order, then prioritise by weight (taller peaks first).
+  const ranked = items.map((item, order) => ({ item, order })).sort((a, b) => b.item.weight - a.item.weight);
+  const keptPx: number[] = [];
+  const keptOrders: { item: T; order: number }[] = [];
+  const gap = Math.max(0, minGap);
+  for (const entry of ranked) {
+    if (keptOrders.length >= cap) break;
+    const px = entry.item.px;
+    if (gap > 0 && keptPx.some((k) => Math.abs(k - px) < gap)) continue;
+    keptPx.push(px);
+    keptOrders.push(entry);
+  }
+  return keptOrders.sort((a, b) => a.order - b.order).map((e) => e.item);
 }
