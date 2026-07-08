@@ -151,7 +151,7 @@ export function PeakPickingPanel({
       <div className="flex flex-col gap-1 rounded-lg border border-primary/30 bg-primary/5 p-2.5">
         <Toggle
           label="Monoisotopic peaks only"
-          checked={params.monoisotopicOnly ?? false}
+          checked={params.monoisotopicOnly ?? true}
           onChange={(v) => set({ monoisotopicOnly: v })}
         />
         <p className="text-[10px] leading-snug text-muted-foreground">

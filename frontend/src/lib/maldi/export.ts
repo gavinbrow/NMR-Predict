@@ -94,13 +94,14 @@ export function exportSpectrumCsv(spectrum: SpectrumData, baseName: string, labe
 
 /** Export the assigned series (one row per member peak) as CSV. */
 export function exportSeriesCsv(series: Series[], adducts: Adduct[], baseName: string): void {
-  const header = ["seriesId", "adduct", "repeatMass", "endGroupMass", "score", "meanErrorDa", "n", "peakId"];
+  const header = ["seriesId", "adduct", "label", "description", "endGroupLabel", "repeatMass", "endGroupMass", "score", "meanErrorDa", "n", "peakId"];
   const rows: (string | number | undefined)[][] = [header];
   for (const s of series) {
     const adduct = adductById(adducts, s.adductId).label;
     for (const m of s.members) {
       rows.push([
-        s.id, adduct, s.repeatMass.toFixed(4), s.endGroupMass.toFixed(4),
+        s.id, adduct, s.label ?? "", s.description ?? "", s.endGroupLabel ?? "",
+        s.repeatMass.toFixed(4), s.endGroupMass.toFixed(4),
         s.score, s.meanErrorDa?.toFixed(4) ?? "", m.n, m.peakId,
       ]);
     }
@@ -340,9 +341,9 @@ function drawRegressionChart(
 
   const ns = fit.points.map((p) => p.n);
   const ms = fit.points.map((p) => p.mass);
-  let xMin = Math.min(...ns);
+  const xMin = Math.min(...ns);
   let xMax = Math.max(...ns);
-  let yMin = Math.min(...ms);
+  const yMin = Math.min(...ms);
   let yMax = Math.max(...ms);
   if (xMax === xMin) xMax = xMin + 1;
   if (yMax === yMin) yMax = yMin + 1;
@@ -463,12 +464,21 @@ export function exportReportPdf(payload: ReportPayload): void {
     doc.setFontSize(9);
     for (const s of [...payload.series].sort((a, b) => b.score - a.score).slice(0, 10)) {
       ensureSpace(12);
+      const nameTag = s.label ? `${s.label}  \u00b7  ` : "";
       doc.text(
-        `${adductById(payload.adducts, s.adductId).label}  repeat ${s.repeatMass.toFixed(2)} Da  end ${s.endGroupMass.toFixed(2)} Da  ${s.members.length} peaks  err ${(s.meanErrorDa ?? 0).toFixed(3)}  score ${Math.round(s.score * 100)}%`,
+        `${nameTag}${adductById(payload.adducts, s.adductId).label}  repeat ${s.repeatMass.toFixed(2)} Da  end ${s.endGroupMass.toFixed(2)} Da${s.endGroupLabel ? ` (${s.endGroupLabel})` : ""}  ${s.members.length} peaks  err ${(s.meanErrorDa ?? 0).toFixed(3)}  score ${Math.round(s.score * 100)}%`,
         margin + 8,
         y,
       );
       y += 12;
+      if (s.description) {
+        ensureSpace(10);
+        const lines = doc.splitTextToSize(s.description, contentWidth - 16);
+        for (const line of lines.slice(0, 2)) {
+          doc.text(line, margin + 16, y);
+          y += 10;
+        }
+      }
     }
     y += 8;
   }
@@ -584,11 +594,11 @@ export async function exportReportExcel(payload: ReportPayload): Promise<void> {
   // Series.
   if (payload.series.length) {
     const seriesSheet = wb.addWorksheet("Series");
-    seriesSheet.addRow(["adduct", "repeatMass", "endGroupMass", "members", "meanErrorDa", "score", "n", "peakId"]).font = { bold: true };
+    seriesSheet.addRow(["adduct", "label", "description", "endGroupLabel", "repeatMass", "endGroupMass", "members", "meanErrorDa", "score", "n", "peakId"]).font = { bold: true };
     for (const s of payload.series) {
       const adduct = adductById(payload.adducts, s.adductId).label;
       for (const m of s.members) {
-        seriesSheet.addRow([adduct, s.repeatMass, s.endGroupMass, s.members.length, s.meanErrorDa ?? "", s.score, m.n, m.peakId]);
+        seriesSheet.addRow([adduct, s.label ?? "", s.description ?? "", s.endGroupLabel ?? "", s.repeatMass, s.endGroupMass, s.members.length, s.meanErrorDa ?? "", s.score, m.n, m.peakId]);
       }
     }
     seriesSheet.columns.forEach((c) => (c.width = 14));

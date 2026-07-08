@@ -58,6 +58,8 @@ export interface Peak {
   /** Library/background flag (e.g. matrix, salt, solvent) — flagged, never deleted. */
   flag?: string;
   label?: string;
+  /** User-assigned colour (hex) for this peak, surfaced on the plot + table. */
+  color?: string;
 }
 
 /** A candidate ionization adduct, e.g. [M+Na]+. */
@@ -85,6 +87,18 @@ export interface Series {
   meanErrorDa?: number;
   /** R² of the neutral-mass-vs-n regression (how cleanly the ladder fits). */
   r2?: number;
+  /** Free-form description / annotation set after the analyst identifies the series. */
+  description?: string;
+  /** Name of the assigned end group (from the library or manual entry). */
+  endGroupLabel?: string;
+  /** User-assigned colour (hex); falls back to the positional palette when unset. */
+  color?: string;
+  /** When true, manual/assigned end-group mass is preserved across member edits. */
+  endGroupLocked?: boolean;
+  /** When another adduct reading of the SAME peaks has been confirmed, this holds
+   *  that confirmed series' id. Superseded series are hidden from the pending list
+   *  but kept in state so a delete can restore them. */
+  supersededBy?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -116,6 +130,16 @@ export interface ProjectState {
   repeatMass?: number;
   /** Base repeat unit for the Kendrick plot. */
   baseRepeat?: number;
+  /** Active end-group mass for the current repeat unit. */
+  endGroupMass?: number;
+  /** Fold isotope-shifted spacings into one repeat unit on detect. */
+  repeatIsotopeAware?: boolean;
+  /** Split a repeat unit into its distinct interleaved ladders. */
+  splitSeries?: boolean;
+  /** Copolymer repeat A mass (for copolymer detection). */
+  copolymerA?: number;
+  /** Copolymer repeat B mass (for copolymer detection). */
+  copolymerB?: number;
   /** Log of exports performed from this project. */
   exportHistory?: ExportRecord[];
 }
@@ -266,4 +290,4 @@ export type WorkerRequestMessage =
 export type WorkerResponseMessage =
   | { kind: "result"; id: string; result: WorkerResultPayload<WorkerOp> }
   | { kind: "error"; id: string; error: { name: string; message: string } }
-  | { kind: "progress"; id: string; progress: number; message?: string };
+  | { kind: "progress"; id: string; progress: number; message?: string };

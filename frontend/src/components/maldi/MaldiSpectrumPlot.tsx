@@ -129,6 +129,7 @@ function compactNumber(v: number): string {
 
 /** Color for a non-highlighted peak marker by its flag/state. */
 function peakColor(peak: Peak): string {
+  if (peak.color) return peak.color;
   if (peak.accepted === false || peak.ignored) return "#cbd5e1";
   if (peak.flag === "isotope") return "#94a3b8";
   if (peak.flag === "shoulder") return "#f59e0b";

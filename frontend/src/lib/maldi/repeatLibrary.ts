@@ -53,6 +53,7 @@ export const REPEAT_UNIT_LIBRARY: RepeatUnitEntry[] = [
   massEntry("dc1", "DC1", 240.14),
   massEntry("dc2", "DC2", 226.12),
   massEntry("dc4", "DC4", 282.11),
+  massEntry("dc-1", "DC-1", 198.09),
 ];
 
 /** Nearest repeat-unit library entry to a mass, within tolerance (Da). */
@@ -134,6 +135,7 @@ export const BUILTIN_TEMPLATES: ChemistryTemplate[] = [
       ["dc1", "DC1", 240.14],
       ["dc2", "DC2", 226.12],
       ["dc4", "DC4", 282.11],
+      ["dc-1", "DC-1", 198.09],
     ] as const
   ).map(([id, name, mass]) => ({
     id: `tpl-${id}`,

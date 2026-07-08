@@ -121,7 +121,7 @@ describe("pickPeaks", () => {
       const d = mz[i] - center;
       intensity[i] = rand() * 200 + 1500 * Math.exp(-(d * d) / (2 * 0.15 * 0.15));
     }
-    const peaks = pickPeaks({ mz, intensity }, { ...PEAK_PRESETS.balanced, minRelIntensity: 0 });
+    const peaks = pickPeaks({ mz, intensity }, { ...PEAK_PRESETS.balanced, minRelIntensity: 0, monoisotopicOnly: false });
     const mzs = peaks.map((p) => p.centroid ?? p.mz);
     expect(mzs.some((m) => Math.abs(m - center) < 0.2)).toBe(true);
     // Far fewer than the ~250 noise maxima a naive local-max picker would return.
@@ -155,7 +155,7 @@ describe("pickPeaks", () => {
       }
       intensity[i] = v;
     }
-    const peaks = pickPeaks({ mz, intensity }, { ...PEAK_PRESETS.balanced, minRelIntensity: 0 });
+    const peaks = pickPeaks({ mz, intensity }, { ...PEAK_PRESETS.balanced, minRelIntensity: 0, monoisotopicOnly: false });
     const real = peaks.filter((p) => !p.flag).map((p) => p.centroid ?? p.mz).sort((a, b) => a - b);
     expect(real.length).toBe(3);
     // Each centroid sits on its own isotope, not the smeared ~1001 centre.
@@ -210,7 +210,7 @@ describe("pickPeaks", () => {
       addGaussian(m + 2.0066, 4500); // A+2
     }
     const spectrum: SpectrumData = { mz, intensity };
-    const params: Partial<PeakPickParams> = { ...PEAK_PRESETS.balanced, minSeparation: 0.3, smoothing: 0 };
+    const params: Partial<PeakPickParams> = { ...PEAK_PRESETS.balanced, minSeparation: 0.3, smoothing: 0, monoisotopicOnly: false };
 
     const all = pickPeaks(spectrum, params as PeakPickParams);
     expect(all.length).toBeGreaterThanOrEqual(6); // ~3 isotopes × 2 envelopes

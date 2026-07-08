@@ -1,4 +1,5 @@
 import {
+  ChevronDown,
   CircleCheck,
   CircleSlash,
   FolderOpen,
@@ -18,7 +19,6 @@ import { AdductPanel } from "@/components/maldi/AdductPanel";
 import { BatchPanel } from "@/components/maldi/BatchPanel";
 import { CompareView, type ComparisonSpectrum } from "@/components/maldi/CompareView";
 import { CopolymerPanel } from "@/components/maldi/CopolymerPanel";
-import { EndGroupPanel } from "@/components/maldi/EndGroupPanel";
 import { FormulaTools, type IsotopeOverlay } from "@/components/maldi/FormulaTools";
 import { ImportPanel } from "@/components/maldi/ImportPanel";
 import { InterpretationPanel, type ExportKind } from "@/components/maldi/InterpretationPanel";
@@ -34,9 +34,11 @@ import { PeakPickingPanel } from "@/components/maldi/PeakPickingPanel";
 import { PeakTable } from "@/components/maldi/PeakTable";
 import { ProcessingPanel } from "@/components/maldi/ProcessingPanel";
 import { SeriesPanel, type RepeatGroupItem } from "@/components/maldi/SeriesPanel";
+import { SeriesTable } from "@/components/maldi/SeriesTable";
 import { TemplatePanel } from "@/components/maldi/TemplatePanel";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { Input } from "@/components/ui/input";
 import {
   Select,
@@ -46,8 +48,8 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { useMaldiUndo, type UndoSnapshot } from "@/hooks/useMaldiUndo";
 import { adductById, ALL_BUILTIN_ADDUCTS } from "@/lib/maldi/adducts";
-import type { EndGroupCandidate } from "@/lib/maldi/endgroups";
 import {
   exportPeaksCsv,
   exportProjectJson,
@@ -64,6 +66,8 @@ import { summarizeMolWeight } from "@/lib/maldi/molweight";
 import type { ParseMeta } from "@/lib/maldi/parse";
 import { manualPeak, PEAK_PRESETS, type PeakPickParams } from "@/lib/maldi/peaks";
 import { fitLadder, peaksForRepeat, seriesForRepeat } from "@/lib/maldi/polymers";
+import { explainedPeakIds as explainedPeakIdsHelper, sameLadderSiblings, unexplainedPeaks } from "@/lib/maldi/seriesMatch";
+import { buildLadderColorMap } from "@/lib/maldi/seriesColor";
 import type { CopolymerSeries, RepeatCandidate, RepeatSeriesGroup } from "@/lib/maldi/polymers";
 import {
   createProject,
@@ -97,7 +101,6 @@ import {
   pickPeaks,
   ping,
   process,
-  solveEndGroups,
 } from "@/lib/maldi/workerClient";
 
 type WorkerStatus = "checking" | "ready" | "error";
@@ -161,17 +164,17 @@ const Maldi = () => {
   const [baseRepeat, setBaseRepeat] = useState(0);
   const [endGroupMass, setEndGroupMass] = useState(0);
   const [series, setSeries] = useState<Series[]>([]);
-  const [endGroupCandidates, setEndGroupCandidates] = useState<EndGroupCandidate[]>([]);
   const [selectedSeriesId, setSelectedSeriesId] = useState<string | null>(null);
-  const [selectedEndGroupId, setSelectedEndGroupId] = useState<string | null>(null);
   const [highlightedPeakIds, setHighlightedPeakIds] = useState<Set<string> | undefined>();
+  // Series-level highlight: one coloured group per assigned series (replaces the
+  // flat pink set when whole series are emphasised, so ladders keep their colours).
+  const [highlightedSeriesIds, setHighlightedSeriesIds] = useState<Set<string> | undefined>();
   // Hide non-highlighted peaks while a series/end-group is selected, so the
   // chosen ladder stands alone. Controlled here (the plot's switch reflects it).
   const [isolateSelection, setIsolateSelection] = useState(false);
   // Fold isotope-shifted spacings (~1 Da apart) into one repeat unit on detect.
   const [repeatIsotopeAware, setRepeatIsotopeAware] = useState(true);
-  // Split-series preview: a picked repeat unit broken into its distinct ladders.
-  const [splitSeries, setSplitSeries] = useState(false);
+  // Picking a repeat unit always previews it broken into its distinct ladders.
   const [repeatGroups, setRepeatGroups] = useState<RepeatSeriesGroup[]>([]);
   const [selectedGroupKey, setSelectedGroupKey] = useState<string | null>(null);
 
@@ -184,6 +187,12 @@ const Maldi = () => {
   const [selectedCopolymerId, setSelectedCopolymerId] = useState<string | null>(null);
   const [comparisons, setComparisons] = useState<ComparisonSpectrum[]>([]);
   const [exportHistory, setExportHistory] = useState<ExportRecord[]>([]);
+  // Mirror of exportHistory read by the undo restore (the log is append-only and
+  // excluded from snapshots, so a restore must preserve the current log).
+  const exportHistoryRef = useRef<ExportRecord[]>(exportHistory);
+  useEffect(() => {
+    exportHistoryRef.current = exportHistory;
+  }, [exportHistory]);
   const [documents, setDocuments] = useState<MaldiDocument[]>([]);
   const [activeDocId, setActiveDocId] = useState<string | null>(null);
   const [viewMode, setViewMode] = useState<ViewMode>("single");
@@ -196,7 +205,6 @@ const Maldi = () => {
   const [picking, setPicking] = useState(false);
   const [detecting, setDetecting] = useState(false);
   const [assigning, setAssigning] = useState(false);
-  const [solving, setSolving] = useState(false);
   const [detectingLosses, setDetectingLosses] = useState(false);
   const [detectingCopolymer, setDetectingCopolymer] = useState(false);
   const [addingComparison, setAddingComparison] = useState(false);
@@ -231,15 +239,47 @@ const Maldi = () => {
     [repeatGroups],
   );
 
+  // Ladder-based colouring: one colour per distinct peak ladder. Different adducts
+  // of the same ladder share their member peaks, so [M+H]⁺/[M+Na]⁺/[M+K]⁺ of one
+  // polymer get one colour; distinct ladders (disjoint peaks) get distinct colours.
+  const ladderColorMap = useMemo(() => buildLadderColorMap(series), [series]);
+  const colorForSeries = useCallback(
+    (s: Series) =>
+      s.color ?? ladderColorMap.get(s.id) ?? SERIES_COLORS[series.indexOf(s) % SERIES_COLORS.length],
+    [ladderColorMap, series],
+  );
   // Colour-coded peak groups for the plot: all ladders at once, or just the
   // isolated one when a single ladder is selected.
   const plotHighlightGroups = useMemo(() => {
+    // Highlighted assigned series take precedence: one coloured group per series,
+    // each in its own (or positional) colour. This is what makes "Highlight all
+    // series" show the same colours as the split ladders instead of collapsing to pink.
+    if (highlightedSeriesIds && highlightedSeriesIds.size > 0) {
+      const groups = series
+        .filter((s) => highlightedSeriesIds.has(s.id))
+        .map((s) => {
+          const idx = series.indexOf(s);
+          return {
+            color:
+              s.color ??
+              ladderColorMap.get(s.id) ??
+              SERIES_COLORS[(idx < 0 ? 0 : idx) % SERIES_COLORS.length],
+            ids: new Set(s.members.map((m) => m.peakId)),
+          };
+        });
+      return groups.length ? groups : undefined;
+    }
+    // Otherwise, the split-series preview ladders (pre-assignment).
     if (!repeatGroups.length) return undefined;
     return repeatGroups
-      .map((g, i) => ({ key: String(i), color: SERIES_COLORS[i % SERIES_COLORS.length], ids: new Set(g.peakIds) }))
-      .filter((g) => !selectedGroupKey || g.key === selectedGroupKey)
-      .map((g) => ({ color: g.color, ids: g.ids }));
-  }, [repeatGroups, selectedGroupKey]);
+      .map((g, i) => ({ color: SERIES_COLORS[i % SERIES_COLORS.length], ids: new Set(g.peakIds) }))
+      .filter((_g, i) => !selectedGroupKey || String(i) === selectedGroupKey);
+  }, [highlightedSeriesIds, series, repeatGroups, selectedGroupKey, ladderColorMap]);
+
+  // Peak ids explained by any assigned series (drives the PeakTable "unexplained
+  // only" filter and the plot's unexplained-only mode).
+  const explainedPeakIds = useMemo(() => explainedPeakIdsHelper(series), [series]);
+
 
   // Every open document's display spectrum, for the overlay / stacked view modes.
   const docSpectra = useMemo<StackSpectrum[]>(() => {
@@ -328,6 +368,7 @@ const Maldi = () => {
   const highlightPeaks = useCallback((ids: Set<string> | undefined) => {
     setRepeatGroups([]);
     setSelectedGroupKey(null);
+    setHighlightedSeriesIds(undefined);
     setIsolateSelection(false); // series/end-group handlers re-enable after this
     setHighlightedPeakIds(ids);
   }, []);
@@ -336,7 +377,6 @@ const Maldi = () => {
     setPeaks([]);
     setSeries([]);
     setRepeatCandidates([]);
-    setEndGroupCandidates([]);
     setLosses([]);
     setCopolymerSeries([]);
     setRepeatMass(0);
@@ -347,7 +387,6 @@ const Maldi = () => {
     setRepeatGroups([]);
     setSelectedGroupKey(null);
     setSelectedSeriesId(null);
-    setSelectedEndGroupId(null);
     setIsolateSelection(false);
     setSelectedCopolymerId(null);
   }, []);
@@ -367,9 +406,13 @@ const Maldi = () => {
     state.pickParams = pickParams;
     state.repeatMass = repeatMass;
     state.baseRepeat = baseRepeat;
+    state.endGroupMass = endGroupMass;
+    state.repeatIsotopeAware = repeatIsotopeAware;
+    state.copolymerA = copolymerA;
+    state.copolymerB = copolymerB;
     state.exportHistory = exportHistory;
     return state;
-  }, [sourceName, raw, processed, steps, peaks, customAdducts, series, selectedAdductIds, pickParams, repeatMass, baseRepeat, exportHistory]);
+  }, [sourceName, raw, processed, steps, peaks, customAdducts, series, selectedAdductIds, pickParams, repeatMass, baseRepeat, endGroupMass, repeatIsotopeAware, copolymerA, copolymerB, exportHistory]);
 
   const loadState = useCallback((s: ProjectState) => {
     setSourceName(s.sourceName);
@@ -383,17 +426,20 @@ const Maldi = () => {
     setPickParams(s.pickParams ?? { ...PEAK_PRESETS.balanced });
     setRepeatMass(s.repeatMass ?? 0);
     setBaseRepeat(s.baseRepeat ?? s.repeatMass ?? 0);
+    setEndGroupMass(s.endGroupMass ?? 0);
+    setRepeatIsotopeAware(s.repeatIsotopeAware ?? true);
+    setCopolymerA(s.copolymerA ?? 0);
+    setCopolymerB(s.copolymerB ?? 0);
     setExportHistory(s.exportHistory ?? []);
     setRepeatCandidates([]);
-    setEndGroupCandidates([]);
     setLosses([]);
     setCopolymerSeries([]);
     setOverlay(null);
     setHighlightedPeakIds(undefined);
+    setHighlightedSeriesIds(undefined);
     setRepeatGroups([]);
     setSelectedGroupKey(null);
     setSelectedSeriesId(null);
-    setSelectedEndGroupId(null);
     setIsolateSelection(false);
     setSelectedCopolymerId(null);
     setParseMeta(null);
@@ -482,6 +528,67 @@ const Maldi = () => {
     [applySpectrum],
   );
 
+  // --- Global drag-and-drop import ------------------------------------------
+  // Drop a spectrum file ANYWHERE on the page (not just the import box). A window
+  // listener handles drops that a dedicated drop zone (the import box or the
+  // Compare panel) did not already handle — those call preventDefault, so we skip
+  // them here via `defaultPrevented` to avoid a double import.
+  const [pageDragActive, setPageDragActive] = useState(false);
+  const dragDepth = useRef(0);
+
+  const importDroppedFile = useCallback(
+    (files: FileList | null) => {
+      const file = files?.[0];
+      if (!file) return;
+      const reader = new FileReader();
+      if (/\.(mzml|mzxml|mgf)$/i.test(file.name)) {
+        reader.onload = () => handleMsImport(reader.result as ArrayBuffer, file.name);
+        reader.readAsArrayBuffer(file);
+      } else {
+        reader.onload = () =>
+          handleImport(String(reader.result ?? ""), file.name, { delimiter: "auto", hasHeader: "auto" });
+        reader.readAsText(file);
+      }
+    },
+    [handleImport, handleMsImport],
+  );
+
+  useEffect(() => {
+    const hasFiles = (e: DragEvent) => Array.from(e.dataTransfer?.types ?? []).includes("Files");
+    const onDragEnter = (e: DragEvent) => {
+      if (!hasFiles(e)) return;
+      dragDepth.current += 1;
+      setPageDragActive(true);
+    };
+    const onDragOver = (e: DragEvent) => {
+      if (!hasFiles(e)) return;
+      e.preventDefault(); // mark the window as a valid drop target
+    };
+    const onDragLeave = (e: DragEvent) => {
+      if (!hasFiles(e)) return;
+      dragDepth.current = Math.max(0, dragDepth.current - 1);
+      if (dragDepth.current === 0) setPageDragActive(false);
+    };
+    const onDrop = (e: DragEvent) => {
+      dragDepth.current = 0;
+      setPageDragActive(false);
+      if (e.defaultPrevented) return; // a dedicated drop zone already handled it
+      if (!e.dataTransfer?.files?.length) return;
+      e.preventDefault();
+      importDroppedFile(e.dataTransfer.files);
+    };
+    window.addEventListener("dragenter", onDragEnter);
+    window.addEventListener("dragover", onDragOver);
+    window.addEventListener("dragleave", onDragLeave);
+    window.addEventListener("drop", onDrop);
+    return () => {
+      window.removeEventListener("dragenter", onDragEnter);
+      window.removeEventListener("dragover", onDragOver);
+      window.removeEventListener("dragleave", onDragLeave);
+      window.removeEventListener("drop", onDrop);
+    };
+  }, [importDroppedFile]);
+
   // --- Peak picking -----------------------------------------------------------
   const handlePick = useCallback(async () => {
     const target = processed ?? raw;
@@ -493,7 +600,6 @@ const Maldi = () => {
       setLosses([]);
       setCopolymerSeries([]);
       setSelectedSeriesId(null);
-      setSelectedEndGroupId(null);
       highlightPeaks(undefined);
       const flagged = await flagBackground(result.peaks, { preserveExisting: true });
       setPeaks(flagged.peaks);
@@ -565,22 +671,18 @@ const Maldi = () => {
     [peaks, runDetectRepeats],
   );
 
-  // Preview the peaks that fit a repeat unit: either one lumped highlight, or —
-  // when "split" is on — the distinct interleaved ladders, each its own colour.
+  // Preview the peaks that fit a repeat unit, always broken into its distinct
+  // interleaved ladders (each its own colour). Falls back to one lumped highlight
+  // when the repeat produces no clean multi-member ladders.
   const previewRepeat = useCallback(
-    (mass: number, split: boolean) => {
+    (mass: number) => {
       setSelectedSeriesId(null);
       setSelectedGroupKey(null);
-      if (split) {
-        const groups = seriesForRepeat(peaks, mass);
-        setRepeatGroups(groups);
-        if (groups.length) {
-          setHighlightedPeakIds(undefined); // colours come from the groups instead
-          return;
-        }
-        // No clean ladders → fall back to the lumped preview.
-      } else {
-        setRepeatGroups([]);
+      const groups = seriesForRepeat(peaks, mass);
+      setRepeatGroups(groups);
+      if (groups.length) {
+        setHighlightedPeakIds(undefined); // colours come from the groups instead
+        return;
       }
       const ids = peaksForRepeat(peaks, mass);
       setHighlightedPeakIds(ids.size ? ids : undefined);
@@ -593,9 +695,9 @@ const Maldi = () => {
     (mass: number) => {
       setRepeatMass(mass);
       setBaseRepeat(mass);
-      previewRepeat(mass, splitSeries);
+      previewRepeat(mass);
     },
-    [previewRepeat, splitSeries],
+    [previewRepeat],
   );
 
   // Typing a known repeat unit: adopt it and live-preview its ladder, so the user
@@ -605,19 +707,10 @@ const Maldi = () => {
     (mass: number) => {
       setRepeatMass(mass);
       setBaseRepeat(mass);
-      if (mass > 0) previewRepeat(mass, splitSeries);
+      if (mass > 0) previewRepeat(mass);
       else highlightPeaks(undefined);
     },
-    [previewRepeat, splitSeries, highlightPeaks],
-  );
-
-  // Toggle split mode and re-preview the current repeat in the new mode.
-  const handleToggleSplitSeries = useCallback(
-    (on: boolean) => {
-      setSplitSeries(on);
-      if (repeatMass > 0) previewRepeat(repeatMass, on);
-    },
-    [repeatMass, previewRepeat],
+    [previewRepeat, highlightPeaks],
   );
 
   // Click a ladder: isolate it (click again to show all ladders together).
@@ -640,33 +733,7 @@ const Maldi = () => {
     }
   }, [peaks, repeatMass, selectedAdducts, baseRepeat]);
 
-  const handleSolveEndGroups = useCallback(async () => {
-    setSolving(true);
-    try {
-      const result = await solveEndGroups(peaks, repeatMass, selectedAdducts);
-      setEndGroupCandidates(result.candidates);
-      setSelectedEndGroupId(null);
-      if (result.candidates[0]) setEndGroupMass((cur) => (cur > 0 ? cur : Number(result.candidates[0].residualMass.toFixed(4))));
-      toast.success(`${result.candidates.length} end-group candidates`);
-    } catch (error) {
-      console.error(error);
-      toast.error("End-group solve failed");
-    } finally {
-      setSolving(false);
-    }
-  }, [peaks, repeatMass, selectedAdducts]);
 
-  // Click an end-group candidate: highlight its ladder and isolate it (hide the
-  // other peaks), mirroring the series interaction.
-  const handleSelectEndGroup = useCallback(
-    (candidate: EndGroupCandidate | null) => {
-      setSelectedEndGroupId(candidate?.id ?? null);
-      setSelectedSeriesId(null);
-      highlightPeaks(candidate ? new Set(candidate.members.map((m) => m.peakId)) : undefined);
-      setIsolateSelection(candidate != null);
-    },
-    [highlightPeaks],
-  );
 
   const handleDetectLosses = useCallback(async () => {
     setDetectingLosses(true);
@@ -708,11 +775,20 @@ const Maldi = () => {
 
   const handleSelectSeries = useCallback((s: Series | null) => {
     setSelectedSeriesId(s?.id ?? null);
-    setSelectedEndGroupId(null);
     setSelectedCopolymerId(null);
-    highlightPeaks(s ? new Set(s.members.map((m) => m.peakId)) : undefined);
-    setIsolateSelection(s != null); // hide the other peaks while one series is shown
-  }, [highlightPeaks]);
+    if (s) {
+      // Emphasise this series as a coloured group (keeps its colour, no pink collapse)
+      // and isolate it so the ladder stands alone. The flat highlight set is also
+      // populated as a safety net + so the mol-weight panel follows the selection.
+      setHighlightedPeakIds(new Set(s.members.map((m) => m.peakId)));
+      setHighlightedSeriesIds(new Set([s.id]));
+      setIsolateSelection(true);
+    } else {
+      setHighlightedSeriesIds(undefined);
+      setHighlightedPeakIds(undefined);
+      setIsolateSelection(false);
+    }
+  }, []);
 
   // Manual ladder editing: click a peak in the plot to add/remove it from the
   // selected series. The end group (Y-intercept), error and score are re-fit live,
@@ -734,7 +810,7 @@ const Maldi = () => {
             ? {
                 ...x,
                 members,
-                endGroupMass: fit?.endGroupMass ?? x.endGroupMass,
+                endGroupMass: x.endGroupLocked ? x.endGroupMass : (fit?.endGroupMass ?? x.endGroupMass),
                 meanErrorDa: fit?.meanErrorDa ?? x.meanErrorDa,
                 score: fit?.score ?? 0,
                 r2: fit?.r2 ?? x.r2,
@@ -742,7 +818,8 @@ const Maldi = () => {
             : x,
         ),
       );
-      setHighlightedPeakIds(new Set(members.map((m) => m.peakId)));
+      // The selected series is already in highlightedSeriesIds, so the coloured
+      // group refreshes from the updated series state — no flat-pink override needed.
     },
     [selectedSeriesId, series, peaks, allAdducts],
   );
@@ -750,15 +827,94 @@ const Maldi = () => {
   const handleHighlightAllSeries = useCallback(
     (all: boolean) => {
       setSelectedSeriesId(null);
-      if (!all) {
-        highlightPeaks(undefined);
+      setSelectedCopolymerId(null);
+      const active = series.filter((s) => !s.supersededBy);
+      if (!all || active.length === 0) {
+        setHighlightedSeriesIds(undefined);
+        setHighlightedPeakIds(undefined);
+        setIsolateSelection(false);
         return;
       }
+      // Every visible series as its own coloured group, all shown together. The flat
+      // highlight union is also set as a safety net + for the mol-weight panel.
       const ids = new Set<string>();
-      for (const s of series) for (const m of s.members) ids.add(m.peakId);
-      highlightPeaks(ids.size ? ids : undefined);
+      for (const s of active) for (const m of s.members) ids.add(m.peakId);
+      setHighlightedPeakIds(ids.size ? ids : undefined);
+      setHighlightedSeriesIds(new Set(active.map((s) => s.id)));
+      setIsolateSelection(false);
     },
-    [series, highlightPeaks],
+    [series],
+  );
+
+  // --- Series annotation (label / description / colour / end group) ----------
+  const handleRenameSeries = useCallback((id: string, label: string) => {
+    setSeries((prev) => prev.map((s) => (s.id === id ? { ...s, label } : s)));
+  }, []);
+
+  const handleSetSeriesDescription = useCallback((id: string, description: string) => {
+    setSeries((prev) => prev.map((s) => (s.id === id ? { ...s, description: description || undefined } : s)));
+  }, []);
+
+  const handleSetSeriesColor = useCallback((id: string, color: string) => {
+    setSeries((prev) => prev.map((s) => (s.id === id ? { ...s, color: color || undefined } : s)));
+  }, []);
+
+  const handleSetSeriesEndGroupLabel = useCallback((id: string, endGroupLabel: string) => {
+    setSeries((prev) => prev.map((s) => (s.id === id ? { ...s, endGroupLabel: endGroupLabel || undefined, endGroupLocked: true } : s)));
+  }, []);
+
+  const handleSetSeriesEndGroupMass = useCallback((id: string, mass: number) => {
+    setSeries((prev) => prev.map((s) => (s.id === id ? { ...s, endGroupMass: mass, endGroupLocked: true } : s)));
+  }, []);
+
+  // Remove a confirmed series from the Series table. This un-confirms it (it returns
+  // to the pending list) and restores the same-peak adduct alternatives that were
+  // hidden when it was assigned — "delete puts everything back".
+  const handleDeleteSeries = useCallback((id: string) => {
+    setSeries((prev) =>
+      prev.map((s) => {
+        if (s.id === id) return { ...s, endGroupLocked: false };
+        if (s.supersededBy === id) return { ...s, supersededBy: undefined };
+        return s;
+      }),
+    );
+    setSelectedSeriesId((cur) => (cur === id ? null : cur));
+    const wasHighlighted = highlightedSeriesIds?.has(id) || selectedSeriesId === id;
+    setHighlightedSeriesIds((cur) => {
+      if (!cur || !cur.has(id)) return cur;
+      const next = new Set(cur);
+      next.delete(id);
+      return next.size ? next : undefined;
+    });
+    if (wasHighlighted) {
+      setHighlightedPeakIds(undefined);
+      setIsolateSelection(false);
+    }
+  }, [highlightedSeriesIds, selectedSeriesId]);
+
+  // Confirm a pending series into the Series table. Its same-peak adduct alternatives
+  // (the other [M+H]/[M+Na]/... readings of the same ladder) are marked superseded so
+  // they drop out of the pending list; deleting the confirmed series restores them.
+  const handleAssignSeriesToTable = useCallback(
+    (id: string) => {
+      const target = series.find((s) => s.id === id);
+      if (!target) return;
+      const pinnedColor = target.color ?? colorForSeries(target);
+      const siblingIds = new Set(sameLadderSiblings(series, target).map((s) => s.id));
+      setSeries((prev) =>
+        prev.map((s) => {
+          if (s.id === target.id) return { ...s, endGroupLocked: true, color: s.color ?? pinnedColor };
+          if (siblingIds.has(s.id)) return { ...s, supersededBy: target.id };
+          return s;
+        }),
+      );
+      setSelectedSeriesId(null);
+      setHighlightedSeriesIds(undefined);
+      setHighlightedPeakIds(undefined);
+      setIsolateSelection(false);
+      toast.success("Series moved to the Series table");
+    },
+    [series, colorForSeries],
   );
 
   const handleSelectCopolymer = useCallback((s: CopolymerSeries | null) => {
@@ -807,6 +963,55 @@ const Maldi = () => {
     }
   }, []);
 
+  // Add an already-open spectrum (another document in this session) to the
+  // comparison list, mirroring how docSpectra resolves each doc's display trace.
+  const handleAddComparisonFromOpen = useCallback(
+    (docId: string) => {
+      if (docId === activeDocId) return;
+      const target = documents.find((d) => d.id === docId);
+      const spectrum = target?.state.processedSpectrum ?? target?.state.rawSpectrum;
+      if (!target || !spectrum) return;
+      comparisonCounter += 1;
+      setComparisons((prev) => [
+        ...prev,
+        { id: `cmp-${Date.now()}-${comparisonCounter}`, name: target.name, spectrum, visible: true, sourceDocId: docId },
+      ]);
+    },
+    [activeDocId, documents],
+  );
+
+  const handleUpdateComparison = useCallback((id: string, patch: Partial<ComparisonSpectrum>) => {
+    setComparisons((prev) => prev.map((c) => (c.id === id ? { ...c, ...patch } : c)));
+  }, []);
+
+  // --- Undo / redo (per-spectrum) ---------------------------------------------
+  const getUndoSnapshot = useCallback((): UndoSnapshot => {
+    const state = buildState();
+    state.processedSpectrum = null; // re-derived after restore
+    state.exportHistory = []; // append-only log: excluded from undo
+    return { state, projectName };
+  }, [buildState, projectName]);
+
+  const restoreUndoSnapshot = useCallback(
+    (snap: UndoSnapshot) => {
+      loadState(snap.state);
+      setProjectName(snap.projectName);
+      setExportHistory(exportHistoryRef.current);
+    },
+    [loadState],
+  );
+
+  const { clearHistory, clearAll } = useMaldiUndo({
+    activeDocId,
+    deps: [
+      projectName, sourceName, peaks, series, steps, customAdducts, selectedAdductIds,
+      pickParams, repeatMass, baseRepeat, endGroupMass, repeatIsotopeAware,
+      copolymerA, copolymerB, raw,
+    ],
+    getSnapshot: getUndoSnapshot,
+    restore: restoreUndoSnapshot,
+  });
+
   // --- Persistence + document switching ---------------------------------------
   const switchToDoc = useCallback(
     (id: string) => {
@@ -842,8 +1047,9 @@ const Maldi = () => {
         }
       }
       setDocuments(remaining);
+      clearHistory(id);
     },
-    [documents, activeDocId, loadState, clearLive],
+    [documents, activeDocId, loadState, clearLive, clearHistory],
   );
 
   const handleSave = useCallback(async () => {
@@ -945,7 +1151,8 @@ const Maldi = () => {
     setActiveDocId(null);
     setComparisons([]);
     setViewMode("single");
-  }, [clearLive]);
+    clearAll();
+  }, [clearLive, clearAll]);
 
   const handleDelete = useCallback(
     async (id: string) => {
@@ -966,11 +1173,10 @@ const Maldi = () => {
       series,
       adducts: allAdducts,
       repeatCandidates,
-      endGroupCandidates,
       losses,
       molWeight: mw,
     });
-  }, [peaks, series, allAdducts, repeatCandidates, endGroupCandidates, losses]);
+  }, [peaks, series, allAdducts, repeatCandidates, losses]);
 
   const recordExport = (kind: string, label: string) =>
     setExportHistory((prev) => [...prev, { kind, label, at: Date.now() }]);
@@ -984,11 +1190,10 @@ const Maldi = () => {
     adducts: allAdducts,
     repeatMass,
     molWeight: summarizeMolWeight(peaks, series, series.length ? "series" : "all", {}),
-    endGroupCandidates,
     losses,
     findings,
     spectrumPng: plotHandleRef.current?.getPng() ?? null,
-  }), [projectName, sourceName, raw, peaks, series, allAdducts, repeatMass, endGroupCandidates, losses, findings]);
+  }), [projectName, sourceName, raw, peaks, series, allAdducts, repeatMass, losses, findings]);
 
   const handleExport = useCallback(
     async (kind: ExportKind) => {
@@ -1064,6 +1269,14 @@ const Maldi = () => {
         className="hidden"
         onChange={(e) => e.target.files?.[0] && handleImportProjectFile(e.target.files[0])}
       />
+      {pageDragActive && (
+        <div className="pointer-events-none fixed inset-0 z-[100] flex items-center justify-center bg-primary/10 backdrop-blur-[1px]">
+          <div className="rounded-2xl border-2 border-dashed border-primary bg-background/95 px-8 py-6 text-center shadow-xl">
+            <p className="text-base font-semibold text-primary">Drop spectrum to import</p>
+            <p className="mt-1 text-xs text-muted-foreground">CSV / TXT / mzML / mzXML / MGF</p>
+          </div>
+        </div>
+      )}
       <div className="mx-auto flex max-w-[1700px] flex-col gap-4">
         {/* Hero + project toolbar */}
         <section className="rounded-3xl border border-border/70 bg-card p-5 shadow-card">
@@ -1164,7 +1377,7 @@ const Maldi = () => {
               <SidebarCard title="Import">
                 <ImportPanel onFile={handleImport} onMsFile={handleMsImport} busy={parsing} meta={parseMeta} sourceName={sourceName} compact />
               </SidebarCard>
-              <SidebarCard title="Templates">
+              <SidebarCard title="Templates" collapsible defaultCollapsed>
                 <TemplatePanel onApply={handleApplyTemplate} current={{ repeatMass, endGroupMass, adductIds: selectedAdductIds }} />
               </SidebarCard>
               <SidebarCard title={`Processing${processingBusy ? " · running…" : ""}`}>
@@ -1194,12 +1407,10 @@ const Maldi = () => {
                   repeatMass={repeatMass}
                   onRepeatMassChange={handleRepeatMassChange}
                   onSelectRepeatCandidate={handleSelectRepeatCandidate}
-                  splitSeries={splitSeries}
-                  onToggleSplitSeries={handleToggleSplitSeries}
                   repeatGroups={repeatGroupItems}
                   selectedGroupKey={selectedGroupKey}
                   onSelectGroup={handleSelectGroup}
-                  series={series}
+                  series={series.filter((s) => !s.endGroupLocked && !s.supersededBy)}
                   onAssignSeries={handleAssignSeries}
                   adducts={selectedAdducts}
                   peaks={peaks}
@@ -1208,17 +1419,9 @@ const Maldi = () => {
                   selectedSeriesId={selectedSeriesId}
                   onSelectSeries={handleSelectSeries}
                   onHighlightAll={handleHighlightAllSeries}
-                />
-              </SidebarCard>
-              <SidebarCard title="End groups">
-                <EndGroupPanel
-                  repeatMass={repeatMass}
-                  candidates={endGroupCandidates}
-                  onSolve={handleSolveEndGroups}
-                  adducts={selectedAdducts}
-                  busy={solving}
-                  selectedId={selectedEndGroupId}
-                  onSelect={handleSelectEndGroup}
+                  colorForSeries={colorForSeries}
+                  onAssignSeriesToTable={handleAssignSeriesToTable}
+                  unexplainedCount={unexplainedPeaks(peaks, series).length}
                 />
               </SidebarCard>
               <SidebarCard title="Copolymer">
@@ -1290,6 +1493,7 @@ const Maldi = () => {
                   <Tabs defaultValue="table">
                     <TabsList className="flex flex-wrap">
                       <TabsTrigger value="table">Peak table</TabsTrigger>
+                      <TabsTrigger value="series">Series</TabsTrigger>
                       <TabsTrigger value="kendrick">Kendrick</TabsTrigger>
                       <TabsTrigger value="formula">Formula</TabsTrigger>
                       <TabsTrigger value="mw">Mol. weight</TabsTrigger>
@@ -1303,6 +1507,24 @@ const Maldi = () => {
                           onChange={setPeaks}
                           highlightedPeakIds={highlightedPeakIds}
                           onSelectPeak={(id) => highlightPeaks(new Set([id]))}
+                          explainedPeakIds={explainedPeakIds}
+                        />
+                      </div>
+                    </TabsContent>
+                    <TabsContent value="series" className="mt-3">
+                      <div className="h-[420px]">
+                        <SeriesTable
+                          series={series.filter((s) => s.endGroupLocked)}
+                          adducts={selectedAdducts.length ? selectedAdducts : allAdducts}
+                          selectedSeriesId={selectedSeriesId}
+                          onSelectSeries={handleSelectSeries}
+                          onRenameSeries={handleRenameSeries}
+                          onSetSeriesDescription={handleSetSeriesDescription}
+                          onSetSeriesColor={handleSetSeriesColor}
+                          onSetSeriesEndGroupLabel={handleSetSeriesEndGroupLabel}
+                          onSetSeriesEndGroupMass={handleSetSeriesEndGroupMass}
+                          onDeleteSeries={handleDeleteSeries}
+                          colorFor={colorForSeries}
                         />
                       </div>
                     </TabsContent>
@@ -1319,7 +1541,17 @@ const Maldi = () => {
                     </TabsContent>
                     <TabsContent value="compare" className="mt-3">
                       <div className="h-[440px]">
-                        <CompareView current={processed ?? raw} currentName={sourceName || "current"} comparisons={comparisons} onAddFiles={handleAddComparisons} onRemove={(id) => setComparisons((prev) => prev.filter((c) => c.id !== id))} busy={addingComparison} />
+                        <CompareView
+                          current={processed ?? raw}
+                          currentName={sourceName || "current"}
+                          comparisons={comparisons}
+                          onAddFiles={handleAddComparisons}
+                          onAddFromOpen={handleAddComparisonFromOpen}
+                          onUpdate={handleUpdateComparison}
+                          onRemove={(id) => setComparisons((prev) => prev.filter((c) => c.id !== id))}
+                          openDocuments={documents.filter((d) => d.id !== activeDocId).map((d) => ({ id: d.id, name: d.name }))}
+                          busy={addingComparison}
+                        />
                       </div>
                     </TabsContent>
                     <TabsContent value="report" className="mt-3">
@@ -1404,14 +1636,43 @@ function SpectraTray({
   );
 }
 
-function SidebarCard({ title, children }: { title: string; children: React.ReactNode }) {
+function SidebarCard({
+  title,
+  children,
+  collapsible = false,
+  defaultCollapsed = false,
+}: {
+  title: string;
+  children: React.ReactNode;
+  collapsible?: boolean;
+  defaultCollapsed?: boolean;
+}) {
+  if (!collapsible) {
+    return (
+      <Card className="border-border/70 shadow-card">
+        <CardHeader className="pb-2">
+          <CardTitle className="text-sm font-semibold">{title}</CardTitle>
+        </CardHeader>
+        <CardContent>{children}</CardContent>
+      </Card>
+    );
+  }
   return (
-    <Card className="border-border/70 shadow-card">
-      <CardHeader className="pb-2">
-        <CardTitle className="text-sm font-semibold">{title}</CardTitle>
-      </CardHeader>
-      <CardContent>{children}</CardContent>
-    </Card>
+    <Collapsible defaultOpen={!defaultCollapsed}>
+      <Card className="border-border/70 shadow-card">
+        <CollapsibleTrigger asChild>
+          <CardHeader className="cursor-pointer pb-2 hover:bg-muted/30">
+            <CardTitle className="flex items-center justify-between text-sm font-semibold">
+              {title}
+              <ChevronDown className="h-4 w-4 text-muted-foreground transition-transform duration-200 [[data-state=closed]_&]:-rotate-90" />
+            </CardTitle>
+          </CardHeader>
+        </CollapsibleTrigger>
+        <CollapsibleContent>
+          <CardContent>{children}</CardContent>
+        </CollapsibleContent>
+      </Card>
+    </Collapsible>
   );
 }
 
@@ -1450,4 +1711,4 @@ function WorkerBadge({ status, onRetry }: { status: WorkerStatus; onRetry?: () =
   );
 }
 
-export default Maldi;
+export default Maldi;

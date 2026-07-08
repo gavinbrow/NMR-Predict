@@ -67,7 +67,7 @@ export interface PeakPickParams {
    * and drop the A+1, A+2… satellites. This is the peak you fit repeat units and
    * end groups against. Unlike isotope *flagging* it is intensity-independent, so
    * it stays correct for polymer envelopes where a satellite out-towers the
-   * monoisotopic peak. Optional; default off.
+   * monoisotopic peak. Optional; default on.
    */
   monoisotopicOnly?: boolean;
 }
@@ -78,6 +78,7 @@ export const ISOTOPE_SPACING = 1.0033548;
 export const PEAK_PRESETS: Record<PeakPreset, PeakPickParams> = {
   conservative: {
     preset: "conservative",
+    monoisotopicOnly: true,
     minSnr: 6,
     noiseWindow: 200,
     localMaxRadius: 3,
@@ -94,6 +95,7 @@ export const PEAK_PRESETS: Record<PeakPreset, PeakPickParams> = {
   },
   balanced: {
     preset: "balanced",
+    monoisotopicOnly: true,
     minSnr: 3,
     noiseWindow: 150,
     localMaxRadius: 2,
@@ -110,6 +112,7 @@ export const PEAK_PRESETS: Record<PeakPreset, PeakPickParams> = {
   },
   sensitive: {
     preset: "sensitive",
+    monoisotopicOnly: true,
     minSnr: 2,
     noiseWindow: 100,
     localMaxRadius: 2,
@@ -126,6 +129,7 @@ export const PEAK_PRESETS: Record<PeakPreset, PeakPickParams> = {
   },
   lowResLinear: {
     preset: "lowResLinear",
+    monoisotopicOnly: true,
     minSnr: 4,
     noiseWindow: 250,
     localMaxRadius: 5,
@@ -142,6 +146,7 @@ export const PEAK_PRESETS: Record<PeakPreset, PeakPickParams> = {
   },
   highResReflectron: {
     preset: "highResReflectron",
+    monoisotopicOnly: true,
     minSnr: 3,
     noiseWindow: 120,
     localMaxRadius: 2,
@@ -462,7 +467,9 @@ export function pickPeaks(spectrum: SpectrumData, params: PeakPickParams): Peak[
   peaks = mergeCloserThan(peaks, resolveSeparation(params, peaks));
   if (params.isotopeAware) flagIsotopes(peaks, params.charge);
   // Monoisotopic-only: collapse each isotope envelope to its left-most member.
-  if (params.monoisotopicOnly) peaks = dropIsotopeSatellites(peaks, params.charge);
+  // Default on (matches the PEAK_PRESETS default + the panel toggle "?? true"),
+  // so a legacy saved project without the field still picks monoisotopically.
+  if (params.monoisotopicOnly ?? true) peaks = dropIsotopeSatellites(peaks, params.charge);
   return peaks;
 }
 

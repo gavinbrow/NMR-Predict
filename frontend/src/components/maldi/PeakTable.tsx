@@ -12,7 +12,7 @@ import {
   Trash2,
   X,
 } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -31,11 +31,13 @@ interface PeakTableProps {
   onChange: (peaks: Peak[]) => void;
   highlightedPeakIds?: Set<string>;
   onSelectPeak?: (id: string) => void;
+  /** Peak ids explained by an assigned series (used by the "unexplained only" filter). */
+  explainedPeakIds?: Set<string>;
 }
 
-type SortKey = "mz" | "intensity" | "snr" | "width" | "confidence";
+type SortKey = "mz" | "intensity" | "snr" | "width";
 
-/** Numeric value a peak sorts by for a given column (undefined → sinks to end). */
+/** Numeric value a peak sorts by for a given column (undefined sinks to end). */
 function sortValue(peak: Peak, key: SortKey): number | undefined {
   switch (key) {
     case "mz":
@@ -46,8 +48,6 @@ function sortValue(peak: Peak, key: SortKey): number | undefined {
       return peak.snr;
     case "width":
       return peak.width;
-    case "confidence":
-      return peak.confidence;
   }
 }
 
@@ -62,15 +62,18 @@ const FLAG_STYLES: Record<string, string> = {
   solvent: "bg-red-100 text-red-700",
 };
 
-export function PeakTable({ peaks, onChange, highlightedPeakIds, onSelectPeak }: PeakTableProps) {
+export function PeakTable({ peaks, onChange, highlightedPeakIds, onSelectPeak, explainedPeakIds }: PeakTableProps) {
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [newMz, setNewMz] = useState("");
   const [newIntensity, setNewIntensity] = useState("");
   const [sortKey, setSortKey] = useState<SortKey | null>(null);
   const [sortDir, setSortDir] = useState<"asc" | "desc">("asc");
+  const [unexplainedOnly, setUnexplainedOnly] = useState(false);
+  const [bulkColor, setBulkColor] = useState("#d946ef");
+  const [bulkLabel, setBulkLabel] = useState("");
 
-  // Display-only ordering — never mutates the parent's peak list (series and
-  // edits reference peaks by id, so the on-screen order is free to change).
+  // Display-only ordering never mutates the parent peak list (series and edits
+  // reference peaks by id, so the on-screen order is free to change).
   const sortedPeaks = useMemo(() => {
     if (!sortKey) return peaks;
     const dir = sortDir === "asc" ? 1 : -1;
@@ -86,12 +89,34 @@ export function PeakTable({ peaks, onChange, highlightedPeakIds, onSelectPeak }:
     });
   }, [peaks, sortKey, sortDir]);
 
+  // "Unexplained only": accepted, not ignored, not flagged, and not explained by
+  // any assigned series. Lets the analyst triage leftover peaks (label/colour/delete).
+  const visiblePeaks = useMemo(() => {
+    if (!unexplainedOnly) return sortedPeaks;
+    return sortedPeaks.filter(
+      (p) => p.accepted !== false && !p.ignored && !p.flag && !(explainedPeakIds ?? new Set()).has(p.id),
+    );
+  }, [sortedPeaks, unexplainedOnly, explainedPeakIds]);
+
+  const visibleIds = useMemo(() => new Set(visiblePeaks.map((p) => p.id)), [visiblePeaks]);
+
+  // Keep the selection within the visible set when the filter changes so bulk
+  // delete/merge/label act only on what the user can see.
+  useEffect(() => {
+    setSelected((prev) => {
+      if (prev.size === 0) return prev;
+      const next = new Set<string>();
+      for (const id of prev) if (visibleIds.has(id)) next.add(id);
+      return next.size === prev.size ? prev : next;
+    });
+  }, [visibleIds]);
+
   const toggleSort = (key: SortKey) => {
     if (sortKey === key) {
       setSortDir((d) => (d === "asc" ? "desc" : "asc"));
     } else {
       setSortKey(key);
-      setSortDir(key === "mz" ? "asc" : "desc"); // m/z reads naturally ascending
+      setSortDir(key === "mz" ? "asc" : "desc");
     }
   };
 
@@ -105,6 +130,10 @@ export function PeakTable({ peaks, onChange, highlightedPeakIds, onSelectPeak }:
       else next.add(id);
       return next;
     });
+
+  const allVisibleSelected = visiblePeaks.length > 0 && visiblePeaks.every((p) => selected.has(p.id));
+  const toggleSelectAll = () =>
+    setSelected(allVisibleSelected ? new Set() : new Set(visiblePeaks.map((p) => p.id)));
 
   const addPeak = () => {
     const mz = Number(newMz);
@@ -128,10 +157,36 @@ export function PeakTable({ peaks, onChange, highlightedPeakIds, onSelectPeak }:
     const mz = members.reduce((s, p) => s + (p.centroid ?? p.mz) * p.intensity, 0) / totalIntensity;
     const merged = manualPeak(mz, Math.max(...members.map((p) => p.intensity)));
     merged.label = members.find((p) => p.label)?.label;
+    merged.color = members.find((p) => p.color)?.color;
     const rest = peaks.filter((p) => !selected.has(p.id));
     onChange([...rest, merged].sort((a, b) => a.mz - b.mz));
     setSelected(new Set());
   };
+
+  // Apply a colour and/or label to every selected peak (1..N at once).
+  const applyBulk = () => {
+    if (selected.size === 0) return;
+    onChange(
+      peaks.map((p) =>
+        selected.has(p.id)
+          ? {
+              ...p,
+              color: bulkColor || p.color,
+              label: bulkLabel ? bulkLabel : p.label,
+            }
+          : p,
+      ),
+    );
+    setBulkLabel("");
+  };
+
+  const unexplainedCount = useMemo(
+    () =>
+      peaks.filter(
+        (p) => p.accepted !== false && !p.ignored && !p.flag && !(explainedPeakIds ?? new Set()).has(p.id),
+      ).length,
+    [peaks, explainedPeakIds],
+  );
 
   return (
     <div className="flex h-full flex-col">
@@ -155,7 +210,27 @@ export function PeakTable({ peaks, onChange, highlightedPeakIds, onSelectPeak }:
           <Plus className="mr-1 h-3.5 w-3.5" />
           Add
         </Button>
-        <div className="ml-auto flex items-center gap-2">
+        <label className="flex items-center gap-1 text-[11px] text-muted-foreground" title="Show only peaks not explained by any assigned series">
+          <input type="checkbox" checked={unexplainedOnly} onChange={(e) => setUnexplainedOnly(e.target.checked)} />
+          Unexplained only{unexplainedCount > 0 && ` (${unexplainedCount})`}
+        </label>
+        <div className="ml-auto flex flex-wrap items-center gap-2">
+          <input
+            type="color"
+            value={bulkColor}
+            onChange={(e) => setBulkColor(e.target.value)}
+            title="Colour for selected peaks"
+            className="h-7 w-7 cursor-pointer rounded border border-border/60 bg-transparent p-0.5"
+          />
+          <Input
+            className="h-7 w-24 text-xs"
+            placeholder="label"
+            value={bulkLabel}
+            onChange={(e) => setBulkLabel(e.target.value)}
+          />
+          <Button size="sm" variant="outline" className="h-7" onClick={applyBulk} disabled={selected.size === 0}>
+            Apply
+          </Button>
           <Button
             size="sm"
             variant="outline"
@@ -181,24 +256,28 @@ export function PeakTable({ peaks, onChange, highlightedPeakIds, onSelectPeak }:
 
       {peaks.length === 0 ? (
         <p className="text-xs text-muted-foreground">No peaks yet. Run peak picking or add one manually.</p>
+      ) : visiblePeaks.length === 0 ? (
+        <p className="text-xs text-muted-foreground">No unexplained peaks. Every accepted peak belongs to a series or carries a flag.</p>
       ) : (
         <div className="min-h-0 flex-1 overflow-auto rounded-lg border border-border/60">
           <Table>
             <TableHeader className="sticky top-0 z-10 bg-card">
               <TableRow>
-                <TableHead className="w-8" />
+                <TableHead className="w-8">
+                  <input type="checkbox" checked={allVisibleSelected} onChange={toggleSelectAll} title="Select all visible" />
+                </TableHead>
                 <SortHead label="m/z" sortKey="mz" active={sortKey} dir={sortDir} onSort={toggleSort} />
                 <SortHead label="Intensity" sortKey="intensity" active={sortKey} dir={sortDir} onSort={toggleSort} />
                 <SortHead label="S/N" sortKey="snr" active={sortKey} dir={sortDir} onSort={toggleSort} />
                 <SortHead label="Width" sortKey="width" active={sortKey} dir={sortDir} onSort={toggleSort} />
-                <SortHead label="Conf." sortKey="confidence" active={sortKey} dir={sortDir} onSort={toggleSort} />
+                <TableHead className="w-10 text-xs">Color</TableHead>
                 <TableHead className="text-xs">Flag</TableHead>
                 <TableHead className="text-xs">Label</TableHead>
                 <TableHead className="text-xs">Actions</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
-              {sortedPeaks.map((peak) => {
+              {visiblePeaks.map((peak) => {
                 const rejected = peak.accepted === false || peak.ignored;
                 const highlighted = highlightedPeakIds?.has(peak.id);
                 return (
@@ -209,6 +288,7 @@ export function PeakTable({ peaks, onChange, highlightedPeakIds, onSelectPeak }:
                       rejected ? "opacity-50" : "",
                       "cursor-pointer",
                     ].join(" ")}
+                    style={peak.color ? { boxShadow: `inset 3px 0 0 ${peak.color}` } : undefined}
                     onClick={() => onSelectPeak?.(peak.id)}
                   >
                     <TableCell onClick={(e) => e.stopPropagation()}>
@@ -222,8 +302,14 @@ export function PeakTable({ peaks, onChange, highlightedPeakIds, onSelectPeak }:
                     <TableCell className="font-mono text-xs">{peak.intensity.toFixed(0)}</TableCell>
                     <TableCell className="font-mono text-xs">{peak.snr != null ? peak.snr.toFixed(1) : "—"}</TableCell>
                     <TableCell className="font-mono text-xs">{peak.width != null ? peak.width.toFixed(3) : "—"}</TableCell>
-                    <TableCell className="font-mono text-xs">
-                      {peak.confidence != null ? `${Math.round(peak.confidence * 100)}%` : "—"}
+                    <TableCell onClick={(e) => e.stopPropagation()}>
+                      <input
+                        type="color"
+                        value={peak.color ?? "#0ea5e9"}
+                        onChange={(e) => update(peak.id, { color: e.target.value })}
+                        title="Peak colour"
+                        className="h-6 w-7 cursor-pointer rounded border border-border/60 bg-transparent p-0.5"
+                      />
                     </TableCell>
                     <TableCell>
                       {peak.flag ? (
