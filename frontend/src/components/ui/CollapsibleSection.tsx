@@ -17,13 +17,22 @@ import { cn } from "@/lib/utils";
  *
  * The chevron/title acts as the toggle; `headerRight` holds controls (selects,
  * buttons) that stay clickable without collapsing the section.
+ *
+ * Supports both Radix Collapsible modes: uncontrolled via `defaultOpen`, or
+ * controlled via `open`/`onOpenChange`. The controlled escape hatch lets a host
+ * persist open/closed state (e.g. to localStorage) or force a card open/closed
+ * programmatically; tensile's existing callers pass only `defaultOpen` and are
+ * unaffected.
  */
 export function CollapsibleSection({
   title,
   icon: Icon,
   count,
   defaultOpen = false,
+  open,
+  onOpenChange,
   headerRight,
+  forceMount = false,
   className,
   contentClassName,
   children,
@@ -32,14 +41,28 @@ export function CollapsibleSection({
   icon?: LucideIcon;
   count?: number | string;
   defaultOpen?: boolean;
+  /** Controlled open state; when supplied the section is fully controlled. */
+  open?: boolean;
+  /** Called when the user toggles a controlled section. */
+  onOpenChange?: (open: boolean) => void;
   headerRight?: ReactNode;
+  /**
+   * Keep the content mounted while collapsed (Radix `CollapsibleContent
+   * forceMount`). Required when children hold local state mutated after an
+   * `await` (collapsing mid-run would destroy that state). The content is
+   * hidden via the `data-[state=closed]:hidden` class so the collapsed card
+   * still shows nothing.
+   */
+  forceMount?: boolean;
   className?: string;
   contentClassName?: string;
   children: ReactNode;
 }) {
   return (
     <Collapsible
-      defaultOpen={defaultOpen}
+      defaultOpen={open === undefined ? defaultOpen : undefined}
+      open={open}
+      onOpenChange={onOpenChange}
       className={cn(
         "rounded-2xl border border-border/70 bg-card shadow-card",
         className,
@@ -58,7 +81,14 @@ export function CollapsibleSection({
           <div className="flex shrink-0 items-center gap-2">{headerRight}</div>
         )}
       </div>
-      <CollapsibleContent className={cn("px-4 pb-4", contentClassName)}>
+      <CollapsibleContent
+        forceMount={forceMount ? true : undefined}
+        className={cn(
+          forceMount && "data-[state=closed]:hidden",
+          "px-4 pb-4",
+          contentClassName,
+        )}
+      >
         {children}
       </CollapsibleContent>
     </Collapsible>

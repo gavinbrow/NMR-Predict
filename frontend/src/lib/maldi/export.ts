@@ -11,7 +11,6 @@ import { jsPDF } from "jspdf";
 import { adductById, neutralMass } from "./adducts";
 import type { EndGroupCandidate } from "./endgroups";
 import type { Finding } from "./interpret";
-import type { LossEvent } from "./losses";
 import type { MolWeightStats } from "./molweight";
 import type {
   Adduct,
@@ -198,7 +197,6 @@ export interface ReportPayload {
   repeatMass?: number;
   molWeight?: MolWeightStats | null;
   endGroupCandidates?: EndGroupCandidate[];
-  losses?: LossEvent[];
   findings?: Finding[];
   /** PNG data URL of the on-screen spectrum, captured by the caller. */
   spectrumPng?: string | null;

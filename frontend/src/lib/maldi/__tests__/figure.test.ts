@@ -115,4 +115,96 @@ describe("buildMaldiFigureData", () => {
     });
     expect(data.sourceName).toBe("maldi");
   });
+
+  it("emits one stick series per group with stable ids + ladder colours, and no unassigned when every peak is grouped", () => {
+    const peaks = [peak("p1", 100, 10), peak("p2", 200, 20), peak("p3", 300, 30)];
+    const data = buildMaldiFigureData({
+      spectra: [primary()],
+      peaks,
+      showProfile: false,
+      showSticks: true,
+      labelPeaks: true,
+      sourceName: "x",
+      seriesGroups: [
+        { id: "sA", label: "[M+H]+", color: "#111111", peakIds: new Set(["p1", "p2"]) },
+        { id: "sB", label: "[M+Na]+", color: "#222222", peakIds: new Set(["p3"]) },
+      ],
+    });
+    const stickA = data.series.find((s) => s.id === "sticks:sA");
+    const stickB = data.series.find((s) => s.id === "sticks:sB");
+    expect(stickA?.styleHints).toMatchObject({ kind: "sticks", color: "#111111" });
+    expect(stickA?.x).toEqual([100, 200]);
+    expect(stickB?.styleHints?.color).toBe("#222222");
+    expect(stickB?.x).toEqual([300]);
+    // Every peak belongs to a group → no unassigned bucket.
+    expect(data.series.find((s) => s.id === "sticks:unassigned")).toBeUndefined();
+    // Labels carry the owning group's series id (drives "colour labels by series").
+    expect(data.peakLabels?.find((l) => l.id === "p1")?.seriesId).toBe("sticks:sA");
+    expect(data.peakLabels?.find((l) => l.id === "p3")?.seriesId).toBe("sticks:sB");
+  });
+
+  it("claims a peak shared by two groups for the first in array order, and buckets ungrouped peaks as 'sticks:unassigned'", () => {
+    const peaks = [peak("shared", 100, 10), peak("only", 200, 20), peak("loose", 300, 30)];
+    const data = buildMaldiFigureData({
+      spectra: [primary()],
+      peaks,
+      showProfile: false,
+      showSticks: true,
+      labelPeaks: true,
+      sourceName: "x",
+      // Caller passes groups in precedence order (confirmed first, then score);
+      // "shared" is in both, so the first group (sA) claims it.
+      seriesGroups: [
+        { id: "sA", label: "A", color: "#aaaaaa", peakIds: new Set(["shared", "only"]) },
+        { id: "sB", label: "B", color: "#bbbbbb", peakIds: new Set(["shared"]) },
+      ],
+    });
+    expect(data.series.find((s) => s.id === "sticks:sA")?.x).toEqual([100, 200]);
+    // sB's only member was claimed by sA → empty group → no series emitted.
+    expect(data.series.find((s) => s.id === "sticks:sB")).toBeUndefined();
+    expect(data.peakLabels?.find((l) => l.id === "shared")?.seriesId).toBe("sticks:sA");
+    // "loose" is in no group → unassigned sticks, and its label has no seriesId.
+    expect(data.series.find((s) => s.id === "sticks:unassigned")?.x).toEqual([300]);
+    expect(data.peakLabels?.find((l) => l.id === "loose")?.seriesId).toBeUndefined();
+  });
+
+  it("passes Peak.color / Peak.label straight through to the labels", () => {
+    const peaks = [peak("p1", 150, 5, { color: "#ff0000", label: "M+H" }), peak("p2", 250, 8)];
+    const data = buildMaldiFigureData({
+      spectra: [primary()],
+      peaks,
+      showProfile: false,
+      showSticks: false,
+      labelPeaks: true,
+      sourceName: "x",
+    });
+    // A user label wins verbatim and is marked custom so Decimals can't reformat it.
+    expect(data.peakLabels?.find((l) => l.id === "p1")).toMatchObject({
+      text: "M+H",
+      customText: true,
+      color: "#ff0000",
+    });
+    // No label/colour → m/z fallback, and neither flag is set.
+    const l2 = data.peakLabels?.find((l) => l.id === "p2");
+    expect(l2?.text).toBe("250.00");
+    expect(l2?.customText).toBeUndefined();
+    expect(l2?.color).toBeUndefined();
+  });
+
+  it("splits sticks by Peak.color so an individually-coloured peak keeps its colour", () => {
+    // The shared renderer strokes a whole stick series one colour, so a coloured
+    // peak must live in its own series. The uncoloured peaks stay in "sticks".
+    const peaks = [peak("p1", 150, 5, { color: "#ff0000" }), peak("p2", 250, 8)];
+    const data = buildMaldiFigureData({
+      spectra: [primary()],
+      peaks,
+      showProfile: false,
+      showSticks: true,
+      labelPeaks: false,
+      sourceName: "x",
+    });
+    const red = data.series.find((s) => s.styleHints?.color === "#ff0000");
+    expect(red?.x).toEqual([150]);
+    expect(data.series.find((s) => s.id === "sticks")?.x).toEqual([250]);
+  });
 });

@@ -50,8 +50,37 @@ export interface PeakLabelDatum {
   y: number;
   /** Pre-formatted fallback text, used when label decimals are set to "raw". */
   text: string;
-  /** Optional owning series id (reserved for future per-series label styling). */
+  /**
+   * When true, {@link text} is a host/user-authored label (e.g. a MALDI peak's
+   * `Peak.label`) that must be shown verbatim: the Decimals option only reformats
+   * labels *without* custom text. Without this flag a user's custom peak label
+   * would be overwritten by `x.toFixed(decimals)` the moment they touch Decimals.
+   */
+  customText?: boolean;
+  /**
+   * Optional per-datum colour (e.g. the peak's own `Peak.color`). It wins over
+   * both the "colour by series" mapping and the single label colour — this is how
+   * an individually-coloured peak reaches the label renderer.
+   */
+  color?: string;
+  /** Optional owning series id — used to colour labels by series (and, in the
+   *  MALDI adapter, to group sticks). */
   seriesId?: string;
+}
+
+/**
+ * Figure-only overrides for a single peak label, keyed by {@link PeakLabelDatum.id}.
+ * Deliberately thin: it holds only what is genuinely figure-local — placement
+ * (a drag offset) and visibility. Text and colour are *not* here; those come from
+ * the datum (the host's peak model, already editable/persisted/undoable), so the
+ * override layer never duplicates them.
+ */
+export interface PeakLabelOverride {
+  /** Removed from this figure only (the peak stays in the table / exports). */
+  hidden?: boolean;
+  /** Pixel offset from the anchor, set by dragging the label in the preview. */
+  dx?: number;
+  dy?: number;
 }
 
 /** The neutral plot shape both hosts feed into the figure maker. */
@@ -133,6 +162,19 @@ export interface PeakLabelOptions {
   maxLabels: number;
   /** Minimum horizontal spacing in px between kept labels (thins crowding). */
   minGap: number;
+  /**
+   * Colour each label by its owning series ({@link PeakLabelDatum.seriesId} →
+   * that series' style colour) instead of the single {@link color}. A per-datum
+   * {@link PeakLabelDatum.color} still wins over both.
+   */
+  colorBySeries: boolean;
+  /**
+   * Figure-only per-label overrides (placement nudge + hide), keyed by
+   * {@link PeakLabelDatum.id}. A label carrying an override — or a custom
+   * colour/text, or the current selection — bypasses thinning so an edit can't
+   * silently drop it. Default `{}`.
+   */
+  overrides: Record<string, PeakLabelOverride>;
 }
 
 export interface LegendOptions {
@@ -157,6 +199,16 @@ export interface FigureOptions {
   /** Figure size in px (the SVG viewBox; exports scale from here). */
   width: number;
   height: number;
+  /**
+   * PNG export scale multiplier (1×, 2×, …). Lives in the options rather than
+   * the `FigureMaker` so it survives the {@link FigurePopout} dialog unmounting
+   * and any host-level tab switch — the same reason the rest of the styling
+   * lives here. SVG export is vector and ignores this. Optional so raw
+   * {@link FigureOptions} construction (tests, new hosts) does not have to
+   * supply it; {@link FigureMaker} falls back to `2` when unset.
+   * {@link defaultFigureOptions} still seeds `2`.
+   */
+  pngScale?: number;
   background: "white" | "transparent";
   reversedX: boolean;
   /** Plot frame: the border box around the plot area, plus the tick marks. */
@@ -218,6 +270,15 @@ function defaultSeriesStyle(s: FigureSeriesData, index: number): SeriesStyle {
 
 /** Initial options seeded from the data (labels, palette colours, style hints). */
 export function defaultFigureOptions(data: FigureData): FigureOptions {
+  // Auto-show the legend for a modest multi-series figure. A MALDI stick figure
+  // can emit one series per assigned ladder (see the MALDI adapter's
+  // `seriesGroups`), so a flat cap of 12 would silently default the legend off
+  // once a sample carries many ladders — the one thing that legend is there to
+  // tell apart. Lift the ceiling when any stick series is present (a MALDI-only
+  // signal; IR/Kinetics never emit `kind: "sticks"`, so their seeding is
+  // unchanged). (WP6d)
+  const hasSticks = data.series.some((s) => s.styleHints?.kind === "sticks");
+  const legendCap = hasSticks ? 40 : 12;
   return {
     title: "",
     titleFontSize: 18,
@@ -226,6 +287,7 @@ export function defaultFigureOptions(data: FigureData): FigureOptions {
     tickFontSize: 12,
     width: 900,
     height: 560,
+    pngScale: 2,
     background: "white",
     reversedX: data.reversedX ?? false,
     frameShow: true,
@@ -237,7 +299,7 @@ export function defaultFigureOptions(data: FigureData): FigureOptions {
     y: defaultAxisOptions(data.yLabel),
     series: data.series.map(defaultSeriesStyle),
     legend: {
-      show: data.series.length > 1 && data.series.length <= 12,
+      show: data.series.length > 1 && data.series.length <= legendCap,
       position: "top-right",
       custom: null,
       fontSize: 12,
@@ -253,6 +315,8 @@ export function defaultFigureOptions(data: FigureData): FigureOptions {
       offset: 6,
       maxLabels: 25,
       minGap: 26,
+      colorBySeries: false,
+      overrides: {},
     },
   };
 }
@@ -267,6 +331,32 @@ export function reconcileFigureOptions(prev: FigureOptions, data: FigureData): F
     ...prev,
     series: data.series.map((s, i) => prevById.get(s.id) ?? defaultSeriesStyle(s, i)),
   };
+}
+
+/**
+ * Drop peak-label overrides whose peak id is gone from the data. Peak ids are
+ * `crypto.randomUUID()`s minted afresh on every re-pick (they do not survive
+ * re-picking), so without this a re-pick would leave placement/hide entries
+ * keyed by dead ids to accumulate forever — and, worse, a *new* peak that
+ * happened to reuse an id would inherit a stranger's placement. We deliberately
+ * do NOT re-bind by rounded m/z: a shifted centroid would silently mis-apply
+ * another peak's override. The trade-off (re-picking resets label placement) is
+ * surfaced to the user in the controls. Overrides for surviving ids are kept
+ * verbatim; the previous object is returned unchanged when nothing is dropped so
+ * callers can skip a needless state update.
+ */
+export function reconcilePeakLabelOverrides(
+  prev: Record<string, PeakLabelOverride>,
+  data: FigureData,
+): Record<string, PeakLabelOverride> {
+  const ids = new Set((data.peakLabels ?? []).map((p) => p.id));
+  let dropped = false;
+  const next: Record<string, PeakLabelOverride> = {};
+  for (const [id, ov] of Object.entries(prev)) {
+    if (ids.has(id)) next[id] = ov;
+    else dropped = true;
+  }
+  return dropped ? next : prev;
 }
 
 // --- axis math -------------------------------------------------------------------
@@ -540,25 +630,46 @@ export function sticksPathD(
  * `minGap` px of it, and stop at `maxLabels`. Returns the kept items in their
  * original order. Operates on already-projected x-pixels so it is pure and
  * testable independent of the renderer.
+ *
+ * A `pinned` item (one the user has edited/selected — see WP5b) is always kept:
+ * it bypasses both the `maxLabels` cap and the `minGap` rejection, so editing a
+ * label can never make it vanish. Pinned items still seed the kept-position set
+ * so an auto-picked label is not placed on top of one, and they do not consume
+ * the cap (the cap governs only the auto-thinned remainder).
  */
-export function pickVisibleLabels<T extends { px: number; weight: number }>(
+export function pickVisibleLabels<T extends { px: number; weight: number; pinned?: boolean }>(
   items: T[],
   maxLabels: number,
   minGap: number,
 ): T[] {
+  if (items.length === 0) return [];
   const cap = Math.max(0, Math.floor(maxLabels));
-  if (cap === 0 || items.length === 0) return [];
-  // Tag with original order, then prioritise by weight (taller peaks first).
-  const ranked = items.map((item, order) => ({ item, order })).sort((a, b) => b.item.weight - a.item.weight);
-  const keptPx: number[] = [];
-  const keptOrders: { item: T; order: number }[] = [];
   const gap = Math.max(0, minGap);
+  const keptPx: number[] = [];
+  const kept: { item: T; order: number }[] = [];
+
+  // Pinned labels first — unconditionally kept, and their positions block the
+  // gap check for the auto-picked ones below.
+  items.forEach((item, order) => {
+    if (item.pinned) {
+      keptPx.push(item.px);
+      kept.push({ item, order });
+    }
+  });
+
+  // Auto-thin the rest by weight (taller peaks first) under the cap + gap.
+  const ranked = items
+    .map((item, order) => ({ item, order }))
+    .filter((e) => !e.item.pinned)
+    .sort((a, b) => b.item.weight - a.item.weight);
+  let picked = 0;
   for (const entry of ranked) {
-    if (keptOrders.length >= cap) break;
+    if (picked >= cap) break;
     const px = entry.item.px;
     if (gap > 0 && keptPx.some((k) => Math.abs(k - px) < gap)) continue;
     keptPx.push(px);
-    keptOrders.push(entry);
+    kept.push(entry);
+    picked += 1;
   }
-  return keptOrders.sort((a, b) => a.order - b.order).map((e) => e.item);
+  return kept.sort((a, b) => a.order - b.order).map((e) => e.item);
 }

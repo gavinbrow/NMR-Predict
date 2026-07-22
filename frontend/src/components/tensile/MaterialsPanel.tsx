@@ -1,6 +1,6 @@
 import { Check, GitMerge, Layers, Pencil, Scissors } from "lucide-react";
 import { useState } from "react";
-import { CollapsibleSection } from "@/components/tensile/CollapsibleSection";
+import { CollapsibleSection } from "@/components/ui/CollapsibleSection";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import {

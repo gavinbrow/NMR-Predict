@@ -25,6 +25,7 @@ import {
 } from "@/components/ui/table";
 import { manualPeak } from "@/lib/maldi/peaks";
 import type { Peak } from "@/lib/maldi/types";
+import type { PeakOwner } from "@/pages/Maldi";
 
 interface PeakTableProps {
   peaks: Peak[];
@@ -33,6 +34,9 @@ interface PeakTableProps {
   onSelectPeak?: (id: string) => void;
   /** Peak ids explained by an assigned series (used by the "unexplained only" filter). */
   explainedPeakIds?: Set<string>;
+  /** When provided (Combine documents mode), a Source column shows the owning
+   *  document's name preceded by a colour dot. Absent = single-document mode. */
+  peakOwner?: Map<string, PeakOwner>;
 }
 
 type SortKey = "mz" | "intensity" | "snr" | "width";
@@ -62,7 +66,7 @@ const FLAG_STYLES: Record<string, string> = {
   solvent: "bg-red-100 text-red-700",
 };
 
-export function PeakTable({ peaks, onChange, highlightedPeakIds, onSelectPeak, explainedPeakIds }: PeakTableProps) {
+export function PeakTable({ peaks, onChange, highlightedPeakIds, onSelectPeak, explainedPeakIds, peakOwner }: PeakTableProps) {
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [newMz, setNewMz] = useState("");
   const [newIntensity, setNewIntensity] = useState("");
@@ -266,6 +270,7 @@ export function PeakTable({ peaks, onChange, highlightedPeakIds, onSelectPeak, e
                 <TableHead className="w-8">
                   <input type="checkbox" checked={allVisibleSelected} onChange={toggleSelectAll} title="Select all visible" />
                 </TableHead>
+                {peakOwner && <TableHead className="text-xs">Source</TableHead>}
                 <SortHead label="m/z" sortKey="mz" active={sortKey} dir={sortDir} onSort={toggleSort} />
                 <SortHead label="Intensity" sortKey="intensity" active={sortKey} dir={sortDir} onSort={toggleSort} />
                 <SortHead label="S/N" sortKey="snr" active={sortKey} dir={sortDir} onSort={toggleSort} />
@@ -298,6 +303,23 @@ export function PeakTable({ peaks, onChange, highlightedPeakIds, onSelectPeak, e
                         onChange={() => toggleSelect(peak.id)}
                       />
                     </TableCell>
+                    {peakOwner && (
+                      <TableCell className="text-xs">
+                        {(() => {
+                          const owner = peakOwner.get(peak.id);
+                          if (!owner) return <span className="text-muted-foreground">—</span>;
+                          return (
+                            <span className="inline-flex items-center gap-1.5">
+                              <span
+                                className="h-2.5 w-2.5 rounded-full"
+                                style={{ backgroundColor: owner.color }}
+                              />
+                              <span className="truncate">{owner.name}</span>
+                            </span>
+                          );
+                        })()}
+                      </TableCell>
+                    )}
                     <TableCell className="font-mono text-xs">{(peak.centroid ?? peak.mz).toFixed(3)}</TableCell>
                     <TableCell className="font-mono text-xs">{peak.intensity.toFixed(0)}</TableCell>
                     <TableCell className="font-mono text-xs">{peak.snr != null ? peak.snr.toFixed(1) : "—"}</TableCell>

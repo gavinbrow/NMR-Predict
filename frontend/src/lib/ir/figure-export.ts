@@ -10,6 +10,28 @@ import { FigureSvg } from "@/components/ir/figure/FigureSvg";
 import { triggerDownload } from "./export";
 import type { FigureData, FigureOptions } from "./figure";
 
+/**
+ * Canvas ceilings for the PNG raster path. Browsers cap a single canvas
+ * dimension near 16 384 px and the total area near ~268 MP (conservative across
+ * Chrome/Firefox/Safari); the `data:`-URI `<img>` rasterization used below adds
+ * no higher headroom. Past these a canvas silently allocates blank, so callers
+ * must refuse the export rather than emit an empty PNG.
+ */
+export const MAX_PNG_DIM = 16384;
+export const MAX_PNG_AREA = 268_000_000;
+
+/** Resolved output pixel size for a PNG export, and whether it fits the limits. */
+export function pngExportSize(
+  width: number,
+  height: number,
+  scale: number,
+): { outW: number; outH: number; ok: boolean } {
+  const outW = Math.max(1, Math.round(width * scale));
+  const outH = Math.max(1, Math.round(height * scale));
+  const ok = outW <= MAX_PNG_DIM && outH <= MAX_PNG_DIM && outW * outH <= MAX_PNG_AREA;
+  return { outW, outH, ok };
+}
+
 /** Standalone SVG markup of a rendered figure (explicit size, no CSS classes). */
 export function serializeFigureSvg(svg: SVGSVGElement): string {
   const clone = svg.cloneNode(true) as SVGSVGElement;
@@ -26,6 +48,15 @@ export async function figureSvgToPng(svg: SVGSVGElement, scale = 2): Promise<Blo
   const vb = svg.viewBox.baseVal;
   const w = vb?.width || svg.clientWidth || 900;
   const h = vb?.height || svg.clientHeight || 560;
+  // Refuse an oversize raster loudly — a canvas past the browser limits allocates
+  // blank, so this would otherwise download an empty PNG. The UI disables the
+  // button ahead of this; the guard covers any other caller.
+  const { outW, outH, ok } = pngExportSize(w, h, scale);
+  if (!ok) {
+    throw new Error(
+      `Requested PNG (${outW}×${outH}px) exceeds the browser canvas limit — lower the scale/DPI or the figure size.`,
+    );
+  }
   const markup = serializeFigureSvg(svg);
   const src = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(markup)}`;
 
@@ -37,8 +68,8 @@ export async function figureSvgToPng(svg: SVGSVGElement, scale = 2): Promise<Blo
   });
 
   const canvas = document.createElement("canvas");
-  canvas.width = Math.max(1, Math.round(w * scale));
-  canvas.height = Math.max(1, Math.round(h * scale));
+  canvas.width = outW;
+  canvas.height = outH;
   const ctx = canvas.getContext("2d");
   if (!ctx) throw new Error("Canvas 2D context unavailable");
   // No background pre-fill: a transparent figure stays transparent.

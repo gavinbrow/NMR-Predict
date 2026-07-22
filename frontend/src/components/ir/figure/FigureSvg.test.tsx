@@ -84,6 +84,56 @@ describe("FigureSvg — mass-spectrum features", () => {
   });
 });
 
+describe("FigureSvg — per-label resolution (WP5)", () => {
+  const fillOf = (container: HTMLElement, text: string) =>
+    Array.from(container.querySelectorAll("text"))
+      .find((t) => t.textContent === text)
+      ?.getAttribute("fill");
+
+  it("shows custom label text verbatim even when Decimals is set", () => {
+    const data = msData();
+    data.peakLabels![0].customText = true;
+    data.peakLabels![0].text = "[M+H]+";
+    const base = defaultFigureOptions(data);
+    const options = { ...base, peakLabels: { ...base.peakLabels, decimals: 1 } };
+    const { container } = render(<FigureSvg data={data} options={options} decimate={false} />);
+    const texts = Array.from(container.querySelectorAll("text")).map((t) => t.textContent);
+    expect(texts).toContain("[M+H]+"); // custom text is protected from the decimals reformat
+    expect(texts).toContain("400.0"); // a plain label is still reformatted
+  });
+
+  it("uses a per-datum colour over the global label colour", () => {
+    const data = msData();
+    data.peakLabels![0].color = "#ff0000";
+    const options = defaultFigureOptions(data);
+    const { container } = render(<FigureSvg data={data} options={options} decimate={false} />);
+    expect(fillOf(container, "200.00")).toBe("#ff0000");
+    expect(fillOf(container, "400.00")).toBe(options.peakLabels.color); // untouched → global
+  });
+
+  it("colours labels by their series when colorBySeries is on", () => {
+    const data = msData();
+    data.peakLabels![0].seriesId = "sticks"; // the sticks series is #0ea5e9
+    const base = defaultFigureOptions(data);
+    const options = { ...base, peakLabels: { ...base.peakLabels, colorBySeries: true } };
+    const { container } = render(<FigureSvg data={data} options={options} decimate={false} />);
+    expect(fillOf(container, "200.00")).toBe("#0ea5e9");
+  });
+
+  it("excludes a label with a hidden override", () => {
+    const data = msData();
+    const base = defaultFigureOptions(data);
+    const options = {
+      ...base,
+      peakLabels: { ...base.peakLabels, overrides: { p1: { hidden: true } } },
+    };
+    const { container } = render(<FigureSvg data={data} options={options} decimate={false} />);
+    const texts = Array.from(container.querySelectorAll("text")).map((t) => t.textContent);
+    expect(texts).not.toContain("200.00");
+    expect(texts).toContain("400.00");
+  });
+});
+
 describe("FigureSvg — window-aware decimation", () => {
   /** Count the vertices (`L` commands) of the first drawn line path. */
   function lineVertices(container: HTMLElement): number {

@@ -3,7 +3,7 @@
 // The to-do lists "AI-assisted explanation" as a later goal, but this workspace
 // is strictly client-side with no backend or cloud LLM (a hard project
 // constraint), so this module produces a transparent, rule-based narrative
-// instead: it turns the detected repeat units, series, end groups, losses and
+// instead: it turns the detected repeat units, series, end groups and
 // MALDI-apparent molecular weights into plain-language findings, each with a
 // confidence cue and the appropriate caveats. It asserts nothing it can't back
 // with the numbers already computed.
@@ -11,7 +11,6 @@
 import { adductById } from "./adducts";
 import { matchRepeatUnit } from "./repeatLibrary";
 import type { EndGroupCandidate } from "./endgroups";
-import type { LossEvent } from "./losses";
 import type { MolWeightStats } from "./molweight";
 import type { RepeatCandidate } from "./polymers";
 import type { Adduct, Peak, Series } from "./types";
@@ -29,7 +28,6 @@ export interface InterpretationInput {
   adducts: Adduct[];
   repeatCandidates?: RepeatCandidate[];
   endGroupCandidates?: EndGroupCandidate[];
-  losses?: LossEvent[];
   molWeight?: MolWeightStats | null;
 }
 
@@ -115,17 +113,6 @@ export function interpretSpectrum(input: InterpretationInput): Finding[] {
     findings.push({
       tone: "info",
       text: `MALDI-apparent Mn ≈ ${mw.mn.toFixed(0)}, Mw ≈ ${mw.mw.toFixed(0)}, Đ ≈ ${mw.dispersity.toFixed(3)} (${mw.massBasis} basis, ${mw.count} peaks). Intensities are not quantitative — treat as indicative only.`,
-    });
-  }
-
-  // Losses.
-  if (input.losses && input.losses.length > 0) {
-    const byLoss = new Map<string, number>();
-    for (const e of input.losses) byLoss.set(e.lossLabel, (byLoss.get(e.lossLabel) ?? 0) + 1);
-    const top = [...byLoss.entries()].sort((a, b) => b[1] - a[1]).slice(0, 3);
-    findings.push({
-      tone: "info",
-      text: `Common neutral losses observed: ${top.map(([l, n]) => `${l} (×${n})`).join(", ")}.`,
     });
   }
 

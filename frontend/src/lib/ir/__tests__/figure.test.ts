@@ -7,6 +7,7 @@ import {
   niceTicks,
   pickVisibleLabels,
   reconcileFigureOptions,
+  reconcilePeakLabelOverrides,
   resolveAxis,
   seriesPathD,
   sticksPathD,
@@ -272,6 +273,75 @@ describe("pickVisibleLabels", () => {
     ];
     expect(pickVisibleLabels(items, 10, 0)).toHaveLength(2);
   });
+
+  it("keeps a pinned label past the maxLabels cap", () => {
+    const items = [
+      { px: 0, weight: 1, pinned: true },
+      { px: 100, weight: 9 },
+      { px: 200, weight: 5 },
+    ];
+    // The pinned label is kept unconditionally; the cap (1) then governs only the
+    // non-pinned remainder, so the single tallest of those (weight 9) survives too.
+    const kept = pickVisibleLabels(items, 1, 10);
+    expect(kept.map((k) => k.px)).toEqual([0, 100]);
+  });
+
+  it("keeps a pinned label even at a zero cap", () => {
+    const items = [
+      { px: 5, weight: 1, pinned: true },
+      { px: 6, weight: 9 },
+    ];
+    expect(pickVisibleLabels(items, 0, 0)).toEqual([{ px: 5, weight: 1, pinned: true }]);
+  });
+
+  it("a pinned label ignores minGap but still blocks a crowded auto label", () => {
+    const items = [
+      { px: 10, weight: 1, pinned: true },
+      { px: 12, weight: 9 }, // within minGap of the pinned one → auto-dropped
+      { px: 200, weight: 2 },
+    ];
+    const kept = pickVisibleLabels(items, 10, 20);
+    // pinned px10 kept; px12 rejected (too close to the pinned); px200 kept.
+    expect(kept.map((k) => k.px)).toEqual([10, 200]);
+  });
+
+  it("a coloured-but-untouched peak is subject to the maxLabels cap", () => {
+    // Colour alone (no override/custom/selection) must not pin a label: a whole
+    // coloured repeat series should still thin to the tallest few.
+    const items = [
+      { px: 0, weight: 1 },
+      { px: 100, weight: 9 },
+      { px: 200, weight: 5 },
+    ];
+    const kept = pickVisibleLabels(items, 2, 10);
+    expect(kept.map((k) => k.weight)).toEqual([9, 5]);
+  });
+});
+
+describe("reconcilePeakLabelOverrides", () => {
+  const dataWith = (ids: string[]): FigureData => ({
+    x: [0],
+    series: [],
+    xLabel: "m/z",
+    yLabel: "I",
+    peakLabels: ids.map((id) => ({ id, x: 1, y: 1, text: "1" })),
+  });
+
+  it("drops overrides whose peak id is gone and keeps survivors", () => {
+    const prev = { a: { dx: 5 }, b: { hidden: true } };
+    expect(reconcilePeakLabelOverrides(prev, dataWith(["a"]))).toEqual({ a: { dx: 5 } });
+  });
+
+  it("returns the same object reference when nothing is dropped", () => {
+    const prev = { a: { dx: 5 } };
+    expect(reconcilePeakLabelOverrides(prev, dataWith(["a", "b"]))).toBe(prev);
+  });
+
+  it("drops everything when the data supplies no peak labels", () => {
+    const prev = { a: { dx: 5 } };
+    const data: FigureData = { x: [0], series: [], xLabel: "m/z", yLabel: "I" };
+    expect(reconcilePeakLabelOverrides(prev, data)).toEqual({});
+  });
 });
 
 describe("sticks & peak-label defaults", () => {
@@ -320,6 +390,16 @@ describe("default & reconcile options", () => {
     const many = makeData(Array.from({ length: 13 }, (_, i) => `s${i}`));
     expect(defaultFigureOptions(many).legend.show).toBe(false);
     expect(defaultFigureOptions(makeData(["a", "b"])).legend.show).toBe(true);
+  });
+
+  it("raises the legend auto-cap when stick series are present (MALDI ladders)", () => {
+    const many = makeData(Array.from({ length: 13 }, (_, i) => `s${i}`));
+    // As plain line series, 13 > 12 → the legend still defaults off.
+    expect(defaultFigureOptions(many).legend.show).toBe(false);
+    // One stick series marks a MALDI-style figure; the cap lifts so many assigned
+    // ladders no longer silently default the legend off (WP6d).
+    many.series[0].styleHints = { kind: "sticks" };
+    expect(defaultFigureOptions(many).legend.show).toBe(true);
   });
 
   it("reconcile keeps edits, seeds new series, drops removed ones", () => {

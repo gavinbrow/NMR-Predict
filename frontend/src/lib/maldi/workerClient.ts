@@ -22,7 +22,6 @@ import type { PeakPickParams } from "./peaks";
 import type { AssignOptions, CopolymerOptions, RepeatDetectOptions } from "./polymers";
 import type { EndGroupOptions } from "./endgroups";
 import type { FormulaCandidateOptions } from "./formula";
-import type { LossDetectOptions } from "./losses";
 
 /** Error thrown for any failed worker call (mirrors `NmrApiError`'s shape). */
 export class MaldiWorkerError extends Error {
@@ -185,10 +184,6 @@ export function assignSeries(
   return callWorker("assignSeries", { peaks, repeatMass, adducts, options: assignOptions }, options);
 }
 
-export function kendrick(peaks: Peak[], baseRepeat: number, options?: CallOptions) {
-  return callWorker("kendrick", { peaks, baseRepeat }, options);
-}
-
 export function solveEndGroups(
   peaks: Peak[],
   repeatMass: number,
@@ -209,10 +204,6 @@ export function formulaCandidates(
   options?: CallOptions,
 ) {
   return callWorker("formulaCandidates", { targetNeutralMass, options: candidateOptions }, options);
-}
-
-export function detectLosses(peaks: Peak[], lossOptions?: LossDetectOptions, options?: CallOptions) {
-  return callWorker("detectLosses", { peaks, options: lossOptions }, options);
 }
 
 export function detectCopolymer(

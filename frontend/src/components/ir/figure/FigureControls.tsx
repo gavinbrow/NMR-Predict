@@ -1,5 +1,7 @@
+import { Eye, EyeOff, RotateCcw } from "lucide-react";
 import { useMemo } from "react";
 import { Section } from "@/components/ir/Section";
+import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
@@ -21,7 +23,9 @@ import {
   type LegendOptions,
   type LegendPosition,
   type LineStyle,
+  type PeakLabelDatum,
   type PeakLabelOptions,
+  type PeakLabelOverride,
   type SeriesKind,
   type SeriesStyle,
 } from "@/lib/ir/figure";
@@ -30,6 +34,20 @@ interface FigureControlsProps {
   data: FigureData;
   options: FigureOptions;
   onChange: (next: FigureOptions) => void;
+  /** MS-only (peak labels present): the selected label's id and a setter, shared
+   *  with the live preview so clicking a label there opens its editor here. */
+  selectedLabelId?: string | null;
+  onSelectLabel?: (id: string | null) => void;
+  /** MS-only: count of in-view labels the thinner dropped (surfaced as a hint). */
+  hiddenByThinning?: number;
+  /**
+   * MS-only figure-only delete: remove the selected peak's stick AND label from
+   * this figure (the peak stays in the Peak table / exports — see the MALDI
+   * "delete from the figure is figure-only" decision). When a host wires it, the
+   * selected-label editor grows a "Delete peak from figure" action. Absent for
+   * IR/Kinetics, so the control never appears there. (WP6b)
+   */
+  onDeleteLabelPeak?: (id: string) => void;
 }
 
 const SIZE_PRESETS = [
@@ -64,12 +82,14 @@ function NumField({
   onChange,
   step = 1,
   min,
+  max,
 }: {
   label: string;
   value: number;
   onChange: (v: number) => void;
   step?: number;
   min?: number;
+  max?: number;
 }) {
   return (
     <div className="grid gap-1">
@@ -78,6 +98,7 @@ function NumField({
         type="number"
         step={step}
         min={min}
+        max={max}
         value={Number.isFinite(value) ? value : ""}
         onChange={(e) => onChange(Number(e.target.value))}
         className="h-8"
@@ -386,11 +407,84 @@ function SeriesRow({
   );
 }
 
+/** One peak label's row in the label list: eye toggle, colour swatch, the label
+ *  text (click to select for the placement editor), and a reset-placement button
+ *  once it has been dragged. Mirrors {@link SeriesRow}'s bordered-row idiom. */
+function PeakLabelRow({
+  text,
+  color,
+  hidden,
+  moved,
+  selected,
+  onSelect,
+  onToggleHidden,
+  onReset,
+}: {
+  text: string;
+  color: string;
+  hidden: boolean;
+  moved: boolean;
+  selected: boolean;
+  onSelect: () => void;
+  onToggleHidden: () => void;
+  onReset: () => void;
+}) {
+  return (
+    <div
+      className={`flex items-center gap-2 rounded-md border px-2 py-1 ${
+        selected ? "border-primary/60 bg-primary/5" : "border-border/50 bg-background/40"
+      }`}
+    >
+      <button
+        type="button"
+        onClick={onToggleHidden}
+        title={hidden ? "Show label" : "Hide label"}
+        className="shrink-0 text-muted-foreground hover:text-foreground"
+      >
+        {hidden ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
+      </button>
+      <span
+        className="h-3 w-3 shrink-0 rounded-full border border-border/60"
+        style={{ backgroundColor: color }}
+        title="Label colour (set per-peak in the Peak table)"
+      />
+      <button
+        type="button"
+        onClick={onSelect}
+        title={text}
+        className={`min-w-0 flex-1 truncate text-left text-xs ${
+          hidden ? "text-muted-foreground line-through" : "text-foreground"
+        }`}
+      >
+        {text}
+      </button>
+      {moved && (
+        <button
+          type="button"
+          onClick={onReset}
+          title="Reset placement"
+          className="shrink-0 text-muted-foreground hover:text-foreground"
+        >
+          <RotateCcw className="h-3.5 w-3.5" />
+        </button>
+      )}
+    </div>
+  );
+}
+
 /**
  * The full styling panel: title & size, fonts, both axes, per-series styles,
  * and the legend — every visual aspect of the exported figure.
  */
-export function FigureControls({ data, options, onChange }: FigureControlsProps) {
+export function FigureControls({
+  data,
+  options,
+  onChange,
+  selectedLabelId,
+  onSelectLabel,
+  hiddenByThinning,
+  onDeleteLabelPeak,
+}: FigureControlsProps) {
   const patch = (p: Partial<FigureOptions>) => onChange({ ...options, ...p });
   const patchAxis = (key: "x" | "y", p: Partial<AxisOptions>) =>
     onChange({ ...options, [key]: { ...options[key], ...p } });
@@ -406,9 +500,63 @@ export function FigureControls({ data, options, onChange }: FigureControlsProps)
   const patchPeakLabels = (p: Partial<PeakLabelOptions>) =>
     onChange({ ...options, peakLabels: { ...options.peakLabels, ...p } });
 
+  // Patch one label's figure-only override (placement nudge / hide). Keys back at
+  // their neutral default are dropped so an override never lingers as an empty
+  // object (which would needlessly pin the label past the thinner); an override
+  // left with nothing is removed entirely.
+  const patchPeakLabelOverride = (id: string, p: Partial<PeakLabelOverride>) => {
+    const merged = { ...(options.peakLabels.overrides[id] ?? {}), ...p };
+    const cleaned: PeakLabelOverride = {};
+    if (merged.hidden) cleaned.hidden = true;
+    if (merged.dx) cleaned.dx = merged.dx;
+    if (merged.dy) cleaned.dy = merged.dy;
+    const overrides = { ...options.peakLabels.overrides };
+    if (cleaned.hidden || cleaned.dx || cleaned.dy) overrides[id] = cleaned;
+    else delete overrides[id];
+    patchPeakLabels({ overrides });
+  };
+
+  // Bulk show/hide every label. "Hide all" marks each hidden; "Show all" clears
+  // the hidden flag but keeps any placement nudge.
+  const setAllLabelsHidden = (hidden: boolean) => {
+    const overrides: Record<string, PeakLabelOverride> = { ...options.peakLabels.overrides };
+    if (hidden) {
+      for (const p of data.peakLabels ?? []) {
+        overrides[p.id] = { ...(overrides[p.id] ?? {}), hidden: true };
+      }
+    } else {
+      for (const id of Object.keys(overrides)) {
+        const rest = { ...overrides[id] };
+        delete rest.hidden;
+        if (rest.dx || rest.dy) overrides[id] = rest;
+        else delete overrides[id];
+      }
+    }
+    patchPeakLabels({ overrides });
+  };
+
   // Spectrum-style figures (the host supplied peak labels) unlock the line/sticks
   // per-series toggle and the "Peaks & labels" section.
   const msMode = data.peakLabels !== undefined;
+
+  // Effective label colour/text (mirrors FigureSvg's resolution) for the swatches
+  // and the selected-label heading in the list below.
+  const seriesColorById = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const s of options.series) m.set(s.id, s.color);
+    return m;
+  }, [options.series]);
+  const labelColor = (d: PeakLabelDatum) =>
+    d.color ??
+    (options.peakLabels.colorBySeries && d.seriesId ? seriesColorById.get(d.seriesId) : undefined) ??
+    options.peakLabels.color;
+  const labelText = (d: PeakLabelDatum) =>
+    !d.customText && options.peakLabels.decimals >= 0 && Number.isFinite(d.x)
+      ? d.x.toFixed(options.peakLabels.decimals)
+      : d.text;
+  const selectedDatum = selectedLabelId
+    ? data.peakLabels?.find((p) => p.id === selectedLabelId)
+    : undefined;
 
   const presetKey =
     SIZE_PRESETS.find((s) => s.w === options.width && s.h === options.height)?.key ?? "custom";
@@ -702,12 +850,15 @@ export function FigureControls({ data, options, onChange }: FigureControlsProps)
                     value={options.peakLabels.fontSize}
                     onChange={(v) => patchPeakLabels({ fontSize: v })}
                     min={6}
+                    max={48}
                   />
                   <NumField
                     label="Offset (px)"
                     value={options.peakLabels.offset}
                     onChange={(v) => patchPeakLabels({ offset: v })}
                     step={1}
+                    min={0}
+                    max={200}
                   />
                   <ColorField
                     label="Colour"
@@ -720,10 +871,173 @@ export function FigureControls({ data, options, onChange }: FigureControlsProps)
                   checked={options.peakLabels.bold}
                   onChange={(v) => patchPeakLabels({ bold: v })}
                 />
+                <CheckLine
+                  label="Colour labels by series"
+                  checked={options.peakLabels.colorBySeries}
+                  onChange={(v) => patchPeakLabels({ colorBySeries: v })}
+                />
                 <p className="text-[11px] text-muted-foreground">
                   Labels track the data — only the tallest, non-overlapping peaks in view are
-                  drawn (raise “Max labels” or lower “Min spacing” to show more).
+                  drawn (raise “Max labels” or lower “Min spacing” to show more). Drag a label in
+                  the preview to move it; its text and colour come from the Peak table. Re-picking
+                  peaks resets label placement.
                 </p>
+                {(hiddenByThinning ?? 0) > 0 && (
+                  <p className="text-[11px] text-amber-600">
+                    {hiddenByThinning} label{hiddenByThinning === 1 ? "" : "s"} in view hidden by
+                    thinning — raise “Max labels” or lower “Min spacing” to show more.
+                  </p>
+                )}
+
+                {/* Selected-label placement editor (opened by clicking a label in
+                    the preview or the list below). */}
+                {selectedDatum && (
+                  <div className="grid gap-2 rounded-lg border border-primary/40 bg-primary/5 p-2">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="min-w-0 truncate text-xs font-medium text-foreground">
+                        Selected: {labelText(selectedDatum)}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => onSelectLabel?.(null)}
+                        className="shrink-0 text-[11px] text-muted-foreground hover:text-foreground"
+                      >
+                        Deselect
+                      </button>
+                    </div>
+                    <div className="grid grid-cols-2 gap-2">
+                      <NumField
+                        label="Nudge X (px)"
+                        value={options.peakLabels.overrides[selectedDatum.id]?.dx ?? 0}
+                        onChange={(v) => patchPeakLabelOverride(selectedDatum.id, { dx: v })}
+                      />
+                      <NumField
+                        label="Nudge Y (px)"
+                        value={options.peakLabels.overrides[selectedDatum.id]?.dy ?? 0}
+                        onChange={(v) => patchPeakLabelOverride(selectedDatum.id, { dy: v })}
+                      />
+                    </div>
+                    <div className="flex flex-wrap gap-2">
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="h-7"
+                        onClick={() => patchPeakLabelOverride(selectedDatum.id, { dx: 0, dy: 0 })}
+                      >
+                        <RotateCcw className="mr-1.5 h-3.5 w-3.5" />
+                        Reset placement
+                      </Button>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="h-7"
+                        onClick={() =>
+                          patchPeakLabelOverride(selectedDatum.id, {
+                            hidden: !options.peakLabels.overrides[selectedDatum.id]?.hidden,
+                          })
+                        }
+                      >
+                        {options.peakLabels.overrides[selectedDatum.id]?.hidden
+                          ? "Show label"
+                          : "Hide label"}
+                      </Button>
+                      {/* Figure-only delete (MALDI wires it): drops the peak's
+                          stick + label from THIS figure; the peak is untouched in
+                          the Peak table and every export. */}
+                      {onDeleteLabelPeak && (
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          className="h-7 text-destructive hover:text-destructive"
+                          onClick={() => {
+                            onDeleteLabelPeak(selectedDatum.id);
+                            onSelectLabel?.(null);
+                          }}
+                        >
+                          Delete peak from figure
+                        </Button>
+                      )}
+                    </div>
+                    <p className="text-[11px] text-muted-foreground">
+                      Edit the label’s text and colour in the Peak table.
+                      {onDeleteLabelPeak
+                        ? " Deleting only removes it from this figure — the peak stays in the table and exports."
+                        : ""}
+                    </p>
+                  </div>
+                )}
+
+                {/* Every label, with an eye toggle, colour swatch and reset. */}
+                {(data.peakLabels?.length ?? 0) > 0 && (
+                  <div className="grid gap-2">
+                    <div className="flex items-center justify-between gap-2">
+                      <Label className="text-[11px] text-muted-foreground">Individual labels</Label>
+                      <div className="flex gap-1">
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="h-6 px-2 text-[11px]"
+                          onClick={() => setAllLabelsHidden(false)}
+                        >
+                          Show all
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="h-6 px-2 text-[11px]"
+                          onClick={() => setAllLabelsHidden(true)}
+                        >
+                          Hide all
+                        </Button>
+                      </div>
+                    </div>
+                    {(data.peakLabels?.length ?? 0) > 4 ? (
+                      <ScrollArea className="h-56 pr-3">
+                        <div className="grid gap-1.5">
+                          {(data.peakLabels ?? []).map((d) => {
+                            const ov = options.peakLabels.overrides[d.id];
+                            return (
+                              <PeakLabelRow
+                                key={d.id}
+                                text={labelText(d)}
+                                color={labelColor(d)}
+                                hidden={ov?.hidden === true}
+                                moved={!!(ov?.dx || ov?.dy)}
+                                selected={d.id === selectedLabelId}
+                                onSelect={() => onSelectLabel?.(d.id === selectedLabelId ? null : d.id)}
+                                onToggleHidden={() =>
+                                  patchPeakLabelOverride(d.id, { hidden: !ov?.hidden })
+                                }
+                                onReset={() => patchPeakLabelOverride(d.id, { dx: 0, dy: 0 })}
+                              />
+                            );
+                          })}
+                        </div>
+                      </ScrollArea>
+                    ) : (
+                      <div className="grid gap-1.5">
+                        {(data.peakLabels ?? []).map((d) => {
+                          const ov = options.peakLabels.overrides[d.id];
+                          return (
+                            <PeakLabelRow
+                              key={d.id}
+                              text={labelText(d)}
+                              color={labelColor(d)}
+                              hidden={ov?.hidden === true}
+                              moved={!!(ov?.dx || ov?.dy)}
+                              selected={d.id === selectedLabelId}
+                              onSelect={() => onSelectLabel?.(d.id === selectedLabelId ? null : d.id)}
+                              onToggleHidden={() =>
+                                patchPeakLabelOverride(d.id, { hidden: !ov?.hidden })
+                              }
+                              onReset={() => patchPeakLabelOverride(d.id, { dx: 0, dy: 0 })}
+                            />
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+                )}
               </>
             )}
           </div>

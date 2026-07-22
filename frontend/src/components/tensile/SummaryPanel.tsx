@@ -1,7 +1,7 @@
 import { BarChart3, ScatterChart as ScatterIcon, Sigma } from "lucide-react";
 import { useMemo, useState } from "react";
 import { BarErrorChart, DistributionChart } from "@/components/tensile/charts";
-import { CollapsibleSection } from "@/components/tensile/CollapsibleSection";
+import { CollapsibleSection } from "@/components/ui/CollapsibleSection";
 import {
   Select,
   SelectContent,

@@ -1,22 +1,38 @@
 import { Download, FileCode, RotateCcw } from "lucide-react";
-import { useState } from "react";
+import { useCallback, useState } from "react";
 import { Button } from "@/components/ui/button";
 import {
   Select,
   SelectContent,
+  SelectGroup,
   SelectItem,
+  SelectLabel,
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import type { FigureData, FigureOptions } from "@/lib/ir/figure";
-import { downloadFigurePng, downloadFigureSvg } from "@/lib/ir/figure-export";
+import type { FigureData, FigureOptions, PeakLabelOverride } from "@/lib/ir/figure";
+import { downloadFigurePng, downloadFigureSvg, pngExportSize } from "@/lib/ir/figure-export";
 import { FigureControls } from "./FigureControls";
 import { FigureSvg } from "./FigureSvg";
+
+/** PNG export scale multipliers (WP5e). */
+const SCALE_MULTIPLIERS = [1, 2, 3, 4, 6, 8, 10];
+/** Print-DPI presets. The figure's px width is treated as inches at 96 dpi, so a
+ *  target of D dpi is simply a D/96 scale (independent of the figure size). */
+const DPI_PRESETS = [150, 300, 600];
+const DPI_BASE = 96;
 
 interface FigureMakerProps {
   data: FigureData;
   options: FigureOptions;
   onChange: (next: FigureOptions) => void;
+  /**
+   * MS-only figure-only delete, forwarded to the selected-label editor as
+   * "Delete peak from figure". A MALDI host wires it to drop the peak's stick +
+   * label from the figure (the peak stays in the Peak table / exports). Absent
+   * for IR/Kinetics, so no delete control appears there. (WP6b)
+   */
+  onDeletePeak?: (id: string) => void;
 }
 
 /** Checkerboard backdrop so a transparent figure background is visible. */
@@ -35,10 +51,50 @@ const CHECKER: React.CSSProperties = {
  * styling panel on the right. The preview SVG is the same component the
  * exporters render, so the saved file matches the screen exactly.
  */
-export function FigureMaker({ data, options, onChange }: FigureMakerProps) {
-  const [scale, setScale] = useState(2);
+export function FigureMaker({ data, options, onChange, onDeletePeak }: FigureMakerProps) {
+  const scale = options.pngScale ?? 2;
+  const setScale = (next: number) => onChange({ ...options, pngScale: next });
   const [busy, setBusy] = useState(false);
   const stem = data.sourceName ?? "figure";
+
+  // The selected peak label (MS figures only): FigureSvg draws its ring and
+  // FigureControls shows its placement editor. Transient preview state — losing
+  // it on a tab switch is fine; the placement it edits lives in `options`.
+  const [selectedLabelId, setSelectedLabelId] = useState<string | null>(null);
+  // Drawn-vs-thinned label counts, reported up from the renderer so the controls
+  // can surface "N labels hidden". Guarded so equal counts don't loop renders.
+  const [labelStats, setLabelStats] = useState({ shown: 0, hiddenByThinning: 0 });
+  const handleLabelStats = useCallback(
+    (s: { shown: number; hiddenByThinning: number }) =>
+      setLabelStats((prev) =>
+        prev.shown === s.shown && prev.hiddenByThinning === s.hiddenByThinning ? prev : s,
+      ),
+    [],
+  );
+
+  // A label was dragged: write its px nudge into the figure-only override map
+  // (through `onChange`, so it survives export and tab switches). Same pattern as
+  // the legend drag below.
+  const handleLabelMove = (id: string, offset: { dx: number; dy: number }) => {
+    const prev = options.peakLabels.overrides[id] ?? {};
+    const next: PeakLabelOverride = {
+      ...prev,
+      dx: Math.round(offset.dx * 10) / 10,
+      dy: Math.round(offset.dy * 10) / 10,
+    };
+    onChange({
+      ...options,
+      peakLabels: {
+        ...options.peakLabels,
+        overrides: { ...options.peakLabels.overrides, [id]: next },
+      },
+    });
+  };
+
+  // Resolved PNG output size + whether it fits the browser canvas limits.
+  const png = pngExportSize(options.width, options.height, scale);
+  const dpiMatch = DPI_PRESETS.find((d) => d / DPI_BASE === scale);
+  const scaleSuffix = dpiMatch ? `${dpiMatch}dpi` : `${scale}x`;
 
   const exportSvg = async () => {
     setBusy(true);
@@ -50,9 +106,10 @@ export function FigureMaker({ data, options, onChange }: FigureMakerProps) {
   };
 
   const exportPng = async () => {
+    if (!png.ok) return;
     setBusy(true);
     try {
-      await downloadFigurePng(data, options, scale, `${stem}_${scale}x.png`);
+      await downloadFigurePng(data, options, scale, `${stem}_${scaleSuffix}.png`);
     } finally {
       setBusy(false);
     }
@@ -105,6 +162,10 @@ export function FigureMaker({ data, options, onChange }: FigureMakerProps) {
               onZoom={handleZoom}
               onResetZoom={resetZoom}
               onLegendMove={handleLegendMove}
+              selectedLabelId={selectedLabelId}
+              onLabelSelect={setSelectedLabelId}
+              onLabelMove={handleLabelMove}
+              onLabelStats={handleLabelStats}
               className="h-auto w-full"
             />
           </div>
@@ -115,29 +176,45 @@ export function FigureMaker({ data, options, onChange }: FigureMakerProps) {
             <div>
               <h3 className="text-sm font-semibold text-foreground">Export</h3>
               <p className="text-xs text-muted-foreground">
-                SVG is true vector · PNG saves at{" "}
-                {Math.round(options.width * scale)}×{Math.round(options.height * scale)}px
+                SVG is true vector · PNG saves at {png.outW}×{png.outH}px
                 {options.background === "transparent" ? " with transparency" : ""}.
               </p>
+              {!png.ok && (
+                <p className="mt-1 text-[11px] text-destructive">
+                  Too large for the browser to rasterize — lower the scale/DPI or the figure size.
+                  SVG still exports at any size.
+                </p>
+              )}
             </div>
             <div className="flex items-center gap-2">
               <Select value={String(scale)} onValueChange={(v) => setScale(Number(v))}>
-                <SelectTrigger className="h-9 w-20">
+                <SelectTrigger className="h-9 w-28">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  {[1, 2, 3, 4].map((s) => (
-                    <SelectItem key={s} value={String(s)}>
-                      {s}×
-                    </SelectItem>
-                  ))}
+                  <SelectGroup>
+                    <SelectLabel>Multiplier</SelectLabel>
+                    {SCALE_MULTIPLIERS.map((s) => (
+                      <SelectItem key={`x${s}`} value={String(s)}>
+                        {s}×
+                      </SelectItem>
+                    ))}
+                  </SelectGroup>
+                  <SelectGroup>
+                    <SelectLabel>Print DPI</SelectLabel>
+                    {DPI_PRESETS.map((d) => (
+                      <SelectItem key={`d${d}`} value={String(d / DPI_BASE)}>
+                        {d} dpi
+                      </SelectItem>
+                    ))}
+                  </SelectGroup>
                 </SelectContent>
               </Select>
               <Button variant="outline" size="sm" disabled={busy} onClick={exportSvg}>
                 <FileCode className="mr-1.5 h-4 w-4" />
                 SVG
               </Button>
-              <Button size="sm" disabled={busy} onClick={exportPng}>
+              <Button size="sm" disabled={busy || !png.ok} onClick={exportPng}>
                 <Download className="mr-1.5 h-4 w-4" />
                 PNG
               </Button>
@@ -149,7 +226,15 @@ export function FigureMaker({ data, options, onChange }: FigureMakerProps) {
       {/* The styling panel scrolls on its own so reaching the bottom controls
           never means scrolling the whole page/dialog. */}
       <div className="min-w-0 xl:sticky xl:top-0 xl:max-h-[calc(100vh-7rem)] xl:overflow-y-auto xl:pr-1">
-        <FigureControls data={data} options={options} onChange={onChange} />
+        <FigureControls
+          data={data}
+          options={options}
+          onChange={onChange}
+          selectedLabelId={selectedLabelId}
+          onSelectLabel={setSelectedLabelId}
+          hiddenByThinning={labelStats.hiddenByThinning}
+          onDeleteLabelPeak={onDeletePeak}
+        />
       </div>
     </div>
   );

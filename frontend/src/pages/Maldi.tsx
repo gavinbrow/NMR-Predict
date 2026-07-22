@@ -1,35 +1,26 @@
 import {
-  ChevronDown,
   CircleCheck,
   CircleSlash,
   FolderOpen,
   HardDrive,
-  Layers,
   Loader2,
   RotateCw,
-  Rows3,
   Save,
   Upload,
-  X,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import { AppShell } from "@/components/AppShell";
 import { AdductPanel } from "@/components/maldi/AdductPanel";
 import { BatchPanel } from "@/components/maldi/BatchPanel";
-import { CompareView, type ComparisonSpectrum } from "@/components/maldi/CompareView";
 import { CopolymerPanel } from "@/components/maldi/CopolymerPanel";
 import { MaldiFigurePanel } from "@/components/maldi/figure/MaldiFigurePanel";
+import { useFigureOptions } from "@/components/ir/figure/useFigureOptions";
 import { FormulaTools, type IsotopeOverlay } from "@/components/maldi/FormulaTools";
 import { ImportPanel } from "@/components/maldi/ImportPanel";
 import { InterpretationPanel, type ExportKind } from "@/components/maldi/InterpretationPanel";
-import { KendrickPlot } from "@/components/maldi/KendrickPlot";
-import {
-  MaldiSpectrumPlot,
-  type MaldiSpectrumPlotHandle,
-} from "@/components/maldi/MaldiSpectrumPlot";
-import { StackedSpectraPlot, type StackSpectrum } from "@/components/maldi/StackedSpectraPlot";
-import { LossPanel } from "@/components/maldi/LossPanel";
+import { MaldiSpectrumPlot, type MaldiSpectrumPlotHandle } from "@/components/maldi/MaldiSpectrumPlot";
+import { DocumentsPanel } from "@/components/maldi/DocumentsPanel";
 import { MolWeightPanel } from "@/components/maldi/MolWeightPanel";
 import { PeakPickingPanel } from "@/components/maldi/PeakPickingPanel";
 import { PeakTable } from "@/components/maldi/PeakTable";
@@ -39,7 +30,7 @@ import { SeriesTable } from "@/components/maldi/SeriesTable";
 import { TemplatePanel } from "@/components/maldi/TemplatePanel";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
+import { CollapsibleSection } from "@/components/ui/CollapsibleSection";
 import { Input } from "@/components/ui/input";
 import {
   Select,
@@ -49,8 +40,18 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
 import { useMaldiUndo, type UndoSnapshot } from "@/hooks/useMaldiUndo";
+import { usePersistedState } from "@/hooks/use-persisted-state";
 import { adductById, ALL_BUILTIN_ADDUCTS } from "@/lib/maldi/adducts";
+import { buildMaldiFigureData, type MaldiFigureSeriesGroup, type MaldiFigureSpectrum } from "@/lib/maldi/figure";
 import {
   exportPeaksCsv,
   exportProjectJson,
@@ -62,13 +63,12 @@ import {
   type ReportPayload,
 } from "@/lib/maldi/export";
 import { interpretSpectrum, type Finding } from "@/lib/maldi/interpret";
-import type { LossEvent } from "@/lib/maldi/losses";
 import { summarizeMolWeight } from "@/lib/maldi/molweight";
 import type { ParseMeta } from "@/lib/maldi/parse";
 import { manualPeak, PEAK_PRESETS, type PeakPickParams } from "@/lib/maldi/peaks";
-import { fitLadder, peaksForRepeat, seriesForRepeat } from "@/lib/maldi/polymers";
+import { fitLadder, peaksForRepeat, seriesAdductLabel, seriesForRepeat } from "@/lib/maldi/polymers";
 import { explainedPeakIds as explainedPeakIdsHelper, sameLadderSiblings, unexplainedPeaks } from "@/lib/maldi/seriesMatch";
-import { buildLadderColorMap } from "@/lib/maldi/seriesColor";
+import { buildLadderColorMap, SERIES_COLORS } from "@/lib/maldi/seriesColor";
 import type { CopolymerSeries, RepeatCandidate, RepeatSeriesGroup } from "@/lib/maldi/polymers";
 import {
   createProject,
@@ -88,11 +88,11 @@ import type {
   ProjectSummary,
   Series,
   SpectrumData,
+  StackSpectrum,
 } from "@/lib/maldi/types";
 import {
   assignSeries,
   detectCopolymer,
-  detectLosses,
   detectRepeatUnits,
   disposeWorker,
   flagBackground,
@@ -105,29 +105,46 @@ import {
 } from "@/lib/maldi/workerClient";
 
 type WorkerStatus = "checking" | "ready" | "error";
-type ViewMode = "single" | "overlay" | "stacked";
 
 /** One open spectrum in the session, carrying its own full analysis state. */
-interface MaldiDocument {
+export interface MaldiDocument {
   id: string;
   name: string;
   /** Saved-project id once persisted, else null. */
   projectId: string | null;
   createdAt: number;
   state: ProjectState;
+  /**
+   * Per-document trace styling. Session-only UI state — deliberately NOT part of
+   * `ProjectState`, NOT persisted, and NOT in `useMaldiUndo`'s deps (hiding a
+   * trace must not undo an unrelated analysis edit). The colour doubles as the
+   * legend swatch in the Documents panel; `offset` is the per-trace vertical
+   * shift used by the overlay/stack view; `visible` gates whether the trace is
+   * drawn at all.
+   */
+  color: string;
+  visible: boolean;
+  offset: number;
 }
 
-let comparisonCounter = 0;
+/** Owning document for a pooled peak (Combine documents mode). */
+export interface PeakOwner {
+  docId: string;
+  name: string;
+  color: string;
+}
 
 /**
- * Distinct colours for the per-ladder view when a repeat unit is split into its
- * interleaved series. Shared by the plot (stems) and the series list (swatches),
- * indexed positionally so the two always agree.
+ * Pick the trace colour for the next-opened document. Walks `SERIES_COLORS` by
+ * a monotonically increasing counter (total documents ever created this
+ * session) rather than the current live document count, so closing a document
+ * can't cause a subsequent import to reuse a colour still held by an open
+ * document. The palette has 10 entries (see `seriesColor.ts`); positional
+ * assignment keeps a document's colour stable for the rest of the session.
  */
-const SERIES_COLORS = [
-  "#d946ef", "#0ea5e9", "#22c55e", "#f59e0b", "#ef4444",
-  "#8b5cf6", "#14b8a6", "#ec4899", "#65a30d", "#f97316",
-];
+function nextDocColor(count: number): string {
+  return SERIES_COLORS[count % SERIES_COLORS.length];
+}
 
 /**
  * A fresh SNIP baseline step, auto-applied on every import so the spectrum's
@@ -144,6 +161,9 @@ function defaultBaselineStep(): ProcessingStep {
   };
 }
 
+/** Sidebar cards that default open; every other card id defaults collapsed. */
+const DEFAULT_CARD_OPEN: Record<string, boolean> = { import: true, "peak-picking": true };
+
 const Maldi = () => {
   const [workerStatus, setWorkerStatus] = useState<WorkerStatus>("checking");
 
@@ -157,12 +177,11 @@ const Maldi = () => {
   const [processed, setProcessed] = useState<SpectrumData | null>(null);
   const [steps, setSteps] = useState<ProcessingStep[]>([]);
   const [peaks, setPeaks] = useState<Peak[]>([]);
-  const [pickParams, setPickParams] = useState<PeakPickParams>({ ...PEAK_PRESETS.balanced });
+  const [pickParams, setPickParams] = useState<PeakPickParams>({ ...PEAK_PRESETS.conservative });
   const [selectedAdductIds, setSelectedAdductIds] = useState<string[]>(["H", "Na", "K"]);
   const [customAdducts, setCustomAdducts] = useState<Adduct[]>([]);
   const [repeatCandidates, setRepeatCandidates] = useState<RepeatCandidate[]>([]);
   const [repeatMass, setRepeatMass] = useState(0);
-  const [baseRepeat, setBaseRepeat] = useState(0);
   const [endGroupMass, setEndGroupMass] = useState(0);
   const [series, setSeries] = useState<Series[]>([]);
   const [selectedSeriesId, setSelectedSeriesId] = useState<string | null>(null);
@@ -181,12 +200,10 @@ const Maldi = () => {
 
   // --- Phase 3/4 state --------------------------------------------------------
   const [overlay, setOverlay] = useState<IsotopeOverlay | null>(null);
-  const [losses, setLosses] = useState<LossEvent[]>([]);
   const [copolymerSeries, setCopolymerSeries] = useState<CopolymerSeries[]>([]);
   const [copolymerA, setCopolymerA] = useState(0);
   const [copolymerB, setCopolymerB] = useState(0);
   const [selectedCopolymerId, setSelectedCopolymerId] = useState<string | null>(null);
-  const [comparisons, setComparisons] = useState<ComparisonSpectrum[]>([]);
   const [exportHistory, setExportHistory] = useState<ExportRecord[]>([]);
   // Mirror of exportHistory read by the undo restore (the log is append-only and
   // excluded from snapshots, so a restore must preserve the current log).
@@ -196,7 +213,23 @@ const Maldi = () => {
   }, [exportHistory]);
   const [documents, setDocuments] = useState<MaldiDocument[]>([]);
   const [activeDocId, setActiveDocId] = useState<string | null>(null);
-  const [viewMode, setViewMode] = useState<ViewMode>("single");
+  // Monotonically increasing count of documents ever created this session
+  // (never decremented on close). Drives `nextDocColor` so closing a document
+  // can't make a subsequent import reuse a colour still held by an open doc.
+  const docsCreatedCountRef = useRef(0);
+  // The "reference" document is the minuend of the active − reference difference
+  // trace (the Difference toggle in the Documents panel). It is session-only UI
+  // state — NOT part of `ProjectState`, NOT persisted, NOT in `useMaldiUndo`'s
+  // deps (same exclusion rule as the per-document trace styling). The reference
+  // survives document switches and refreshes don't.
+  const [referenceDocId, setReferenceDocId] = useState<string | null>(null);
+  const [difference, setDifference] = useState(false);
+  // Combine documents: treat every VISIBLE document as one for the Peak table,
+  // Figure and Mol. weight tabs. Session-only UI state — NOT part of ProjectState,
+  // NOT persisted, NOT in useMaldiUndo's deps (same exclusion rule as the per-
+  // document trace styling). Picking, processing and series assignment stay
+  // scoped to the active document even while this is on.
+  const [combineDocuments, setCombineDocuments] = useState(false);
   const plotHandleRef = useRef<MaldiSpectrumPlotHandle>(null);
   const projectImportRef = useRef<HTMLInputElement>(null);
 
@@ -206,9 +239,7 @@ const Maldi = () => {
   const [picking, setPicking] = useState(false);
   const [detecting, setDetecting] = useState(false);
   const [assigning, setAssigning] = useState(false);
-  const [detectingLosses, setDetectingLosses] = useState(false);
   const [detectingCopolymer, setDetectingCopolymer] = useState(false);
-  const [addingComparison, setAddingComparison] = useState(false);
   const [saving, setSaving] = useState(false);
 
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
@@ -283,11 +314,18 @@ const Maldi = () => {
 
 
   // Every open document's display spectrum, for the overlay / stacked view modes.
+  // Carries the per-document trace styling (color / visible / offset) so the plot
+  // and the Documents panel share one source of truth. The active doc keeps its
+  // special case: its spectrum is read from the live `processed ?? raw` hooks
+  // (which may be newer than `documents[active].state`), while inactive docs are
+  // read from their snapshotted state.
   const docSpectra = useMemo<StackSpectrum[]>(() => {
     return documents
-      .map((d) => {
+      .map((d): StackSpectrum | null => {
         const spectrum = d.id === activeDocId ? processed ?? raw : d.state.processedSpectrum ?? d.state.rawSpectrum;
-        return spectrum ? { id: d.id, name: d.name, spectrum } : null;
+        return spectrum
+          ? { id: d.id, name: d.name, spectrum, color: d.color, visible: d.visible, offset: d.offset }
+          : null;
       })
       .filter((x): x is StackSpectrum => x !== null);
   }, [documents, activeDocId, processed, raw]);
@@ -297,6 +335,280 @@ const Maldi = () => {
     () => docSpectra.filter((d) => d.id !== activeDocId),
     [docSpectra, activeDocId],
   );
+
+  // Combine documents: the active doc's LIVE peaks plus each OTHER VISIBLE doc's
+  // snapshotted `state.peaks`, flat-merged (peak ids are crypto.randomUUID, so
+  // cross-document collisions are impossible) and sorted by m/z. Only computed
+  // when the toggle is ON; otherwise the host everywhere uses the live `peaks`
+  // hook exactly as before. `peakOwnerMap` keys each pooled peak id to its owning
+  // document so the Peak table's Source column and the write-back split can route
+  // edits to the right document. Hidden documents are excluded — combining never
+  // touches a hidden document's peaks.
+  const { pooledPeaks, peakOwnerMap } = useMemo<{
+    pooledPeaks: Peak[];
+    peakOwnerMap: Map<string, PeakOwner>;
+  }>(() => {
+    if (!combineDocuments) return { pooledPeaks: [], peakOwnerMap: new Map() };
+    const out: Peak[] = [];
+    const owners = new Map<string, PeakOwner>();
+    for (const d of documents) {
+      if (d.visible === false) continue;
+      const isOwnerActive = d.id === activeDocId;
+      const owner: PeakOwner = { docId: d.id, name: d.name, color: d.color };
+      const src = isOwnerActive ? peaks : (d.state.peaks ?? []);
+      for (const p of src) {
+        out.push(p);
+        owners.set(p.id, owner);
+      }
+    }
+    out.sort((a, b) => (a.centroid ?? a.mz) - (b.centroid ?? b.mz));
+    return { pooledPeaks: out, peakOwnerMap: owners };
+  }, [combineDocuments, documents, activeDocId, peaks]);
+
+  // The peak list the right-hand tabs read: pooled when Combine is on, otherwise
+  // the live active-doc peaks (unchanged single-document behaviour).
+  const analysisPeaks = combineDocuments ? pooledPeaks : peaks;
+
+  // Merged confirmed-series list for the Series tab when Combine is on: every
+  // VISIBLE document's `endGroupLocked` series, each tagged with its owning
+  // document so the table can show a Source column. The assign/detect actions
+  // stay scoped to the active document (see the hint under the tab), so this
+  // merged view is read-only display — editing a series still writes back to the
+  // active doc's `series` via the existing handlers.
+  const pooledSeries = useMemo(() => {
+    if (!combineDocuments) return [];
+    const out: { series: Series; owner: PeakOwner }[] = [];
+    for (const d of documents) {
+      if (d.visible === false) continue;
+      const src = d.id === activeDocId ? series : (d.state.series ?? []);
+      const owner: PeakOwner = { docId: d.id, name: d.name, color: d.color };
+      for (const s of src) {
+        if (!s.endGroupLocked) continue;
+        out.push({ series: s, owner });
+      }
+    }
+    return out;
+  }, [combineDocuments, documents, activeDocId, series]);
+
+  // The flat trace list the plot renders: ALL open documents in document order,
+  // active INCLUDED. The plot renders the set of visible documents and does not
+  // care which is active; the active trace is emphasised but otherwise just
+  // another row. Field names map `StackSpectrum` (optional styling) to the
+  // plot's `PlotTrace` (required styling with sensible defaults).
+  const plotTraces = useMemo(
+    () =>
+      docSpectra.map((d) => ({
+        id: d.id,
+        name: d.name,
+        spectrum: d.spectrum,
+        color: d.color ?? "#0ea5e9",
+        visible: d.visible !== false,
+        offset: d.offset ?? 0,
+      })),
+    [docSpectra],
+  );
+  // Normalize: ON by default when more than one document is visible (a weak
+  // spectrum is invisible under a strong one), OFF for a single document —
+  // normalising a lone spectrum would change today's behaviour and the Peak
+  // table's intensity numbers (which read the primary, un-normalised). The
+  // Documents panel's Normalize switch is the user-facing override; the auto
+  // rule re-applies only when the visible-count crosses the 1↔2 boundary, so a
+  // manual toggle inside one regime (one vs. many visible docs) sticks until
+  // the regime changes. (WP3 §7 + WP4.)
+  const visibleDocCount = useMemo(
+    () => docSpectra.filter((d) => d.visible !== false).length,
+    [docSpectra],
+  );
+  const [normalize, setNormalize] = useState(false);
+  const prevVisibleCountRef = useRef(0);
+  useEffect(() => {
+    const prev = prevVisibleCountRef.current;
+    // Re-apply the auto rule only on a 1↔many crossing; leave the user's manual
+    // toggle untouched within the same regime.
+    if ((prev <= 1) !== (visibleDocCount <= 1)) {
+      setNormalize(visibleDocCount > 1);
+    }
+    prevVisibleCountRef.current = visibleDocCount;
+  }, [visibleDocCount]);
+
+  // Stack: spread the visible traces out with evenly-spaced vertical offsets so
+  // they don't overlap. Session-only — NOT in `ProjectState`, `buildState`,
+  // `loadState`, or `useMaldiUndo`'s deps (same exclusion rule as the per-
+  // document trace styling). Turning ON snapshots every document's current
+  // offset into a ref so turning OFF can restore it; the active document is
+  // included in the stack order just like any other, so the picture is
+  // identical regardless of which document is active. The step is unit-aware:
+  // 120 in normalized-% units, or 1.2 × the max intensity across the visible
+  // traces in raw-count units (Normalize off).
+  const [stacked, setStacked] = useState(false);
+  const savedOffsetsRef = useRef<Record<string, number>>({});
+  const visibleStackKey = useMemo(
+    () => documents.filter((d) => d.visible !== false).map((d) => d.id).join("|"),
+    [documents],
+  );
+  const maxIntensityAcrossVisibleTraces = useMemo(() => {
+    let m = 0;
+    for (const d of docSpectra) {
+      if (d.visible === false) continue;
+      const arr = d.spectrum.intensity;
+      for (let i = 0; i < arr.length; i += 1) {
+        const v = arr[i];
+        if (Number.isFinite(v) && v > m) m = v;
+      }
+    }
+    return m;
+  }, [docSpectra]);
+  const stackStep = useMemo(
+    () => (normalize ? 120 : 1.2 * maxIntensityAcrossVisibleTraces),
+    [normalize, maxIntensityAcrossVisibleTraces],
+  );
+  const stackStepRef = useRef(stackStep);
+  stackStepRef.current = stackStep;
+
+  // The reference spectrum for Difference mode: the snapshotted display
+  // spectrum of the document the user marked "ref" in the Documents panel. Read
+  // from `docSpectra` (never `documents[].state.rawSpectrum` directly — that's
+  // stale for the active doc by design; see `docSpectra`'s comment). Null when
+  // difference mode is off, no reference is set, the reference has no spectrum,
+  // or the reference trace is hidden — subtracting a trace the user can't see is
+  // confusing, so `MaldiSpectrumPlot` then renders the primary trace unchanged.
+  const differenceWith = useMemo<SpectrumData | null>(() => {
+    if (!difference || !referenceDocId) return null;
+    const ref = docSpectra.find((d) => d.id === referenceDocId);
+    if (!ref || ref.visible === false) return null;
+    return ref.spectrum ?? null;
+  }, [difference, referenceDocId, docSpectra]);
+
+  // If the reference document becomes hidden while Difference mode is active,
+  // automatically clear the reference and turn Difference off — silently
+  // plotting `active − hidden_trace` would be confusing because the user can no
+  // longer see what is being subtracted. This runs whenever the reference doc's
+  // visibility flips; the `differenceWith` memo above is a belt-and-suspenders
+  // guard so the plot never receives a hidden reference even transiently.
+  useEffect(() => {
+    if (!referenceDocId) return;
+    const refDoc = documents.find((d) => d.id === referenceDocId);
+    if (!refDoc || refDoc.visible === false) {
+      setReferenceDocId(null);
+      setDifference(false);
+    }
+  }, [referenceDocId, documents]);
+
+  // --- Figure tab state, hoisted to the always-mounted host (WP0a). ----------
+  // The Figure tab's TabsContent has no forceMount, so keeping this state inside
+  // MaldiFigurePanel meant every tab switch tore it down and discarded the
+  // user's in-progress figure (include toggles, styling, scale). The codebase's
+  // own convention (FigureDialog.tsx:16-18, ViewExport.tsx:196) is to hold
+  // useFigureOptions at the host; MALDI was the lone violator.
+  const [figShowProfile, setFigShowProfile] = useState(true);
+  const [figShowSticks, setFigShowSticks] = useState(false);
+  const [figSelectedOnly, setFigSelectedOnly] = useState(false);
+  // Flagged peaks (isotope/shoulder/matrix/salt) are excluded from the figure by
+  // default — matches unexplainedPeaks (seriesMatch.ts:16-18) and the PeakTable
+  // "unexplained" filter. The switch is a figure-only override (WP0c).
+  const [figIncludeFlagged, setFigIncludeFlagged] = useState(false);
+  // Figure-only ladder picker + peak deletes (WP6b). Both are figure-local and
+  // deliberately kept OUT of the plot's highlight and undo (they're a composition
+  // aid, not analysis state): ticking ladders shows only their peaks, and a
+  // figure-only delete drops a peak's stick + label while it stays in the Peak
+  // table / exports (decision 1). Session-only, so NOT in useMaldiUndo's deps.
+  const [figSeriesIds, setFigSeriesIds] = useState<Set<string>>(() => new Set());
+  const [figExcludedPeakIds, setFigExcludedPeakIds] = useState<Set<string>>(() => new Set());
+
+  const figHasSelection = (highlightedPeakIds?.size ?? 0) > 0;
+
+  // The confirmed ladders the figure picker offers — the same set the Series tab
+  // shows (superseded duplicate readings are hidden). Ticked ones both filter the
+  // peaks and drive the per-series stick grouping.
+  const figConfirmedSeries = useMemo(() => series.filter((s) => s.endGroupLocked), [series]);
+  // Intersect the ticked ids with the still-existing confirmed ladders, so a
+  // ladder deleted after being picked can't strand the figure in an empty state.
+  const figSelectedSeries = useMemo(
+    () => figConfirmedSeries.filter((s) => figSeriesIds.has(s.id)),
+    [figConfirmedSeries, figSeriesIds],
+  );
+
+  // Peaks that drive the sticks + labels: accepted, not ignored, optionally
+  // narrowed to the current selection and/or the picked ladders, with library-
+  // flagged peaks excluded by default, and finally minus the figure-only deletes.
+  // `figHiddenCount` counts only deletes that would otherwise be visible here, so
+  // "N hidden" reflects the current view (and drops stale ids from past re-picks).
+  const { figShownPeaks, figHiddenCount } = useMemo(() => {
+    const accepted = analysisPeaks.filter((p) => p.accepted !== false && !p.ignored);
+    const unflagged = figIncludeFlagged ? accepted : accepted.filter((p) => !p.flag);
+    let base = unflagged;
+    if (figSelectedOnly && figHasSelection) {
+      base = base.filter((p) => highlightedPeakIds!.has(p.id));
+    }
+    if (figSelectedSeries.length > 0) {
+      const inSelected = new Set<string>();
+      for (const s of figSelectedSeries) for (const m of s.members) inSelected.add(m.peakId);
+      base = base.filter((p) => inSelected.has(p.id));
+    }
+    const shown =
+      figExcludedPeakIds.size > 0 ? base.filter((p) => !figExcludedPeakIds.has(p.id)) : base;
+    return { figShownPeaks: shown, figHiddenCount: base.length - shown.length };
+  }, [analysisPeaks, figIncludeFlagged, figSelectedOnly, figHasSelection, highlightedPeakIds, figSelectedSeries, figExcludedPeakIds]);
+
+  // Per-series stick groups for the adapter: one per ticked ladder, ordered by
+  // precedence so a peak shared by several ladders is claimed by the right one —
+  // confirmed first (all are, here) then higher score. Colour comes straight from
+  // `colorForSeries` so the figure agrees with the plot stems. Undefined when no
+  // ladder is ticked → the adapter emits the single legacy "sticks" series.
+  const figSeriesGroups = useMemo<MaldiFigureSeriesGroup[] | undefined>(() => {
+    if (figSelectedSeries.length === 0) return undefined;
+    return figSelectedSeries
+      .slice()
+      .sort((a, b) => (b.score ?? 0) - (a.score ?? 0))
+      .map((s) => ({
+        id: s.id,
+        label: s.label || seriesAdductLabel(s, allAdducts),
+        color: colorForSeries(s),
+        peakIds: new Set(s.members.map((m) => m.peakId)),
+      }));
+  }, [figSelectedSeries, allAdducts, colorForSeries]);
+
+  // The figure-engine data: profile traces + optional stick series + m/z labels.
+  // Recomputed when the inputs change; the options hook below carries the user's
+  // styling across these updates (reconcileFigureOptions). The overlay set is
+  // driven by document **visibility** (WP4) — every visible non-active document
+  // becomes an extra profile trace, so the screen and the exported figure can't
+  // disagree. The Documents panel's per-row checkbox is the single source of
+  // truth; the old `includeOthers` switch is gone.
+  const figureData = useMemo(() => {
+    const activeSpectrum = processed ?? raw;
+    const spectra: MaldiFigureSpectrum[] = [];
+    if (activeSpectrum) {
+      spectra.push({ id: "active", name: sourceName || projectName || "spectrum", spectrum: activeSpectrum });
+    }
+    spectra.push(...otherFigureSpectra.filter((d) => d.visible !== false).map((d) => ({ id: d.id, name: d.name, spectrum: d.spectrum })));
+    return buildMaldiFigureData({
+      spectra,
+      peaks: figShownPeaks,
+      showProfile: figShowProfile,
+      showSticks: figShowSticks,
+      labelPeaks: true, // label DATA is always supplied; the maker toggles display.
+      sourceName: sourceName || projectName,
+      seriesGroups: figSeriesGroups,
+    });
+  }, [processed, raw, sourceName, projectName, otherFigureSpectra, figShownPeaks, figShowProfile, figShowSticks, figSeriesGroups]);
+
+  const [figureOptions, setFigureOptions] = useFigureOptions(figureData);
+
+  // Figure picker + figure-only-delete handlers (WP6b). All mutate figure-local
+  // Sets only; none touch analysis state or undo.
+  const handleToggleFigureSeries = useCallback((id: string) => {
+    setFigSeriesIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }, []);
+  const handleFigureDeletePeak = useCallback((id: string) => {
+    setFigExcludedPeakIds((prev) => (prev.has(id) ? prev : new Set(prev).add(id)));
+  }, []);
+  const handleFigureRestorePeaks = useCallback(() => setFigExcludedPeakIds(new Set()), []);
 
   // Verify the compute worker — with retries. A single transient miss (e.g. the
   // Vite dev re-optimization that fires the first time MALDI's worker-only deps
@@ -384,10 +696,8 @@ const Maldi = () => {
     setPeaks([]);
     setSeries([]);
     setRepeatCandidates([]);
-    setLosses([]);
     setCopolymerSeries([]);
     setRepeatMass(0);
-    setBaseRepeat(0);
     setEndGroupMass(0);
     setOverlay(null);
     setHighlightedPeakIds(undefined);
@@ -412,14 +722,13 @@ const Maldi = () => {
     state.selectedAdductIds = selectedAdductIds;
     state.pickParams = pickParams;
     state.repeatMass = repeatMass;
-    state.baseRepeat = baseRepeat;
     state.endGroupMass = endGroupMass;
     state.repeatIsotopeAware = repeatIsotopeAware;
     state.copolymerA = copolymerA;
     state.copolymerB = copolymerB;
     state.exportHistory = exportHistory;
     return state;
-  }, [sourceName, raw, processed, steps, peaks, customAdducts, series, selectedAdductIds, pickParams, repeatMass, baseRepeat, endGroupMass, repeatIsotopeAware, copolymerA, copolymerB, exportHistory]);
+  }, [sourceName, raw, processed, steps, peaks, customAdducts, series, selectedAdductIds, pickParams, repeatMass, endGroupMass, repeatIsotopeAware, copolymerA, copolymerB, exportHistory]);
 
   const loadState = useCallback((s: ProjectState) => {
     setSourceName(s.sourceName);
@@ -430,16 +739,14 @@ const Maldi = () => {
     setCustomAdducts(s.adducts ?? []);
     setSeries(s.series ?? []);
     setSelectedAdductIds(s.selectedAdductIds ?? ["H", "Na", "K"]);
-    setPickParams(s.pickParams ?? { ...PEAK_PRESETS.balanced });
+    setPickParams(s.pickParams ?? { ...PEAK_PRESETS.conservative });
     setRepeatMass(s.repeatMass ?? 0);
-    setBaseRepeat(s.baseRepeat ?? s.repeatMass ?? 0);
     setEndGroupMass(s.endGroupMass ?? 0);
     setRepeatIsotopeAware(s.repeatIsotopeAware ?? true);
     setCopolymerA(s.copolymerA ?? 0);
     setCopolymerB(s.copolymerB ?? 0);
     setExportHistory(s.exportHistory ?? []);
     setRepeatCandidates([]);
-    setLosses([]);
     setCopolymerSeries([]);
     setOverlay(null);
     setHighlightedPeakIds(undefined);
@@ -450,12 +757,32 @@ const Maldi = () => {
     setIsolateSelection(false);
     setSelectedCopolymerId(null);
     setParseMeta(null);
+    setFigSeriesIds(new Set());
+    setFigExcludedPeakIds(new Set());
   }, []);
 
   const snapshotActiveDoc = useCallback((): MaldiDocument | null => {
     if (!activeDocId) return null;
-    return { id: activeDocId, name: projectName, projectId, createdAt: projectCreatedAt.current, state: buildState() };
-  }, [activeDocId, projectName, projectId, buildState]);
+    // Preserve the document's session-only trace styling (colour/visibility/offset)
+    // across the snapshot — those fields are not part of ProjectState and must
+    // survive the round-trip through `documents[].state` unchanged.
+    const existing = documents.find((d) => d.id === activeDocId);
+    let color = existing?.color;
+    if (!color) {
+      color = nextDocColor(docsCreatedCountRef.current);
+      docsCreatedCountRef.current += 1;
+    }
+    return {
+      id: activeDocId,
+      name: projectName,
+      projectId,
+      createdAt: projectCreatedAt.current,
+      state: buildState(),
+      color,
+      visible: existing?.visible ?? true,
+      offset: existing?.offset ?? 0,
+    };
+  }, [activeDocId, documents, projectName, projectId, buildState]);
 
   const clearLive = useCallback(() => {
     setProjectId(null);
@@ -472,92 +799,134 @@ const Maldi = () => {
     resetDownstream();
   }, [resetDownstream]);
 
-  // Open an imported spectrum as a brand-new document (carrying over the current
-  // processing pipeline + adduct selection as a sensible starting point).
-  const applySpectrum = useCallback(
-    (spectrum: SpectrumData, fileName: string, meta: ParseMeta | null) => {
-      const name = fileName.replace(/\.[^.]+$/, "");
+  // Open one or more imported spectra as brand-new documents (carrying over the
+  // current processing pipeline + adduct selection as a sensible starting point).
+  // IMPORTANT: this cannot be implemented as a loop over a single-file "apply one"
+  // helper, because that helper would close over `snapshotActiveDoc()` — which
+  // captures `buildState`'s ~15 `useCallback` deps. A synchronous loop would
+  // snapshot the outgoing doc with the pre-flush state on every iteration after
+  // the first (the setDocuments updates haven't committed yet), so subsequent
+  // snapshots would either drop or cross-contaminate documents. Instead we
+  // snapshot the outgoing active doc exactly once, append all new documents in a
+  // single `setDocuments` update, and make the LAST imported one active. The
+  // per-file read + extension-dispatch mirrors BatchPanel's sequential loop.
+  const applySpectra = useCallback(
+    (items: { spectrum: SpectrumData; fileName: string; meta: ParseMeta | null }[]) => {
+      if (items.length === 0) return;
       const snap = snapshotActiveDoc();
-      const docId = crypto.randomUUID();
       const createdAt = Date.now();
+      // Mint ids + colours up front from the monotonically increasing
+      // `docsCreatedCountRef` (never decremented on close), so all new documents
+      // get distinct palette entries and closing a document can't make a later
+      // import reuse a colour still held by an open doc.
+      const startCount = docsCreatedCountRef.current;
+      const newDocs = items.map((it, i) => ({
+        id: crypto.randomUUID(),
+        name: it.fileName.replace(/\.[^.]+$/, ""),
+        projectId: null as string | null,
+        createdAt,
+        state: {
+          ...emptyProjectState(it.fileName),
+          rawSpectrum: it.spectrum,
+          processing: [defaultBaselineStep()],
+          selectedAdductIds,
+          pickParams,
+        },
+        visible: true,
+        offset: 0,
+        color: nextDocColor(startCount + i),
+      }));
+      docsCreatedCountRef.current = startCount + newDocs.length;
+      const last = items[items.length - 1];
+      const lastDocId = newDocs[newDocs.length - 1].id;
       setDocuments((prev) => {
         const saved = snap ? prev.map((d) => (d.id === snap.id ? snap : d)) : prev;
-        return [...saved, { id: docId, name, projectId: null, createdAt, state: emptyProjectState(fileName) }];
+        return [...saved, ...newDocs];
       });
+      // Reset the live hooks to the LAST imported spectrum.
       resetDownstream();
-      setRaw(spectrum);
+      setRaw(last.spectrum);
       setProcessed(null);
       // Auto-baseline every newly imported spectrum (reversible in Processing).
       setSteps([defaultBaselineStep()]);
-      setParseMeta(meta);
-      setSourceName(fileName);
+      setParseMeta(last.meta);
+      setSourceName(last.fileName);
       setProjectId(null);
       projectCreatedAt.current = createdAt;
-      setProjectName(name);
-      setActiveDocId(docId);
-      setViewMode("single");
+      setProjectName(last.fileName.replace(/\.[^.]+$/, ""));
+      setActiveDocId(lastDocId);
+      // `viewMode` was deleted in WP4 — both documents stay visible and overlay
+      // on the single always-mounted plot; the newest becomes active.
     },
-    [snapshotActiveDoc, resetDownstream],
+    [snapshotActiveDoc, resetDownstream, pickParams, selectedAdductIds],
   );
 
   // --- Import -----------------------------------------------------------------
-  const handleImport = useCallback(
-    async (text: string, fileName: string, options: Parameters<typeof parse>[1]) => {
+  // Multi-file import. Reads each file sequentially (CSV/TXT via `parse`, mzML/
+  // mzXML/MGF via `parseMs` — the same extension dispatch BatchPanel uses), then
+  // hands the whole batch to `applySpectra` in one shot. A naive per-file loop
+  // that snapshotted + setDocuments'd on each iteration would re-snapshot the
+  // outgoing doc before React had flushed the previous update, dropping or
+  // cross-contaminating documents (see `applySpectra`).
+  const handleImportFiles = useCallback(
+    async (files: FileList | File[], options: Parameters<typeof parse>[1]) => {
+      const list = Array.from(files);
+      if (list.length === 0) return;
       setParsing(true);
       try {
-        const result = await parse(text, options);
-        applySpectrum(result.spectrum, fileName, result.meta);
-        toast.success(`Imported ${result.meta.rowCount.toLocaleString()} points`);
-      } catch (error) {
-        console.error(error);
-        toast.error(error instanceof Error ? error.message : "Import failed");
+        const items: { spectrum: SpectrumData; fileName: string; meta: ParseMeta | null }[] = [];
+        let lastError: Error | null = null;
+        for (const file of list) {
+          try {
+            if (/\.(mzml|mzxml|mgf)$/i.test(file.name)) {
+              const buffer = await file.arrayBuffer();
+              const result = await parseMs(buffer, file.name);
+              items.push({ spectrum: result.spectrum, fileName: file.name, meta: null });
+            } else {
+              const text = await file.text();
+              const result = await parse(text, options);
+              items.push({ spectrum: result.spectrum, fileName: file.name, meta: result.meta });
+            }
+          } catch (error) {
+            lastError = error instanceof Error ? error : new Error(String(error));
+            console.error(error);
+            // Continue with the rest so one bad file in a multi-file drop doesn't
+            // discard the others; surface the failure as a toast at the end.
+            toast.error(`${file.name}: ${lastError.message}`);
+          }
+        }
+        if (items.length > 0) {
+          applySpectra(items);
+          const points = items.reduce((sum, it) => sum + it.spectrum.mz.length, 0);
+          toast.success(
+            `Imported ${items.length} ${items.length === 1 ? "spectrum" : "spectra"} · ${points.toLocaleString()} points${lastError ? " (some files failed — see console)" : ""}`,
+          );
+        }
       } finally {
         setParsing(false);
       }
     },
-    [applySpectrum],
-  );
-
-  const handleMsImport = useCallback(
-    async (buffer: ArrayBuffer, fileName: string) => {
-      setParsing(true);
-      try {
-        const result = await parseMs(buffer, fileName);
-        applySpectrum(result.spectrum, fileName, null);
-        toast.success(`Imported ${result.meta.pointCount.toLocaleString()} points (${result.meta.format})`);
-      } catch (error) {
-        console.error(error);
-        toast.error(error instanceof Error ? error.message : "Import failed");
-      } finally {
-        setParsing(false);
-      }
-    },
-    [applySpectrum],
+    [applySpectra],
   );
 
   // --- Global drag-and-drop import ------------------------------------------
   // Drop a spectrum file ANYWHERE on the page (not just the import box). A window
-  // listener handles drops that a dedicated drop zone (the import box or the
-  // Compare panel) did not already handle — those call preventDefault, so we skip
-  // them here via `defaultPrevented` to avoid a double import.
+  // listener handles drops that a dedicated drop zone (the import box) did not
+  // already handle — those call preventDefault, so we skip them here via
+  // `defaultPrevented` to avoid a double import.
   const [pageDragActive, setPageDragActive] = useState(false);
   const dragDepth = useRef(0);
 
   const importDroppedFile = useCallback(
     (files: FileList | null) => {
-      const file = files?.[0];
-      if (!file) return;
-      const reader = new FileReader();
-      if (/\.(mzml|mzxml|mgf)$/i.test(file.name)) {
-        reader.onload = () => handleMsImport(reader.result as ArrayBuffer, file.name);
-        reader.readAsArrayBuffer(file);
-      } else {
-        reader.onload = () =>
-          handleImport(String(reader.result ?? ""), file.name, { delimiter: "auto", hasHeader: "auto" });
-        reader.readAsText(file);
-      }
+      if (!files || files.length === 0) return;
+      // The global drop handler dispatches every dropped file in one batch so a
+      // multi-file drop opens them all as documents in a single `applySpectra`
+      // update (rather than snapshotting the active doc once per file, which
+      // would cross-contaminate the outgoing state — see `applySpectra`).
+      void handleImportFiles(files, { delimiter: "auto", hasHeader: "auto" });
     },
-    [handleImport, handleMsImport],
+    [handleImportFiles],
   );
 
   useEffect(() => {
@@ -604,7 +973,6 @@ const Maldi = () => {
     try {
       const result = await pickPeaks(target, pickParams);
       setSeries([]);
-      setLosses([]);
       setCopolymerSeries([]);
       setSelectedSeriesId(null);
       highlightPeaks(undefined);
@@ -650,7 +1018,6 @@ const Maldi = () => {
         if (result.candidates.length > 0) {
           const top = Number(result.candidates[0].repeatMass.toFixed(4));
           setRepeatMass((current) => (current > 0 ? current : top));
-          setBaseRepeat((current) => (current > 0 ? current : top));
         }
         toast.success(`${result.candidates.length} candidate repeat units`);
       } catch (error) {
@@ -701,7 +1068,6 @@ const Maldi = () => {
   const handleSelectRepeatCandidate = useCallback(
     (mass: number) => {
       setRepeatMass(mass);
-      setBaseRepeat(mass);
       previewRepeat(mass);
     },
     [previewRepeat],
@@ -713,7 +1079,6 @@ const Maldi = () => {
   const handleRepeatMassChange = useCallback(
     (mass: number) => {
       setRepeatMass(mass);
-      setBaseRepeat(mass);
       if (mass > 0) previewRepeat(mass);
       else highlightPeaks(undefined);
     },
@@ -730,7 +1095,6 @@ const Maldi = () => {
     try {
       const result = await assignSeries(peaks, repeatMass, selectedAdducts);
       setSeries(result.series);
-      if (baseRepeat <= 0) setBaseRepeat(repeatMass);
       toast.success(`Assigned ${result.series.length} series`);
     } catch (error) {
       console.error(error);
@@ -738,23 +1102,9 @@ const Maldi = () => {
     } finally {
       setAssigning(false);
     }
-  }, [peaks, repeatMass, selectedAdducts, baseRepeat]);
+  }, [peaks, repeatMass, selectedAdducts]);
 
 
-
-  const handleDetectLosses = useCallback(async () => {
-    setDetectingLosses(true);
-    try {
-      const result = await detectLosses(peaks);
-      setLosses(result.events);
-      toast.success(`${result.events.length} neutral-loss relationships`);
-    } catch (error) {
-      console.error(error);
-      toast.error("Loss detection failed");
-    } finally {
-      setDetectingLosses(false);
-    }
-  }, [peaks]);
 
   const handleDetectCopolymer = useCallback(
     async (a: number, b: number) => {
@@ -930,15 +1280,9 @@ const Maldi = () => {
     highlightPeaks(s ? new Set(s.members.map((m) => m.peakId)) : undefined);
   }, [highlightPeaks]);
 
-  const handleKendrickCluster = useCallback((peakIds: string[]) => {
-    highlightPeaks(peakIds.length ? new Set(peakIds) : undefined);
-    setSelectedSeriesId(null);
-  }, [highlightPeaks]);
-
   const handleApplyTemplate = useCallback(
     (t: ChemistryTemplate) => {
       setRepeatMass(Number(t.repeatMass.toFixed(4)));
-      setBaseRepeat(Number(t.repeatMass.toFixed(4)));
       if (t.endGroupMass != null) setEndGroupMass(t.endGroupMass);
       const valid = t.adductIds.filter((id) => allAdducts.some((a) => a.id === id));
       if (valid.length) setSelectedAdductIds(valid);
@@ -947,49 +1291,111 @@ const Maldi = () => {
     [allAdducts],
   );
 
-  // --- Compare ----------------------------------------------------------------
-  const handleAddComparisons = useCallback(async (files: FileList) => {
-    setAddingComparison(true);
-    try {
-      for (const file of Array.from(files)) {
-        let spectrum: SpectrumData;
-        if (/\.(mzml|mzxml|mgf)$/i.test(file.name)) {
-          const buffer = await file.arrayBuffer();
-          spectrum = (await parseMs(buffer, file.name)).spectrum;
-        } else {
-          spectrum = (await parse(await file.text())).spectrum;
-        }
-        comparisonCounter += 1;
-        setComparisons((prev) => [...prev, { id: `cmp-${Date.now()}-${comparisonCounter}`, name: file.name, spectrum }]);
-      }
-    } catch (error) {
-      console.error(error);
-      toast.error("Could not load comparison spectrum");
-    } finally {
-      setAddingComparison(false);
-    }
-  }, []);
-
-  // Add an already-open spectrum (another document in this session) to the
-  // comparison list, mirroring how docSpectra resolves each doc's display trace.
-  const handleAddComparisonFromOpen = useCallback(
-    (docId: string) => {
-      if (docId === activeDocId) return;
-      const target = documents.find((d) => d.id === docId);
-      const spectrum = target?.state.processedSpectrum ?? target?.state.rawSpectrum;
-      if (!target || !spectrum) return;
-      comparisonCounter += 1;
-      setComparisons((prev) => [
-        ...prev,
-        { id: `cmp-${Date.now()}-${comparisonCounter}`, name: target.name, spectrum, visible: true, sourceDocId: docId },
-      ]);
+  // --- Document trace styling (colour / visibility / offset) -------------------
+  // Patch a document's session-only trace styling. Deliberately NOT a snapshot
+  // op: this state is excluded from `useMaldiUndo`'s deps so hiding or recolouring
+  // a trace doesn't enter the undo history (Ctrl+Z after hiding a trace would
+  // otherwise undo an unrelated analysis edit). The active doc's `visible` is
+  // forced true — active-but-hidden is a confusing dead state (the plot, peak
+  // table and every right-hand tab would describe a spectrum the user can't see).
+  const handleUpdateDocument = useCallback(
+    (id: string, patch: Partial<MaldiDocument>) => {
+      setDocuments((prev) =>
+        prev.map((d) => {
+          if (d.id !== id) return d;
+          const next = { ...d, ...patch };
+          if (id === activeDocId && patch.visible === false) next.visible = true;
+          return next;
+        }),
+      );
     },
-    [activeDocId, documents],
+    [activeDocId],
   );
 
-  const handleUpdateComparison = useCallback((id: string, patch: Partial<ComparisonSpectrum>) => {
-    setComparisons((prev) => prev.map((c) => (c.id === id ? { ...c, ...patch } : c)));
-  }, []);
+  // Peak-table write-back. In pooled (Combine documents) mode the table emits the
+  // whole merged `Peak[]`; we split it by `peakOwnerMap` and route each subset to
+  // its owning document. Peaks owned by the active doc (and any peak with no owner
+  // — e.g. a freshly added row) go through the existing `setPeaks` path unchanged;
+  // peaks owned by another VISIBLE document patch that document's snapshotted
+  // `state.peaks` via `handleUpdateDocument`. Hidden documents never appear in
+  // `peakOwnerMap` (pooledPeaks excludes them), so a hidden doc's peak list can't
+  // be clobbered here. Deletions fall out as absence from the emitted array. When
+  // the toggle is off this is a passthrough to `setPeaks` — identical to today.
+  const handlePeakTableChange = useCallback(
+    (next: Peak[]) => {
+      if (!combineDocuments) {
+        setPeaks(next);
+        return;
+      }
+      const activeSubset: Peak[] = [];
+      const byDoc = new Map<string, Peak[]>();
+      for (const p of next) {
+        const owner = peakOwnerMap.get(p.id);
+        if (!owner || owner.docId === activeDocId) {
+          activeSubset.push(p);
+        } else {
+          const list = byDoc.get(owner.docId);
+          if (list) list.push(p);
+          else byDoc.set(owner.docId, [p]);
+        }
+      }
+      setPeaks(activeSubset);
+      for (const [docId, subset] of byDoc) {
+        const doc = documents.find((d) => d.id === docId);
+        if (!doc) continue;
+        handleUpdateDocument(docId, { state: { ...doc.state, peaks: subset } });
+      }
+    },
+    [combineDocuments, peakOwnerMap, activeDocId, documents, handleUpdateDocument],
+  );
+
+  // Stack toggle. ON: save every document's current offset, then assign
+  // `index * step` walking the VISIBLE documents in document order (active
+  // included, treated no differently). OFF: restore each saved offset,
+  // defaulting to 0 for any document with no saved value (e.g. imported while
+  // stacked). The manual per-row offset input keeps working: typing a value
+  // while stacked overrides that one row and this handler does not fight it.
+  const handleStackedChange = useCallback(
+    (on: boolean) => {
+      if (on) {
+        const saved: Record<string, number> = {};
+        for (const d of documents) saved[d.id] = d.offset ?? 0;
+        savedOffsetsRef.current = saved;
+        const step = stackStepRef.current;
+        let i = 0;
+        for (const d of documents) {
+          if (d.visible === false) continue;
+          handleUpdateDocument(d.id, { offset: i * step });
+          i += 1;
+        }
+      } else {
+        const saved = savedOffsetsRef.current;
+        for (const d of documents) {
+          handleUpdateDocument(d.id, { offset: saved[d.id] ?? 0 });
+        }
+        savedOffsetsRef.current = {};
+      }
+      setStacked(on);
+    },
+    [documents, handleUpdateDocument],
+  );
+
+  // While stacked, re-apply evenly-spaced offsets whenever the visible set
+  // changes (show/hide, import, close) or Normalize toggles, so the stack stays
+  // evenly spaced with no gaps. A manual per-row offset edit does NOT change the
+  // visible set, so this effect leaves it alone — the user's override stands
+  // until the visible set next changes.
+  useEffect(() => {
+    if (!stacked) return;
+    const step = stackStepRef.current;
+    let i = 0;
+    for (const d of documents) {
+      if (d.visible === false) continue;
+      handleUpdateDocument(d.id, { offset: i * step });
+      i += 1;
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [visibleStackKey, stacked, normalize]);
 
   // --- Undo / redo (per-spectrum) ---------------------------------------------
   const getUndoSnapshot = useCallback((): UndoSnapshot => {
@@ -1012,7 +1418,7 @@ const Maldi = () => {
     activeDocId,
     deps: [
       projectName, sourceName, peaks, series, steps, customAdducts, selectedAdductIds,
-      pickParams, repeatMass, baseRepeat, endGroupMass, repeatIsotopeAware,
+      pickParams, repeatMass, endGroupMass, repeatIsotopeAware,
       copolymerA, copolymerB, raw,
     ],
     getSnapshot: getUndoSnapshot,
@@ -1025,14 +1431,26 @@ const Maldi = () => {
       if (id === activeDocId) return;
       const target = documents.find((d) => d.id === id);
       if (!target) return;
+      if (target.state.rawSpectrum == null) {
+        toast.error("That document has no spectrum data.");
+        return;
+      }
       const snap = snapshotActiveDoc();
-      if (snap) setDocuments((prev) => prev.map((d) => (d.id === snap.id ? snap : d)));
+      const unhideTarget = target.visible === false;
+      if (snap || unhideTarget) {
+        setDocuments((prev) =>
+          prev.map((d) => {
+            if (snap && d.id === snap.id) return snap;
+            if (unhideTarget && d.id === id) return { ...d, visible: true };
+            return d;
+          }),
+        );
+      }
       loadState(target.state);
       setProjectName(target.name);
       setProjectId(target.projectId);
       projectCreatedAt.current = target.createdAt;
       setActiveDocId(id);
-      setViewMode("single");
     },
     [activeDocId, documents, snapshotActiveDoc, loadState],
   );
@@ -1053,10 +1471,19 @@ const Maldi = () => {
           setActiveDocId(null);
         }
       }
+      // If the closed doc was the difference-mode reference, drop the reference
+      // and turn Difference off — a missing reference would otherwise leave the
+      // switch enabled but the plot with no reference to subtract. Active-doc
+      // visibility is forced true (see `handleUpdateDocument`), so closing the
+      // active doc also can't leave a hidden-active dead state.
+      if (id === referenceDocId) {
+        setReferenceDocId(null);
+        setDifference(false);
+      }
       setDocuments(remaining);
       clearHistory(id);
     },
-    [documents, activeDocId, loadState, clearLive, clearHistory],
+    [documents, activeDocId, loadState, clearLive, clearHistory, referenceDocId],
   );
 
   const handleSave = useCallback(async () => {
@@ -1103,16 +1530,17 @@ const Maldi = () => {
         if (!record) return;
         const snap = snapshotActiveDoc();
         const docId = crypto.randomUUID();
+        const color = nextDocColor(docsCreatedCountRef.current);
+        docsCreatedCountRef.current += 1;
         setDocuments((prev) => {
           const saved = snap ? prev.map((d) => (d.id === snap.id ? snap : d)) : prev;
-          return [...saved, { id: docId, name: record.name, projectId: record.id, createdAt: record.createdAt, state: record.state }];
+          return [...saved, { id: docId, name: record.name, projectId: record.id, createdAt: record.createdAt, state: record.state, color, visible: true, offset: 0 }];
         });
         loadState(record.state);
         setProjectName(record.name);
         setProjectId(record.id);
         projectCreatedAt.current = record.createdAt;
         setActiveDocId(docId);
-        setViewMode("single");
         toast.success(`Opened ${record.name}`);
       } catch (error) {
         console.error(error);
@@ -1131,16 +1559,17 @@ const Maldi = () => {
           const snap = snapshotActiveDoc();
           const docId = crypto.randomUUID();
           const createdAt = record.createdAt || Date.now();
+          const color = nextDocColor(docsCreatedCountRef.current);
+          docsCreatedCountRef.current += 1;
           setDocuments((prev) => {
             const saved = snap ? prev.map((d) => (d.id === snap.id ? snap : d)) : prev;
-            return [...saved, { id: docId, name: record.name, projectId: null, createdAt, state: record.state }];
+            return [...saved, { id: docId, name: record.name, projectId: null, createdAt, state: record.state, color, visible: true, offset: 0 }];
           });
           loadState(record.state);
           setProjectName(record.name);
           setProjectId(null); // imported copy: Save creates a new local record
           projectCreatedAt.current = createdAt;
           setActiveDocId(docId);
-          setViewMode("single");
           toast.success(`Imported ${record.name}`);
         } catch (error) {
           console.error(error);
@@ -1156,8 +1585,10 @@ const Maldi = () => {
     clearLive();
     setDocuments([]);
     setActiveDocId(null);
-    setComparisons([]);
-    setViewMode("single");
+    setReferenceDocId(null);
+    setDifference(false);
+    setNormalize(false);
+    docsCreatedCountRef.current = 0;
     clearAll();
   }, [clearLive, clearAll]);
 
@@ -1180,10 +1611,9 @@ const Maldi = () => {
       series,
       adducts: allAdducts,
       repeatCandidates,
-      losses,
       molWeight: mw,
     });
-  }, [peaks, series, allAdducts, repeatCandidates, losses]);
+  }, [peaks, series, allAdducts, repeatCandidates]);
 
   const recordExport = (kind: string, label: string) =>
     setExportHistory((prev) => [...prev, { kind, label, at: Date.now() }]);
@@ -1197,17 +1627,22 @@ const Maldi = () => {
     adducts: allAdducts,
     repeatMass,
     molWeight: summarizeMolWeight(peaks, series, series.length ? "series" : "all", {}),
-    losses,
     findings,
-    spectrumPng: plotHandleRef.current?.getPng() ?? null,
-  }), [projectName, sourceName, raw, peaks, series, allAdducts, repeatMass, losses, findings]);
+    // `primaryOnly` so a PDF/Excel report about the active document doesn't
+    // silently embed the other open documents' traces now that overlays share
+    // the canvas. (WP3 §9.)
+    spectrumPng: plotHandleRef.current?.getPng({ primaryOnly: true }) ?? null,
+  }), [projectName, sourceName, raw, peaks, series, allAdducts, repeatMass, findings]);
 
   const handleExport = useCallback(
     async (kind: ExportKind) => {
       try {
         switch (kind) {
           case "png": {
-            const url = plotHandleRef.current?.getPng();
+            // `primaryOnly` so the toolbar PNG exports the active document only
+            // (overlays would otherwise be embedded now that they share the
+            // canvas). (WP3 §9.)
+            const url = plotHandleRef.current?.getPng({ primaryOnly: true });
             if (!url) return toast.error("Spectrum not ready");
             const a = document.createElement("a");
             a.href = url;
@@ -1255,6 +1690,43 @@ const Maldi = () => {
     },
     [sourceName, peaks, projectName, processed, series, allAdducts, projectId, buildState, buildReportPayload],
   );
+
+  // --- Persisted sidebar collapse state (WP1d) -------------------------------
+  // Open/closed per card is session-only UI state, not analysis state, so it
+  // lives outside `useMaldiUndo`'s snapshot deps. Persisted to localStorage so a
+  // freshly-loaded workspace is a tidy stack of headers the user re-opens as
+  // needed; `maldi.sidebar.open` holds `{ cardId: isOpen }`. Import and Peak
+  // picking default open; every other card defaults collapsed.
+  //
+  // The defaults are merged over the stored record at read time via
+  // `isCardOpen` (falling back to `DEFAULT_CARD_OPEN[id]`), rather than inside
+  // `usePersistedState`, so that a card id added in a future release still
+  // resolves to its intended default for users who already have a stored
+  // object without that key. The hook itself stays generic over `T`.
+  const [cardOpen, setCardOpen] = usePersistedState<Record<string, boolean>>(
+    "maldi.sidebar.open",
+    DEFAULT_CARD_OPEN,
+  );
+  const isCardOpen = useCallback(
+    (id: string) => cardOpen[id] ?? DEFAULT_CARD_OPEN[id] ?? false,
+    [cardOpen],
+  );
+  const setCardOpenById = useCallback(
+    (id: string, open: boolean) => setCardOpen((prev) => ({ ...prev, [id]: open })),
+    [setCardOpen],
+  );
+
+  // The active document's name, shown in each right-hand tab header so with N
+  // traces visible the user always knows which document the Peak table / Series
+  // / Figure / Formula / Mol. weight / Report tabs are describing (the
+  // architectural rule: every right-hand tab reads the ACTIVE document only).
+  // Suppressed when only one document is open — the name is then already in the
+  // page title and the panel, and the suffix would be pure noise.
+  const activeDocLabel = useMemo(() => {
+    if (documents.length < 2) return "";
+    const doc = documents.find((d) => d.id === activeDocId);
+    return doc?.name ? ` · ${doc.name}` : "";
+  }, [documents, activeDocId]);
 
   return (
     <AppShell
@@ -1347,7 +1819,7 @@ const Maldi = () => {
                 <CardTitle className="text-sm font-semibold">Import a spectrum</CardTitle>
               </CardHeader>
               <CardContent>
-                <ImportPanel onFile={handleImport} onMsFile={handleMsImport} busy={parsing} meta={parseMeta} sourceName={sourceName} />
+                <ImportPanel onFiles={handleImportFiles} busy={parsing} meta={parseMeta} sourceName={sourceName} />
               </CardContent>
             </Card>
             <Card className="border-border/70 shadow-card">
@@ -1381,19 +1853,19 @@ const Maldi = () => {
           <section className="grid gap-4 lg:grid-cols-[380px_1fr]">
             {/* Left: control panels */}
             <div className="flex max-h-[calc(100vh-220px)] flex-col gap-3 overflow-y-auto pr-1 lg:sticky lg:top-4">
-              <SidebarCard title="Import">
-                <ImportPanel onFile={handleImport} onMsFile={handleMsImport} busy={parsing} meta={parseMeta} sourceName={sourceName} compact />
+              <SidebarCard id="import" title="Import" open={isCardOpen("import")} onOpenChange={(o) => setCardOpenById("import", o)}>
+                <ImportPanel onFiles={handleImportFiles} busy={parsing} meta={parseMeta} sourceName={sourceName} compact />
               </SidebarCard>
-              <SidebarCard title="Templates" collapsible defaultCollapsed>
+              <SidebarCard id="templates" title="Templates" open={isCardOpen("templates")} onOpenChange={(o) => setCardOpenById("templates", o)}>
                 <TemplatePanel onApply={handleApplyTemplate} current={{ repeatMass, endGroupMass, adductIds: selectedAdductIds }} />
               </SidebarCard>
-              <SidebarCard title={`Processing${processingBusy ? " · running…" : ""}`}>
+              <SidebarCard id="processing" title={`Processing${processingBusy ? " · running…" : ""}`} open={isCardOpen("processing")} onOpenChange={(o) => setCardOpenById("processing", o)}>
                 <ProcessingPanel steps={steps} onChange={setSteps} spectrumRange={spectrumRange} />
               </SidebarCard>
-              <SidebarCard title="Peak picking">
+              <SidebarCard id="peak-picking" title="Peak picking" open={isCardOpen("peak-picking")} onOpenChange={(o) => setCardOpenById("peak-picking", o)}>
                 <PeakPickingPanel params={pickParams} onChange={setPickParams} onRun={handlePick} onClear={() => setPeaks([])} busy={picking} peakCount={peaks.length} />
               </SidebarCard>
-              <SidebarCard title="Adducts">
+              <SidebarCard id="adducts" title="Adducts" forceMount open={isCardOpen("adducts")} onOpenChange={(o) => setCardOpenById("adducts", o)}>
                 <AdductPanel
                   selectedIds={selectedAdductIds}
                   customAdducts={customAdducts}
@@ -1405,7 +1877,7 @@ const Maldi = () => {
                   }}
                 />
               </SidebarCard>
-              <SidebarCard title="Repeat units & series">
+              <SidebarCard id="series" title="Repeat units & series" open={isCardOpen("series")} onOpenChange={(o) => setCardOpenById("series", o)}>
                 <SeriesPanel
                   repeatCandidates={repeatCandidates}
                   onDetectRepeats={handleDetectRepeats}
@@ -1431,7 +1903,7 @@ const Maldi = () => {
                   unexplainedCount={unexplainedPeaks(peaks, series).length}
                 />
               </SidebarCard>
-              <SidebarCard title="Copolymer">
+              <SidebarCard id="copolymer" title="Copolymer" open={isCardOpen("copolymer")} onOpenChange={(o) => setCardOpenById("copolymer", o)}>
                 <CopolymerPanel
                   series={copolymerSeries}
                   onDetect={handleDetectCopolymer}
@@ -1446,16 +1918,7 @@ const Maldi = () => {
                   onSelect={handleSelectCopolymer}
                 />
               </SidebarCard>
-              <SidebarCard title="Neutral losses">
-                <LossPanel
-                  events={losses}
-                  onDetect={handleDetectLosses}
-                  busy={detectingLosses}
-                  peakCount={peaks.length}
-                  onSelect={(parent, frag) => highlightPeaks(new Set([parent, frag]))}
-                />
-              </SidebarCard>
-              <SidebarCard title="Batch processing">
+              <SidebarCard id="batch" title="Batch processing" forceMount open={isCardOpen("batch")} onOpenChange={(o) => setCardOpenById("batch", o)}>
                 <BatchPanel steps={steps} pickParams={pickParams} />
               </SidebarCard>
             </div>
@@ -1464,16 +1927,13 @@ const Maldi = () => {
             <div className="flex flex-col gap-4">
               <Card className="border-border/70 shadow-card">
                 <CardContent className="p-4">
-                  <SpectraTray
-                    documents={documents}
-                    activeDocId={activeDocId}
-                    viewMode={viewMode}
-                    onSwitch={switchToDoc}
-                    onClose={closeDoc}
-                    onViewMode={setViewMode}
-                  />
-                  <div className="mt-2 h-[440px]">
-                    {viewMode === "single" ? (
+                  {/* mMass-style Documents panel sits inside the viewer card, right
+                      of the plot — `grid lg:grid-cols-[1fr_240px]`. The outer
+                      workspace grid stays `lg:grid-cols-[380px_1fr]`; a third
+                      top-level column would squeeze the plot at `max-w-[1700px]`
+                      (maldi-overhaul-plan.md → WP4). */}
+                  <div className="grid gap-2 lg:grid-cols-[1fr_240px]">
+                    <div className="h-[440px]">
                       <MaldiSpectrumPlot
                         ref={plotHandleRef}
                         raw={raw}
@@ -1487,10 +1947,31 @@ const Maldi = () => {
                         onToggleSeriesMember={selectedSeriesId ? handleToggleSeriesMember : undefined}
                         isolate={isolateSelection}
                         onIsolateChange={setIsolateSelection}
+                        traces={plotTraces}
+                        activeTraceId={activeDocId}
+                        normalize={normalize}
+                        differenceWith={differenceWith}
                       />
-                    ) : (
-                      <StackedSpectraPlot spectra={docSpectra} mode={viewMode} />
-                    )}
+                    </div>
+                    <DocumentsPanel
+                      documents={documents}
+                      activeDocId={activeDocId}
+                      normalize={normalize}
+                      onNormalizeChange={setNormalize}
+                      stacked={stacked}
+                      onStackedChange={handleStackedChange}
+                      difference={difference}
+                      onDifferenceChange={setDifference}
+                      referenceDocId={referenceDocId}
+                      onReferenceDocIdChange={setReferenceDocId}
+                      combineDocuments={combineDocuments}
+                      onCombineDocumentsChange={setCombineDocuments}
+                      visibleDocCount={visibleDocCount}
+                      onSwitch={switchToDoc}
+                      onClose={closeDoc}
+                      onUpdate={handleUpdateDocument}
+                      onImportFiles={(files) => void handleImportFiles(files, { delimiter: "auto", hasHeader: "auto" })}
+                    />
                   </div>
                 </CardContent>
               </Card>
@@ -1498,78 +1979,139 @@ const Maldi = () => {
               <Card className="border-border/70 shadow-card">
                 <CardContent className="p-4">
                   <Tabs defaultValue="table">
+                    {activeDocLabel && (
+                      <div className="text-xs text-muted-foreground mb-1 truncate">Showing: {activeDocLabel}</div>
+                    )}
+                    {combineDocuments && (
+                      <div className="text-[11px] text-muted-foreground mb-1 truncate">
+                        Combine on — tables &amp; figure pool every visible document; picking &amp; processing still use the active one.
+                      </div>
+                    )}
                     <TabsList className="flex flex-wrap">
                       <TabsTrigger value="table">Peak table</TabsTrigger>
                       <TabsTrigger value="series">Series</TabsTrigger>
                       <TabsTrigger value="figure">Figure</TabsTrigger>
-                      <TabsTrigger value="kendrick">Kendrick</TabsTrigger>
                       <TabsTrigger value="formula">Formula</TabsTrigger>
                       <TabsTrigger value="mw">Mol. weight</TabsTrigger>
-                      <TabsTrigger value="compare">Compare</TabsTrigger>
                       <TabsTrigger value="report">Report</TabsTrigger>
                     </TabsList>
                     <TabsContent value="table" className="mt-3">
                       <div className="h-[420px]">
                         <PeakTable
-                          peaks={peaks}
-                          onChange={setPeaks}
+                          peaks={analysisPeaks}
+                          onChange={handlePeakTableChange}
                           highlightedPeakIds={highlightedPeakIds}
                           onSelectPeak={(id) => highlightPeaks(new Set([id]))}
                           explainedPeakIds={explainedPeakIds}
+                          peakOwner={combineDocuments ? peakOwnerMap : undefined}
                         />
                       </div>
                     </TabsContent>
                     <TabsContent value="series" className="mt-3">
-                      <div className="h-[420px]">
-                        <SeriesTable
-                          series={series.filter((s) => s.endGroupLocked)}
-                          adducts={selectedAdducts.length ? selectedAdducts : allAdducts}
-                          selectedSeriesId={selectedSeriesId}
-                          onSelectSeries={handleSelectSeries}
-                          onRenameSeries={handleRenameSeries}
-                          onSetSeriesDescription={handleSetSeriesDescription}
-                          onSetSeriesColor={handleSetSeriesColor}
-                          onSetSeriesEndGroupLabel={handleSetSeriesEndGroupLabel}
-                          onSetSeriesEndGroupMass={handleSetSeriesEndGroupMass}
-                          onDeleteSeries={handleDeleteSeries}
-                          colorFor={colorForSeries}
-                        />
-                      </div>
+                      {combineDocuments ? (
+                        <div className="h-[420px] flex flex-col gap-1.5">
+                          <p className="text-[11px] text-muted-foreground">
+                            Showing confirmed series from every visible document. Assign &amp; detect still run on the active document only.
+                          </p>
+                          {pooledSeries.length === 0 ? (
+                            <div className="flex h-full items-center justify-center text-xs text-muted-foreground">
+                              No confirmed series in any visible document.
+                            </div>
+                          ) : (
+                            <div className="min-h-0 flex-1 overflow-auto rounded-lg border border-border/60">
+                              <Table>
+                                <TableHeader className="sticky top-0 z-10 bg-card">
+                                  <TableRow>
+                                    <TableHead className="w-8 text-xs">Color</TableHead>
+                                    <TableHead className="text-xs">Source</TableHead>
+                                    <TableHead className="text-xs">Label</TableHead>
+                                    <TableHead className="text-xs">Adduct</TableHead>
+                                    <TableHead className="text-xs">Repeat</TableHead>
+                                    <TableHead className="text-xs">End group (Da)</TableHead>
+                                    <TableHead className="text-xs">Peaks</TableHead>
+                                  </TableRow>
+                                </TableHeader>
+                                <TableBody>
+                                  {pooledSeries.map(({ series: s, owner }) => (
+                                    <TableRow key={`${owner.docId}:${s.id}`}>
+                                      <TableCell>
+                                        <span
+                                          className="block h-4 w-4 rounded-full border border-border/60"
+                                          style={{ backgroundColor: s.color ?? owner.color }}
+                                        />
+                                      </TableCell>
+                                      <TableCell className="text-xs">
+                                        <span className="inline-flex items-center gap-1.5">
+                                          <span
+                                            className="h-2.5 w-2.5 rounded-full"
+                                            style={{ backgroundColor: owner.color }}
+                                          />
+                                          <span className="truncate">{owner.name}</span>
+                                        </span>
+                                      </TableCell>
+                                      <TableCell className="font-mono text-xs">{s.label || seriesAdductLabel(s, allAdducts)}</TableCell>
+                                      <TableCell className="font-mono text-xs">{adductById(allAdducts, s.adductId).label}</TableCell>
+                                      <TableCell className="font-mono text-xs">{s.repeatMass.toFixed(3)}</TableCell>
+                                      <TableCell className="font-mono text-xs">{Number.isFinite(s.endGroupMass) ? s.endGroupMass : 0}</TableCell>
+                                      <TableCell className="font-mono text-xs">{s.members.length}</TableCell>
+                                    </TableRow>
+                                  ))}
+                                </TableBody>
+                              </Table>
+                            </div>
+                          )}
+                        </div>
+                      ) : (
+                        <div className="h-[420px]">
+                          <SeriesTable
+                            series={series.filter((s) => s.endGroupLocked)}
+                            adducts={selectedAdducts.length ? selectedAdducts : allAdducts}
+                            selectedSeriesId={selectedSeriesId}
+                            onSelectSeries={handleSelectSeries}
+                            onRenameSeries={handleRenameSeries}
+                            onSetSeriesDescription={handleSetSeriesDescription}
+                            onSetSeriesColor={handleSetSeriesColor}
+                            onSetSeriesEndGroupLabel={handleSetSeriesEndGroupLabel}
+                            onSetSeriesEndGroupMass={handleSetSeriesEndGroupMass}
+                            onDeleteSeries={handleDeleteSeries}
+                            colorFor={colorForSeries}
+                          />
+                        </div>
+                      )}
                     </TabsContent>
                     <TabsContent value="figure" className="mt-3">
                       <MaldiFigurePanel
                         active={processed ?? raw}
-                        activeName={sourceName || projectName}
-                        peaks={peaks}
+                        peaks={analysisPeaks}
                         highlightedPeakIds={highlightedPeakIds}
-                        otherSpectra={otherFigureSpectra}
+                        otherSpectra={otherFigureSpectra.filter((d) => d.visible !== false).map((d) => ({ id: d.id, name: d.name, spectrum: d.spectrum }))}
+                        showProfile={figShowProfile}
+                        onShowProfileChange={setFigShowProfile}
+                        showSticks={figShowSticks}
+                        onShowSticksChange={setFigShowSticks}
+                        selectedOnly={figSelectedOnly}
+                        onSelectedOnlyChange={setFigSelectedOnly}
+                        includeFlagged={figIncludeFlagged}
+                        onIncludeFlaggedChange={setFigIncludeFlagged}
+                        shownPeaks={figShownPeaks}
+                        confirmedSeries={figConfirmedSeries}
+                        adducts={allAdducts}
+                        colorForSeries={colorForSeries}
+                        selectedSeriesIds={figSeriesIds}
+                        onToggleSeries={handleToggleFigureSeries}
+                        hiddenPeakCount={figHiddenCount}
+                        onRestorePeaks={handleFigureRestorePeaks}
+                        onDeletePeak={handleFigureDeletePeak}
+                        figureData={figureData}
+                        figureOptions={figureOptions}
+                        onFigureOptionsChange={setFigureOptions}
                       />
-                    </TabsContent>
-                    <TabsContent value="kendrick" className="mt-3">
-                      <div className="h-[420px]">
-                        <KendrickPlot peaks={peaks} baseRepeat={baseRepeat} onBaseRepeatChange={setBaseRepeat} onSelectCluster={handleKendrickCluster} />
-                      </div>
                     </TabsContent>
                     <TabsContent value="formula" className="mt-3">
                       <FormulaTools adducts={selectedAdducts.length ? selectedAdducts : allAdducts} selectedPeakMz={selectedPeakMz} onOverlay={setOverlay} />
                     </TabsContent>
                     <TabsContent value="mw" className="mt-3">
-                      <MolWeightPanel peaks={peaks} series={series} adducts={selectedAdducts.length ? selectedAdducts : allAdducts} repeatMass={repeatMass} selectedPeakIds={highlightedPeakIds} />
-                    </TabsContent>
-                    <TabsContent value="compare" className="mt-3">
-                      <div className="h-[440px]">
-                        <CompareView
-                          current={processed ?? raw}
-                          currentName={sourceName || "current"}
-                          comparisons={comparisons}
-                          onAddFiles={handleAddComparisons}
-                          onAddFromOpen={handleAddComparisonFromOpen}
-                          onUpdate={handleUpdateComparison}
-                          onRemove={(id) => setComparisons((prev) => prev.filter((c) => c.id !== id))}
-                          openDocuments={documents.filter((d) => d.id !== activeDocId).map((d) => ({ id: d.id, name: d.name }))}
-                          busy={addingComparison}
-                        />
-                      </div>
+                      <MolWeightPanel peaks={analysisPeaks} series={series} adducts={selectedAdducts.length ? selectedAdducts : allAdducts} repeatMass={repeatMass} selectedPeakIds={highlightedPeakIds} />
                     </TabsContent>
                     <TabsContent value="report" className="mt-3">
                       <InterpretationPanel findings={findings} onRefresh={() => toast.success("Interpretation refreshed")} onExport={handleExport} exportHistory={exportHistory} />
@@ -1585,111 +2127,41 @@ const Maldi = () => {
   );
 };
 
-/** Tabs of open spectra with a single / overlay / stacked view-mode switch. */
-function SpectraTray({
-  documents,
-  activeDocId,
-  viewMode,
-  onSwitch,
-  onClose,
-  onViewMode,
-}: {
-  documents: MaldiDocument[];
-  activeDocId: string | null;
-  viewMode: ViewMode;
-  onSwitch: (id: string) => void;
-  onClose: (id: string) => void;
-  onViewMode: (mode: ViewMode) => void;
-}) {
-  if (documents.length === 0) return null;
-  const modes: { key: ViewMode; label: string; icon: React.ReactNode }[] = [
-    { key: "single", label: "Single", icon: null },
-    { key: "overlay", label: "Overlay", icon: <Layers className="h-3 w-3" /> },
-    { key: "stacked", label: "Stacked", icon: <Rows3 className="h-3 w-3" /> },
-  ];
-  return (
-    <div className="flex flex-wrap items-center gap-2">
-      <div className="flex min-w-0 flex-1 flex-wrap gap-1.5">
-        {documents.map((d) => {
-          const isActive = d.id === activeDocId && viewMode === "single";
-          return (
-            <span
-              key={d.id}
-              className={[
-                "inline-flex max-w-[180px] items-center gap-1 rounded-md border px-2 py-1 text-[11px] transition-smooth",
-                isActive
-                  ? "border-primary bg-primary/10 text-primary"
-                  : "border-border/70 bg-background/60 text-muted-foreground hover:border-primary/40",
-              ].join(" ")}
-            >
-              <button type="button" className="truncate" title={d.name} onClick={() => onSwitch(d.id)}>
-                {d.name}
-              </button>
-              <button type="button" className="shrink-0 opacity-60 hover:opacity-100" onClick={() => onClose(d.id)}>
-                <X className="h-3 w-3" />
-              </button>
-            </span>
-          );
-        })}
-      </div>
-      <div className="flex shrink-0 overflow-hidden rounded-md border border-border/70">
-        {modes.map((m) => (
-          <button
-            key={m.key}
-            type="button"
-            disabled={m.key !== "single" && documents.length < 2}
-            onClick={() => onViewMode(m.key)}
-            className={[
-              "flex items-center gap-1 px-2.5 py-1 text-[11px] transition-smooth disabled:opacity-40",
-              viewMode === m.key ? "bg-primary text-primary-foreground" : "bg-background text-muted-foreground hover:bg-muted",
-            ].join(" ")}
-          >
-            {m.icon}
-            {m.label}
-          </button>
-        ))}
-      </div>
-    </div>
-  );
-}
-
+/**
+ * Collapsible sidebar card backed by `CollapsibleSection`. Open/closed state is
+ * controlled from the host's persisted `Record<cardId, boolean>` so it survives
+ * reloads without entering the undo history.
+ *
+ * `forceMount` keeps the children mounted even while collapsed — required for
+ * panels that hold local state mutated after an `await` (BatchPanel's run
+ * results, AdductPanel's half-typed custom adduct). Radix `CollapsibleContent`
+ * otherwise unmounts its children, destroying that state and orphaning the loop.
+ * The content is hidden via CSS so the collapsed card still shows nothing.
+ */
 function SidebarCard({
+  id,
   title,
+  open,
+  onOpenChange,
+  forceMount = false,
   children,
-  collapsible = false,
-  defaultCollapsed = false,
 }: {
-  title: string;
+  id: string;
+  title: React.ReactNode;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  forceMount?: boolean;
   children: React.ReactNode;
-  collapsible?: boolean;
-  defaultCollapsed?: boolean;
 }) {
-  if (!collapsible) {
-    return (
-      <Card className="border-border/70 shadow-card">
-        <CardHeader className="pb-2">
-          <CardTitle className="text-sm font-semibold">{title}</CardTitle>
-        </CardHeader>
-        <CardContent>{children}</CardContent>
-      </Card>
-    );
-  }
   return (
-    <Collapsible defaultOpen={!defaultCollapsed}>
-      <Card className="border-border/70 shadow-card">
-        <CollapsibleTrigger asChild>
-          <CardHeader className="cursor-pointer pb-2 hover:bg-muted/30">
-            <CardTitle className="flex items-center justify-between text-sm font-semibold">
-              {title}
-              <ChevronDown className="h-4 w-4 text-muted-foreground transition-transform duration-200 [[data-state=closed]_&]:-rotate-90" />
-            </CardTitle>
-          </CardHeader>
-        </CollapsibleTrigger>
-        <CollapsibleContent>
-          <CardContent>{children}</CardContent>
-        </CollapsibleContent>
-      </Card>
-    </Collapsible>
+    <CollapsibleSection
+      title={title}
+      open={open}
+      onOpenChange={onOpenChange}
+      forceMount={forceMount}
+    >
+      {children}
+    </CollapsibleSection>
   );
 }
 

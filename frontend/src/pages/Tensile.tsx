@@ -1,6 +1,6 @@
 import { BarChart3, FileSpreadsheet, Layers, Spline, Sliders, Table2, Trash2 } from "lucide-react";
 import { AppShell } from "@/components/AppShell";
-import { CollapsibleSection } from "@/components/tensile/CollapsibleSection";
+import { CollapsibleSection } from "@/components/ui/CollapsibleSection";
 import { ComparePanel } from "@/components/tensile/ComparePanel";
 import { ExportMenu } from "@/components/tensile/ExportMenu";
 import { FileCard } from "@/components/tensile/FileCard";

@@ -20,6 +20,26 @@ export interface SpectrumData {
   intensity: Float64Array;
 }
 
+/**
+ * One display-only spectrum carried alongside the active document — the element
+ * type of the page's `docSpectra` memo and of the live plot's overlay set. Re-homed
+ * out of `StackedSpectraPlot.tsx` (deleted in WP4) so the document-spectra pipeline
+ * keeps its typing when that file goes. Carries the per-document trace styling
+ * (colour / visibility / offset) so the plot and the Documents panel share one
+ * source of truth.
+ */
+export interface StackSpectrum {
+  id: string;
+  name: string;
+  spectrum: SpectrumData;
+  /** Per-trace stroke colour (session-only — drives the plot legend). */
+  color?: string;
+  /** When false, the trace is hidden from the plot. */
+  visible?: boolean;
+  /** Vertical offset (stacked-style) applied to the resampled trace. */
+  offset?: number;
+}
+
 /** One processing step, stored in order so processed data is always re-derivable. */
 export interface ProcessingStep {
   /** Stable id for list keys / reordering in the UI. */
@@ -128,13 +148,13 @@ export interface ProjectState {
   pickParams?: PeakPickParams;
   /** Active repeat unit for series / end-group analysis. */
   repeatMass?: number;
-  /** Base repeat unit for the Kendrick plot. */
+  /** @deprecated — no longer used; kept so already-saved IndexedDB projects still deserialize. */
   baseRepeat?: number;
   /** Active end-group mass for the current repeat unit. */
   endGroupMass?: number;
   /** Fold isotope-shifted spacings into one repeat unit on detect. */
   repeatIsotopeAware?: boolean;
-  /** Split a repeat unit into its distinct interleaved ladders. */
+  /** @deprecated — no longer used; kept so already-saved IndexedDB projects still deserialize. */
   splitSeries?: boolean;
   /** Copolymer repeat A mass (for copolymer detection). */
   copolymerA?: number;
@@ -199,10 +219,8 @@ import type { ParseOptions, ParseResult } from "./parse";
 import type { PeakPickParams } from "./peaks";
 import type { AssignOptions, RepeatCandidate, RepeatDetectOptions } from "./polymers";
 import type { CopolymerOptions, CopolymerSeries } from "./polymers";
-import type { KendrickPoint } from "./kendrick";
 import type { EndGroupCandidate, EndGroupOptions } from "./endgroups";
 import type { FormulaCandidate, FormulaCandidateOptions } from "./formula";
-import type { LossEvent, LossDetectOptions } from "./losses";
 import type { MsParseResult } from "./parseMs";
 
 /**
@@ -240,10 +258,6 @@ export interface WorkerOpMap {
     request: { peaks: Peak[]; repeatMass: number; adducts: Adduct[]; options?: AssignOptions };
     result: { series: Series[] };
   };
-  kendrick: {
-    request: { peaks: Peak[]; baseRepeat: number };
-    result: { points: KendrickPoint[] };
-  };
   solveEndGroups: {
     request: {
       peaks: Peak[];
@@ -256,10 +270,6 @@ export interface WorkerOpMap {
   formulaCandidates: {
     request: { targetNeutralMass: number; options?: FormulaCandidateOptions };
     result: { candidates: FormulaCandidate[] };
-  };
-  detectLosses: {
-    request: { peaks: Peak[]; options?: LossDetectOptions };
-    result: { events: LossEvent[] };
   };
   detectCopolymer: {
     request: { peaks: Peak[]; adducts: Adduct[]; options?: CopolymerOptions };

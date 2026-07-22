@@ -12,8 +12,16 @@ import {
 import type { Delimiter, ParseMeta, ParseOptions } from "@/lib/maldi/parse";
 
 interface ImportPanelProps {
-  onFile: (text: string, fileName: string, options: ParseOptions) => void;
-  /** Handle binary mass-spec formats (mzML / mzXML / MGF) via the worker. */
+  /**
+   * Multi-file import. Receives the whole FileList (CSV/TXT and mzML/mzXML/MGF
+   * together — the host dispatches by extension) and the current parse options.
+   * Replaces the older single-file `onFile`/`onMsFile` pair so a multi-select
+   * from the file dialog opens every spectrum as its own document in one batch.
+   */
+  onFiles: (files: FileList, options: ParseOptions) => void;
+  /** @deprecated retained for callers that still import one file at a time. */
+  onFile?: (text: string, fileName: string, options: ParseOptions) => void;
+  /** @deprecated retained for callers that still import one file at a time. */
   onMsFile?: (buffer: ArrayBuffer, fileName: string) => void;
   busy?: boolean;
   meta?: ParseMeta | null;
@@ -27,7 +35,7 @@ type HeaderChoice = "auto" | "yes" | "no";
 
 const MS_EXTENSIONS = /\.(mzml|mzxml|mgf)$/i;
 
-export function ImportPanel({ onFile, onMsFile, busy, meta, sourceName, compact }: ImportPanelProps) {
+export function ImportPanel({ onFiles, onFile, onMsFile, busy, meta, sourceName, compact }: ImportPanelProps) {
   const inputRef = useRef<HTMLInputElement>(null);
   const [dragging, setDragging] = useState(false);
   const [delimiter, setDelimiter] = useState<DelimiterChoice>("auto");
@@ -38,9 +46,20 @@ export function ImportPanel({ onFile, onMsFile, busy, meta, sourceName, compact 
     hasHeader: header === "auto" ? "auto" : header === "yes",
   });
 
+  // Hand the whole FileList to the host in one batch (the new multi-file path).
+  // If a caller is still wired to the legacy single-file callbacks, fall back to
+  // dispatching the first file only — keeps the component usable while the
+  // MALDI page is the only multi-file caller.
   const handleFiles = (files: FileList | null) => {
-    const file = files?.[0];
-    if (!file) return;
+    if (!files || files.length === 0) return;
+    if (onFiles) {
+      onFiles(files, buildOptions());
+      return;
+    }
+    // Legacy single-file path — kept so the deprecated `onFile`/`onMsFile` props
+    // still work for any caller that hasn't migrated.
+    if (!onFile) return;
+    const file = files[0];
     const reader = new FileReader();
     if (onMsFile && MS_EXTENSIONS.test(file.name)) {
       reader.onload = () => onMsFile(reader.result as ArrayBuffer, file.name);
@@ -84,13 +103,14 @@ export function ImportPanel({ onFile, onMsFile, busy, meta, sourceName, compact 
             {sourceName ? "Replace spectrum" : "Drop a CSV/TXT spectrum"}
           </p>
           <p className="mt-0.5 text-xs text-muted-foreground">
-            CSV/TXT (m/z, intensity){onMsFile ? ", or mzML / mzXML / MGF" : ""}. Click to browse.
+            CSV/TXT (m/z, intensity), or mzML / mzXML / MGF. Click to browse.
           </p>
         </div>
         <input
           ref={inputRef}
           type="file"
-          accept={onMsFile ? ".csv,.txt,.tsv,.asc,.dat,.mzml,.mzxml,.mgf,text/plain" : ".csv,.txt,.tsv,.asc,.dat,text/plain"}
+          multiple
+          accept=".csv,.txt,.tsv,.asc,.dat,.mzml,.mzxml,.mgf,text/plain"
           className="hidden"
           onChange={(e) => handleFiles(e.target.files)}
         />

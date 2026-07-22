@@ -23,7 +23,7 @@ import {
   OverlaidCurvesChart,
   ScatterCompareChart,
 } from "@/components/tensile/charts";
-import { CollapsibleSection } from "@/components/tensile/CollapsibleSection";
+import { CollapsibleSection } from "@/components/ui/CollapsibleSection";
 import { downloadChartPng, downloadChartSvg } from "@/lib/tensile/chart-image";
 import { buildBars, buildCurves, buildDistribution, buildScatter } from "@/lib/tensile/compare";
 import { PROPERTY_META } from "@/lib/tensile/compute";

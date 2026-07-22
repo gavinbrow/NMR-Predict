@@ -38,10 +38,8 @@ function snapshotEqual(a: UndoSnapshot, b: UndoSnapshot): boolean {
     sa.selectedAdductIds === sb.selectedAdductIds &&
     sa.pickParams === sb.pickParams &&
     sa.repeatMass === sb.repeatMass &&
-    sa.baseRepeat === sb.baseRepeat &&
     sa.endGroupMass === sb.endGroupMass &&
     sa.repeatIsotopeAware === sb.repeatIsotopeAware &&
-    sa.splitSeries === sb.splitSeries &&
     sa.copolymerA === sb.copolymerA &&
     sa.copolymerB === sb.copolymerB &&
     sa.rawSpectrum === sb.rawSpectrum

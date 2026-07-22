@@ -17,7 +17,7 @@ interface MolWeightPanelProps {
   series: Series[];
   adducts: Adduct[];
   repeatMass: number;
-  /** Selected peak ids (from the table / Kendrick), used by the "selected" source. */
+  /** Selected peak ids (from the table / repeat-unit preview), used by the "selected" source. */
   selectedPeakIds?: Set<string>;
 }
 

@@ -15,6 +15,30 @@ export interface MaldiFigureSpectrum {
   spectrum: SpectrumData;
 }
 
+/**
+ * One assigned-ladder group used to split the sticks into per-series stems and to
+ * colour labels by series. A peak can belong to several series at once (different
+ * adduct readings share member peaks), so groups are consulted in ARRAY ORDER: the
+ * caller passes them already ordered by precedence (confirmed ladders first, then
+ * by descending score) and a shared peak is claimed by the first group that lists
+ * it. See {@link BuildMaldiFigureArgs.seriesGroups}.
+ */
+export interface MaldiFigureSeriesGroup {
+  /** Stable series id — the stick series is `sticks:${id}` and each owned label
+   *  carries it as `seriesId` (so "colour labels by series" resolves the ladder
+   *  colour). Must NOT be an index: an index id would make the figure engine's
+   *  `reconcileFigureOptions` discard the user's per-series styling every time the
+   *  selection changes. */
+  id: string;
+  /** Legend label for this ladder (e.g. its adduct label). Adduct siblings share a
+   *  colour by design, so the label is what tells them apart in the legend. */
+  label: string;
+  /** The ladder's colour (from the page's `colorForSeries`, matching the plot). */
+  color: string;
+  /** Member peak ids of this ladder (a peak may appear in several groups). */
+  peakIds: Set<string>;
+}
+
 export interface BuildMaldiFigureArgs {
   /** Spectra to draw as profile traces; `spectra[0]` is the primary. */
   spectra: MaldiFigureSpectrum[];
@@ -29,6 +53,14 @@ export interface BuildMaldiFigureArgs {
   labelPeaks: boolean;
   /** File-name stem for downloads. */
   sourceName: string;
+  /**
+   * Optional per-series stick grouping. When present, the sticks are emitted as
+   * one series per group (id `sticks:${group.id}`, coloured `group.color`) plus an
+   * optional trailing `sticks:unassigned` series for shown peaks in no group, and
+   * every label carries its owning group's id as `seriesId`. When absent the
+   * sticks collapse to a single `"sticks"` series (unchanged legacy behaviour).
+   */
+  seriesGroups?: MaldiFigureSeriesGroup[];
 }
 
 /** A neutral dark trace for the primary spectrum (matches the on-screen viewer). */
@@ -40,13 +72,54 @@ const STICK_COLOR = "#0ea5e9";
 const peakMz = (p: Peak): number => p.centroid ?? p.mz;
 
 /**
+ * Append stick series for `members` to `out`, honouring per-peak `Peak.color`.
+ * The shared figure renderer strokes an entire stick series in a single colour,
+ * so a peak carrying its own colour cannot share a path with a differently-
+ * coloured peak: members are bucketed by effective colour (`peak.color` when set,
+ * else `baseColor`). The bucket matching `baseColor` keeps the plain `id`/`label`;
+ * any explicit override colour gets its own `${id}:c:${color}` series. Those ids
+ * are stable (derived from the colour, not a position), so the user's per-series
+ * styling survives selection changes. No members → nothing is appended.
+ */
+function pushStickSeries(
+  out: FigureSeriesData[],
+  members: Peak[],
+  id: string,
+  label: string,
+  baseColor: string,
+): void {
+  if (members.length === 0) return;
+  // First-seen colour order keeps the emitted series order deterministic.
+  const byColor = new Map<string, Peak[]>();
+  for (const p of members) {
+    const color = p.color ?? baseColor;
+    const bucket = byColor.get(color);
+    if (bucket) bucket.push(p);
+    else byColor.set(color, [p]);
+  }
+  for (const [color, bucket] of byColor) {
+    out.push({
+      id: color === baseColor ? id : `${id}:c:${color}`,
+      label,
+      x: bucket.map(peakMz),
+      y: bucket.map((p) => p.intensity),
+      styleHints: { kind: "sticks", lineWidth: 1, color },
+    });
+  }
+}
+
+/**
  * Build the figure-engine `FigureData` for a MALDI view. Each spectrum becomes a
- * line series on its own m/z grid; the primary's peaks optionally become a stick
- * series and a set of m/z labels. `peakLabels` is always present (possibly empty)
- * so the figure maker shows the "Peaks & labels" controls for MALDI.
+ * line series on its own m/z grid; the primary's peaks optionally become stick
+ * series and a set of m/z labels. Per-peak `Peak.color` and `Peak.label` are read
+ * straight from the existing peak model — the same fields the on-screen plot and
+ * the Peak table already honour — rather than regenerated, so "colour a peak" and
+ * "rename a label" made in the Peak table show up in the figure unchanged.
+ * `peakLabels` is always present (possibly empty) so the figure maker shows the
+ * "Peaks & labels" controls for MALDI.
  */
 export function buildMaldiFigureData(args: BuildMaldiFigureArgs): FigureData {
-  const { spectra, peaks, showProfile, showSticks, labelPeaks, sourceName } = args;
+  const { spectra, peaks, showProfile, showSticks, labelPeaks, sourceName, seriesGroups } = args;
   const series: FigureSeriesData[] = [];
 
   if (showProfile) {
@@ -62,20 +135,67 @@ export function buildMaldiFigureData(args: BuildMaldiFigureArgs): FigureData {
     });
   }
 
+  const grouped = !!seriesGroups && seriesGroups.length > 0;
+
+  // Resolve each shown peak's owning ladder. Peaks belong to several series at
+  // once (adduct readings share member peaks), so precedence decides the owner:
+  // the caller orders `seriesGroups` (confirmed ladders first, then by descending
+  // score), and the FIRST group in that order that lists the peak claims it.
+  const groupOf = new Map<string, MaldiFigureSeriesGroup>();
+  if (grouped) {
+    for (const p of peaks) {
+      const owner = seriesGroups!.find((g) => g.peakIds.has(p.id));
+      if (owner) groupOf.set(p.id, owner);
+    }
+  }
+
   if (showSticks && peaks.length > 0) {
-    series.push({
-      id: "sticks",
-      label: "Peaks",
-      x: peaks.map(peakMz),
-      y: peaks.map((p) => p.intensity),
-      styleHints: { kind: "sticks", lineWidth: 1, color: STICK_COLOR },
-    });
+    if (grouped) {
+      // One stick series per group (stable `sticks:${group.id}`, in the ladder
+      // colour), then a trailing `sticks:unassigned` for any shown peak in no
+      // selected ladder. Emitted in the caller's precedence order.
+      for (const g of seriesGroups!) {
+        pushStickSeries(
+          series,
+          peaks.filter((p) => groupOf.get(p.id) === g),
+          `sticks:${g.id}`,
+          g.label,
+          g.color,
+        );
+      }
+      pushStickSeries(
+        series,
+        peaks.filter((p) => !groupOf.has(p.id)),
+        "sticks:unassigned",
+        "Unassigned",
+        STICK_COLOR,
+      );
+    } else {
+      // Legacy single-series behaviour when no grouping is supplied.
+      pushStickSeries(series, peaks, "sticks", "Peaks", STICK_COLOR);
+    }
   }
 
   const peakLabels: PeakLabelDatum[] = labelPeaks
     ? peaks.map((p) => {
         const mz = peakMz(p);
-        return { id: p.id, x: mz, y: p.intensity, text: mz.toFixed(2) };
+        const owner = groupOf.get(p.id);
+        // A user-authored `Peak.label` is shown verbatim; `customText` protects it
+        // from the maker's Decimals reformat. An empty label falls back to the m/z.
+        const custom = typeof p.label === "string" && p.label.length > 0;
+        return {
+          id: p.id,
+          x: mz,
+          y: p.intensity,
+          text: custom ? p.label! : mz.toFixed(2),
+          ...(custom ? { customText: true } : {}),
+          // Per-peak colour flows straight through to the label renderer, where it
+          // wins over both "colour by series" and the single label colour.
+          ...(p.color ? { color: p.color } : {}),
+          // Owning ladder's stick-series id, so "colour labels by series" maps a
+          // label to its ladder colour.
+          ...(owner ? { seriesId: `sticks:${owner.id}` } : {}),
+        };
       })
     : [];
 

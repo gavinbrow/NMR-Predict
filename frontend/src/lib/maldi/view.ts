@@ -96,3 +96,105 @@ export function resampleOnto(grid: Float64Array, spectrum: SpectrumData): Float6
   }
   return out;
 }
+
+/**
+ * Same as {@link resampleOnto} but emits `NaN` for grid points outside the
+ * spectrum's m/z range, so uPlot gaps the trace instead of drawing a false flat
+ * baseline at zero. Used by the overlay-capable `MaldiSpectrumPlot` so an
+ * overlay whose range is narrower than the primary's simply disappears outside
+ * its own range, rather than implying the spectrum was zero there.
+ */
+export function resampleOntoGappy(grid: Float64Array, spectrum: SpectrumData): Float64Array {
+  const out = new Float64Array(grid.length);
+  const { mz, intensity } = spectrum;
+  const n = mz.length;
+  if (n === 0) {
+    out.fill(NaN);
+    return out;
+  }
+  let j = 0;
+  for (let i = 0; i < grid.length; i += 1) {
+    const x = grid[i];
+    if (x < mz[0] || x > mz[n - 1]) {
+      out[i] = NaN;
+      continue;
+    }
+    if (x === mz[0]) {
+      out[i] = intensity[0];
+      continue;
+    }
+    if (x === mz[n - 1]) {
+      out[i] = intensity[n - 1];
+      continue;
+    }
+    while (j < n - 1 && mz[j + 1] < x) j += 1;
+    const x0 = mz[j];
+    const x1 = mz[j + 1];
+    const t = x1 === x0 ? 0 : (x - x0) / (x1 - x0);
+    out[i] = intensity[j] + t * (intensity[j + 1] - intensity[j]);
+  }
+  return out;
+}
+
+/**
+ * Scale a trace so its max becomes 100. Returns the input unchanged when the
+ * max is ≤ 0 (an all-zero or all-negative trace). Lifted out of `CompareView`
+ * (and used by the overlay-capable `MaldiSpectrumPlot`) so both views share one
+ * normalisation. Allocates a new array only when normalising.
+ */
+export function normalizeTrace(arr: Float64Array): Float64Array {
+  let max = 0;
+  for (const v of arr) if (Number.isFinite(v) && v > max) max = v;
+  if (max <= 0) return arr;
+  const out = new Float64Array(arr.length);
+  for (let i = 0; i < arr.length; i += 1) out[i] = (arr[i] / max) * 100;
+  return out;
+}
+
+/**
+ * Add a constant vertical offset to a trace (stacked-style). Returns the input
+ * unchanged when `offset` is 0 so callers don't pay an allocation in the common
+ * case. Lifted out of `CompareView` so the overlay plot and the compare view
+ * share one offset primitive.
+ */
+export function applyOffset(arr: Float64Array, offset: number): Float64Array {
+  if (!offset) return arr;
+  const out = new Float64Array(arr.length);
+  for (let i = 0; i < arr.length; i += 1) out[i] = arr[i] + offset;
+  return out;
+}
+
+/**
+ * Build a uniform ascending m/z grid of `samples` points spanning the UNION
+ * m/z range of every supplied spectrum, intersected with the optional `[lo, hi]`
+ * zoom window. Used by the multi-trace plot so every visible trace resamples
+ * against one common axis (uPlot needs a single shared x array) without a
+ * narrower active document truncating the wider ones.
+ */
+export function unionGrid(spectra: SpectrumData[], lo?: number, hi?: number, samples = 12000): Float64Array {
+  let min = Infinity;
+  let max = -Infinity;
+  for (const s of spectra) {
+    if (s.mz.length === 0) continue;
+    if (s.mz[0] < min) min = s.mz[0];
+    if (s.mz[s.mz.length - 1] > max) max = s.mz[s.mz.length - 1];
+  }
+  if (!Number.isFinite(min) || !Number.isFinite(max) || !(max > min)) return new Float64Array(0);
+  if (lo != null && lo > min) min = lo;
+  if (hi != null && hi < max) max = hi;
+  if (!(max > min)) return new Float64Array(0);
+  const step = (max - min) / (samples - 1);
+  const out = new Float64Array(samples);
+  for (let i = 0; i < samples; i += 1) out[i] = min + i * step;
+  return out;
+}
+
+/**
+ * The scale factor that took a raw-intensity peak height to the plotted 0-100
+ * normalised units: `100 / max` when normalising (and `max > 0`), else `1`.
+ * Multiplied by the raw `peak.intensity` and the per-trace `offset` added to
+ * land a peak marker in the plot's y-space (FP3).
+ */
+export function peakMarkerScale(normalize: boolean, windowMax: number): number {
+  return normalize && windowMax > 0 ? 100 / windowMax : 1;
+}

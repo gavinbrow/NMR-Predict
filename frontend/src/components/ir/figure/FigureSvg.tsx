@@ -35,7 +35,21 @@ const Y_SCALE_OUT = 1.25;
 /** A drag in progress on the interactive preview. Coordinates are viewBox px. */
 type Drag =
   | { kind: "zoom"; x0: number; y0: number; x1: number; y1: number }
-  | { kind: "legend"; lx: number; ly: number; offX: number; offY: number };
+  | { kind: "legend"; lx: number; ly: number; offX: number; offY: number }
+  // Dragging a peak label: `dx0/dy0` are the override's starting nudge, `dx/dy`
+  // the live nudge, `moved` whether the pointer passed the click threshold (a
+  // click just selects the label; a real drag re-places it).
+  | {
+      kind: "label";
+      id: string;
+      startX: number;
+      startY: number;
+      dx0: number;
+      dy0: number;
+      dx: number;
+      dy: number;
+      moved: boolean;
+    };
 
 export interface FigureSvgProps {
   data: FigureData;
@@ -53,6 +67,18 @@ export interface FigureSvgProps {
   onResetZoom?: () => void;
   /** The legend was dropped; position is the box top-left as plot-area fractions. */
   onLegendMove?: (custom: { x: number; y: number }) => void;
+  /**
+   * MS-only (data-anchored peak labels). The currently selected label id, drawn
+   * with a selection ring; a click on a label or on empty plot space reports the
+   * new selection through {@link onLabelSelect}.
+   */
+  selectedLabelId?: string | null;
+  onLabelSelect?: (id: string | null) => void;
+  /** A peak label was dragged to a new placement (px offset from its anchor). */
+  onLabelMove?: (id: string, offset: { dx: number; dy: number }) => void;
+  /** Reports how many in-view labels are drawn vs. dropped by thinning, so the
+   *  host can surface "N labels hidden" (why a low ladder silently vanished). */
+  onLabelStats?: (stats: { shown: number; hiddenByThinning: number }) => void;
   className?: string;
 }
 
@@ -73,6 +99,10 @@ export function FigureSvg({
   onZoom,
   onResetZoom,
   onLegendMove,
+  selectedLabelId,
+  onLabelSelect,
+  onLabelMove,
+  onLabelStats,
   className,
 }: FigureSvgProps) {
   // useId() returns ":r1:"-style ids; strip the colons for url(#…) references.
@@ -170,15 +200,116 @@ export function FigureSvg({
   const axisWeight = options.axisBold ? 700 : 400;
 
   // Legend box geometry (corner-anchored or custom-placed inside the plot area).
+  // The legend is clamped to the plot height: when it would overflow, entries
+  // flow into additional columns sized to their widest label, and if those
+  // columns would swallow too much of the plot the extra entries are dropped in
+  // favour of a "+M more" row. Text width is estimated from the glyph count
+  // (never measured — see labelBox note).
   const legend = options.legend;
   const legendEntries = legend.show ? visible.map(({ st }) => st) : [];
   const lf = legend.fontSize;
   const rowH = lf * 1.5;
   const sampleW = 22;
-  const legendW =
-    16 + sampleW + 6 + Math.max(1, ...legendEntries.map((e) => e.label.length)) * lf * 0.6;
-  const legendH = 12 + rowH * legendEntries.length;
+  const colGap = 12;
+  const padX = 16;
   const inset = 10;
+  const labelW = (e: SeriesStyle) => e.label.length * lf * 0.6;
+  const moreText = (m: number) => `+${m} more`;
+  const maxRows = Math.max(1, Math.floor((plotH - 12) / rowH));
+  const n = legendEntries.length;
+
+  type LegendCell = {
+    e?: SeriesStyle;
+    text: string;
+    col: number;
+    row: number;
+    isMore: boolean;
+  };
+  const colContentW: number[] = [];
+  let legendCells: LegendCell[] = [];
+  let legendW = padX + sampleW + 6 + (n ? Math.max(1, ...legendEntries.map(labelW)) : 0);
+  let legendH = 12 + rowH * n;
+  let omitted = 0;
+
+  if (n > 0) {
+    if (n <= maxRows) {
+      colContentW.push(sampleW + 6 + Math.max(1, ...legendEntries.map(labelW)));
+      legendW = padX + colContentW[0];
+      legendH = 12 + rowH * n;
+      legendCells = legendEntries.map((e, i) => ({
+        e,
+        text: e.label,
+        col: 0,
+        row: i,
+        isMore: false,
+      }));
+    } else {
+      const maxPlotW = plotW * 0.4;
+      const measure = (cols: number, withMore: boolean) => {
+        const realToShow = Math.min(n, cols * maxRows - (withMore ? 1 : 0));
+        const widths: number[] = [];
+        for (let c = 0; c < cols; c += 1) {
+          const start = c * maxRows;
+          const end = Math.min(realToShow, (c + 1) * maxRows);
+          let mw = 0;
+          for (let i = start; i < end; i += 1) mw = Math.max(mw, labelW(legendEntries[i]));
+          if (withMore && c === cols - 1) {
+            mw = Math.max(mw, moreText(n - realToShow).length * lf * 0.6);
+          }
+          widths.push(sampleW + 6 + Math.max(mw, 1));
+        }
+        const totalW = padX + widths.reduce((a, b) => a + b, 0) + colGap * (cols - 1);
+        return { widths, totalW, realToShow };
+      };
+      let cols = Math.ceil(n / maxRows);
+      let m = measure(cols, false);
+      if (m.totalW > maxPlotW) {
+        while (cols > 1) {
+          cols -= 1;
+          m = measure(cols, true);
+          if (m.totalW <= maxPlotW) break;
+        }
+      }
+      const realToShow = m.realToShow;
+      omitted = n - realToShow;
+      const withMore = omitted > 0;
+      for (let c = 0; c < cols; c += 1) colContentW.push(m.widths[c]);
+      legendW = m.totalW;
+      legendH = 12 + rowH * maxRows;
+      for (let c = 0; c < cols; c += 1) {
+        const start = c * maxRows;
+        const end = Math.min(realToShow, (c + 1) * maxRows);
+        for (let i = start; i < end; i += 1) {
+          legendCells.push({
+            e: legendEntries[i],
+            text: legendEntries[i].label,
+            col: c,
+            row: i - start,
+            isMore: false,
+          });
+        }
+      }
+      if (withMore) {
+        legendCells.push({
+          text: moreText(omitted),
+          col: cols - 1,
+          row: maxRows - 1,
+          isMore: true,
+        });
+      }
+    }
+  }
+
+  // Column x-offsets within the legend frame (left padding 8, then each
+  // column's content + the inter-column gap).
+  const colX: number[] = [];
+  {
+    let acc = 8;
+    for (let c = 0; c < colContentW.length; c += 1) {
+      colX.push(acc);
+      acc += colContentW[c] + colGap;
+    }
+  }
 
   // Base position: free placement (fractions) if set, else the chosen corner.
   let baseLx: number;
@@ -198,31 +329,146 @@ export function FigureSvg({
   const lx = drag?.kind === "legend" ? drag.lx : baseLx;
   const ly = drag?.kind === "legend" ? drag.ly : baseLy;
 
-  // Data-anchored peak labels (m/z values etc.): project to pixels, drop those
-  // scrolled out of the x-range, then thin to the most intense non-overlapping
-  // few so a dense spectrum stays legible.
-  const peakLabelEls = useMemo(() => {
+  // Look-up of each series' current style colour, for colour-by-series labels.
+  const seriesColorById = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const s of options.series) m.set(s.id, s.color);
+    return m;
+  }, [options.series]);
+
+  // Data-anchored peak labels (m/z values etc.): resolve each label's text,
+  // colour and placement, drop hidden ones and those scrolled out of the
+  // x-range, then thin to the most intense non-overlapping few so a dense
+  // spectrum stays legible. Returns both the drawn set and the pre-thinning
+  // candidate count so the host can report how many the thinner dropped.
+  const peakLabels = useMemo(() => {
     const pl = options.peakLabels;
     const labels = data.peakLabels;
-    if (!pl.show || !labels || labels.length === 0) return [];
+    if (!pl.show || !labels || labels.length === 0) return { drawn: [], candidates: 0 };
     const eps = 0.5;
     const projected = labels
-      .map((p) => ({
-        id: p.id,
-        px: fig.sx(p.x),
-        py: fig.sy(p.y),
-        weight: Number.isFinite(p.y) ? p.y : -Infinity,
-        text: pl.decimals >= 0 && Number.isFinite(p.x) ? p.x.toFixed(pl.decimals) : p.text,
-      }))
+      // Per-label "hidden" drops the label from the pool BEFORE thinning, so
+      // deleting one never frees a slot for a previously-thinned neighbour.
+      .filter((p) => !pl.overrides[p.id]?.hidden)
+      .map((p) => {
+        const ov = pl.overrides[p.id];
+        const custom = p.customText === true;
+        // Text: a datum carrying custom text wins verbatim; Decimals only
+        // reformats the plain-anchor (m/z) labels that have none.
+        const text =
+          !custom && pl.decimals >= 0 && Number.isFinite(p.x) ? p.x.toFixed(pl.decimals) : p.text;
+        // Colour precedence: the datum's own colour (the peak's colour) →
+        // the owning series' colour when "colour by series" is on → the single
+        // label colour.
+        const color =
+          p.color ??
+          (pl.colorBySeries && p.seriesId ? seriesColorById.get(p.seriesId) : undefined) ??
+          pl.color;
+        // Pinned = the user has touched this label (a placement/hide override, a
+        // custom colour/text, or the current selection). Pinned labels bypass
+        // thinning so an edit can't make them vanish.
+        const pinned = !!ov || custom || p.id === selectedLabelId;
+        const anchorPx = fig.sx(p.x);
+        return {
+          id: p.id,
+          px: anchorPx, // thinning key (min-gap uses the anchor position)
+          anchorPx,
+          apexY: fig.sy(p.y),
+          dx: ov?.dx ?? 0,
+          dy: ov?.dy ?? 0,
+          weight: Number.isFinite(p.y) ? p.y : -Infinity,
+          text,
+          color,
+          pinned,
+        };
+      })
+      // A pinned/"force show" label must still sit in the x-window and carry a
+      // finite weight — pinning bypasses thinning, not the basic drawability gate.
       .filter(
         (p) =>
-          Number.isFinite(p.px) &&
+          Number.isFinite(p.anchorPx) &&
           Number.isFinite(p.weight) &&
-          p.px >= marginLeft - eps &&
-          p.px <= marginLeft + plotW + eps,
+          p.anchorPx >= marginLeft - eps &&
+          p.anchorPx <= marginLeft + plotW + eps,
       );
-    return pickVisibleLabels(projected, pl.maxLabels, pl.minGap);
-  }, [data.peakLabels, options.peakLabels, fig, marginLeft, plotW]);
+    return {
+      drawn: pickVisibleLabels(projected, pl.maxLabels, pl.minGap),
+      candidates: projected.length,
+    };
+  }, [data.peakLabels, options.peakLabels, fig, marginLeft, plotW, seriesColorById, selectedLabelId]);
+  const peakLabelEls = peakLabels.drawn;
+
+  // Report drawn-vs-thinned counts to the host (used to surface "N hidden").
+  useEffect(() => {
+    onLabelStats?.({
+      shown: peakLabels.drawn.length,
+      hiddenByThinning: peakLabels.candidates - peakLabels.drawn.length,
+    });
+  }, [onLabelStats, peakLabels]);
+
+  // Estimated axis-aligned hit/label box (pre-rotation) for a projected label at
+  // the given nudge — shared by the renderer and the pointer hit-test so they
+  // never drift. Text width is *estimated* from the glyph count (never measured
+  // with getBBox, which would race the exporter's two-rAF settle). `x`/`y` are
+  // the clamped draw anchor; `middle` is the text-anchor mode.
+  const labelBox = (
+    p: { anchorPx: number; apexY: number; text: string },
+    dx: number,
+    dy: number,
+  ) => {
+    const pl = options.peakLabels;
+    const x = clamp(p.anchorPx + dx, marginLeft, marginLeft + plotW);
+    // Rotated text extends vertically by its (horizontal) text width: -90°
+    // grows upward from the anchor, +90° downward. Peak labels render outside
+    // the clip group, so clamp the anchor by the rotated extent to keep the
+    // whole glyph inside the figure frame.
+    const textW = p.text.length * pl.fontSize * 0.6;
+    const rotated = pl.rotation !== 0;
+    const upExt = rotated ? (pl.rotation < 0 ? textW : 0) : pl.fontSize;
+    const downExt = rotated ? (pl.rotation < 0 ? 0 : textW) : 0;
+    const y = clamp(
+      p.apexY - pl.offset + dy,
+      marginTop + upExt,
+      marginTop + plotH - downExt,
+    );
+    const halfW = (p.text.length * pl.fontSize * 0.6) / 2;
+    const middle = pl.rotation === 0;
+    return {
+      x,
+      y,
+      middle,
+      left: middle ? x - halfW - 2 : x - 2,
+      right: middle ? x + halfW + 2 : x + halfW * 2 + 2,
+      top: y - pl.fontSize * 0.9,
+      bottom: y + pl.fontSize * 0.3,
+    };
+  };
+
+  // Hit-test the (already drawn) labels top-most first, un-rotating the pointer
+  // into each label's local frame so rotated labels test correctly.
+  const hitTestLabel = (vx: number, vy: number): { id: string } | null => {
+    const rotDeg = options.peakLabels.rotation;
+    for (let i = peakLabelEls.length - 1; i >= 0; i -= 1) {
+      const p = peakLabelEls[i];
+      const box = labelBox(p, p.dx, p.dy);
+      let lx = vx;
+      let ly = vy;
+      if (rotDeg) {
+        const t = (rotDeg * Math.PI) / 180;
+        const cos = Math.cos(t);
+        const sin = Math.sin(t);
+        lx = box.x + (vx - box.x) * cos + (vy - box.y) * sin;
+        ly = box.y - (vx - box.x) * sin + (vy - box.y) * cos;
+      }
+      if (lx >= box.left && lx <= box.right && ly >= box.top && ly <= box.bottom) {
+        return { id: p.id };
+      }
+    }
+    return null;
+  };
+
+  // Label editing is live only when a host wired it (MALDI). Off for IR/exports.
+  const labelInteractive = interactive && (!!onLabelSelect || !!onLabelMove);
 
   // --- interactive pointer handling -------------------------------------------
 
@@ -273,6 +519,29 @@ export function FigureSvg({
   const onPointerDown = (e: React.PointerEvent) => {
     if (!interactive) return;
     const { vx, vy } = toViewbox(e);
+    // A peak label is the smallest, most specific target — check it first so a
+    // click near a label grabs the label, not a zoom/legend drag underneath.
+    if (labelInteractive && options.peakLabels.show) {
+      const hit = hitTestLabel(vx, vy);
+      if (hit) {
+        svgRef.current?.setPointerCapture(e.pointerId);
+        const ov = options.peakLabels.overrides[hit.id];
+        setDrag({
+          kind: "label",
+          id: hit.id,
+          startX: vx,
+          startY: vy,
+          dx0: ov?.dx ?? 0,
+          dy0: ov?.dy ?? 0,
+          dx: ov?.dx ?? 0,
+          dy: ov?.dy ?? 0,
+          moved: false,
+        });
+        onLabelSelect?.(hit.id);
+        e.preventDefault();
+        return;
+      }
+    }
     // Legend takes precedence when the pointer lands on it.
     if (
       onLegendMove &&
@@ -309,12 +578,20 @@ export function FigureSvg({
         x1: clamp(vx, marginLeft, marginLeft + plotW),
         y1: clamp(vy, marginTop, marginTop + plotH),
       });
-    } else {
+    } else if (drag.kind === "legend") {
       setDrag({
         ...drag,
         lx: clamp(vx - drag.offX, marginLeft, marginLeft + plotW - legendW),
         ly: clamp(vy - drag.offY, marginTop, marginTop + plotH - legendH),
       });
+    } else {
+      // Label drag: accumulate the pointer delta onto the starting nudge. A move
+      // past a small threshold promotes the gesture from a click to a re-place.
+      const ndx = drag.dx0 + (vx - drag.startX);
+      const ndy = drag.dy0 + (vy - drag.startY);
+      const moved =
+        drag.moved || Math.abs(vx - drag.startX) >= 2 || Math.abs(vy - drag.startY) >= 2;
+      setDrag({ ...drag, dx: ndx, dy: ndy, moved });
     }
   };
 
@@ -341,9 +618,16 @@ export function FigureSvg({
           next.y = { min: Math.min(a, b), max: Math.max(a, b) };
         }
         onZoom?.(next);
+      } else {
+        // A click on empty plot space (no drag) clears any label selection.
+        onLabelSelect?.(null);
       }
-    } else {
+    } else if (drag.kind === "legend") {
       onLegendMove?.({ x: (drag.lx - marginLeft) / plotW, y: (drag.ly - marginTop) / plotH });
+    } else {
+      // Commit the new placement only if the label actually moved (a click just
+      // selected it, which already happened on pointer-down).
+      if (drag.moved) onLabelMove?.(drag.id, { dx: drag.dx, dy: drag.dy });
     }
     setDrag(null);
   };
@@ -557,14 +841,16 @@ export function FigureSvg({
                 rx={4}
               />
             )}
-            {legendEntries.map((e, i) => {
-              const cy = ly + 6 + rowH * i + rowH / 2;
+            {legendCells.map((cell, i) => {
+              const cx = lx + colX[cell.col] + sampleW / 2;
+              const cy = ly + 6 + rowH * cell.row + rowH / 2;
+              const e = cell.e;
               return (
-                <g key={`l${e.id}`}>
-                  {e.lineStyle !== "none" && (
+                <g key={`l${i}`}>
+                  {e && e.lineStyle !== "none" && (
                     <line
-                      x1={lx + 8}
-                      x2={lx + 8 + sampleW}
+                      x1={lx + colX[cell.col]}
+                      x2={lx + colX[cell.col] + sampleW}
                       y1={cy}
                       y2={cy}
                       stroke={e.color}
@@ -572,16 +858,16 @@ export function FigureSvg({
                       strokeDasharray={dashArray(e.lineStyle, e.lineWidth)}
                     />
                   )}
-                  {e.markers && (
-                    <circle cx={lx + 8 + sampleW / 2} cy={cy} r={e.markerSize} fill={e.color} />
+                  {e && e.markers && (
+                    <circle cx={cx} cy={cy} r={e.markerSize} fill={e.color} />
                   )}
                   <text
-                    x={lx + 8 + sampleW + 6}
+                    x={lx + colX[cell.col] + sampleW + 6}
                     y={cy + lf * 0.35}
                     fontSize={lf}
                     fill={TEXT_COLOR}
                   >
-                    {e.label}
+                    {cell.text}
                   </text>
                 </g>
               );
@@ -603,26 +889,60 @@ export function FigureSvg({
           </text>
         ))}
 
-        {/* Data-anchored peak labels (m/z values over mass-spectrum peaks) */}
+        {/* Data-anchored peak labels (m/z values over mass-spectrum peaks). Each
+            is a group so the transparent hit-rect, selection ring and glyph
+            rotate together about the label anchor. A label being dragged follows
+            the pointer live via `drag`. */}
         {peakLabelEls.map((p) => {
-          const labelY = Math.max(marginTop + options.peakLabels.fontSize, p.py - options.peakLabels.offset);
+          const live = drag?.kind === "label" && drag.id === p.id;
+          const box = labelBox(p, live ? drag.dx : p.dx, live ? drag.dy : p.dy);
+          const selected = p.id === selectedLabelId;
+          const rot = options.peakLabels.rotation
+            ? `rotate(${options.peakLabels.rotation} ${box.x} ${box.y})`
+            : undefined;
           return (
-            <text
+            <g
               key={`pl-${p.id}`}
-              x={p.px}
-              y={labelY}
-              textAnchor={options.peakLabels.rotation === 0 ? "middle" : "start"}
-              fontSize={options.peakLabels.fontSize}
-              fontWeight={options.peakLabels.bold ? 700 : 400}
-              fill={options.peakLabels.color}
-              transform={
-                options.peakLabels.rotation
-                  ? `rotate(${options.peakLabels.rotation} ${p.px} ${labelY})`
-                  : undefined
-              }
+              transform={rot}
+              style={labelInteractive ? { cursor: "move" } : undefined}
             >
-              {p.text}
-            </text>
+              {/* Transparent hit-rect: glyph-only hit-testing is unreliable, so
+                  give the label a comfortable, cursor-move-able grab area. */}
+              {labelInteractive && (
+                <rect
+                  x={box.left}
+                  y={box.top}
+                  width={box.right - box.left}
+                  height={box.bottom - box.top}
+                  fill="transparent"
+                  pointerEvents="all"
+                />
+              )}
+              {selected && labelInteractive && (
+                <rect
+                  x={box.left}
+                  y={box.top}
+                  width={box.right - box.left}
+                  height={box.bottom - box.top}
+                  fill="none"
+                  stroke="#2563eb"
+                  strokeWidth={1}
+                  strokeDasharray="3 2"
+                  rx={2}
+                  pointerEvents="none"
+                />
+              )}
+              <text
+                x={box.x}
+                y={box.y}
+                textAnchor={box.middle ? "middle" : "start"}
+                fontSize={options.peakLabels.fontSize}
+                fontWeight={options.peakLabels.bold ? 700 : 400}
+                fill={p.color}
+              >
+                {p.text}
+              </text>
+            </g>
           );
         })}
 

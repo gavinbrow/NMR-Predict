@@ -31,6 +31,13 @@ const PRESET_LABELS: Record<PeakPreset, string> = {
   isotopeResolved: "Isotope-resolved",
 };
 
+/**
+ * Select value for the preset dropdown. Every manual control (except the
+ * monoisotopic toggle) sets `params.preset` to `undefined`, so a custom param
+ * set must show an explicit "Custom" entry rather than misreporting "Balanced".
+ */
+const PRESET_SELECT_VALUE = "__custom__";
+
 export function PeakPickingPanel({
   params,
   onChange,
@@ -42,16 +49,31 @@ export function PeakPickingPanel({
 }: PeakPickingPanelProps) {
   const set = (patch: Partial<PeakPickParams>) => onChange({ ...params, ...patch });
   const applyPreset = (preset: PeakPreset) => onChange({ ...PEAK_PRESETS[preset] });
+  // A defined preset id shows as itself; once any control is hand-edited the
+  // preset is cleared (undefined) and the dropdown reports "Custom". "Custom"
+  // is a real, selectable entry: selecting it clears `params.preset` while
+  // keeping the current values, so a user on a named preset can explicitly
+  // switch to custom mode without hand-editing a field first. Selecting
+  // "Custom" when already custom is a harmless no-op (preset stays undefined).
+  const selectPreset = (v: string) => {
+    if (v === PRESET_SELECT_VALUE) {
+      if (params.preset !== undefined) set({ preset: undefined });
+    } else {
+      applyPreset(v as PeakPreset);
+    }
+  };
+  const presetValue = params.preset ?? PRESET_SELECT_VALUE;
 
   return (
     <div className="flex flex-col gap-3">
       <div className="grid gap-1.5">
         <Label className="text-[11px] text-muted-foreground">Preset</Label>
-        <Select value={params.preset ?? "balanced"} onValueChange={(v) => applyPreset(v as PeakPreset)}>
+        <Select value={presetValue} onValueChange={selectPreset}>
           <SelectTrigger className="h-8">
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
+            <SelectItem value={PRESET_SELECT_VALUE}>Custom</SelectItem>
             {(Object.keys(PRESET_LABELS) as PeakPreset[]).map((preset) => (
               <SelectItem key={preset} value={preset}>
                 {PRESET_LABELS[preset]}

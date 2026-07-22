@@ -17,10 +17,8 @@ import { parseMsFile } from "./parseMs";
 import { applyProcessing } from "./processing";
 import { pickPeaks } from "./peaks";
 import { assignSeries, detectCopolymer, detectRepeatUnits } from "./polymers";
-import { kendrickAnalysis } from "./kendrick";
 import { solveEndGroups } from "./endgroups";
 import { generateFormulaCandidates } from "./formula";
-import { detectLosses } from "./losses";
 import type {
   WorkerOp,
   WorkerRequestMessage,
@@ -70,7 +68,6 @@ const handlers: { [Op in WorkerOp]: Handler<Op> } = {
   assignSeries: (payload) => ({
     series: assignSeries(payload.peaks, payload.repeatMass, payload.adducts, payload.options),
   }),
-  kendrick: (payload) => ({ points: kendrickAnalysis(payload.peaks, payload.baseRepeat) }),
   solveEndGroups: (payload) => ({
     candidates: solveEndGroups(
       payload.peaks,
@@ -82,7 +79,6 @@ const handlers: { [Op in WorkerOp]: Handler<Op> } = {
   formulaCandidates: (payload) => ({
     candidates: generateFormulaCandidates(payload.targetNeutralMass, payload.options),
   }),
-  detectLosses: (payload) => ({ events: detectLosses(payload.peaks, payload.options) }),
   detectCopolymer: (payload) => ({
     series: detectCopolymer(payload.peaks, payload.adducts, payload.options),
   }),
