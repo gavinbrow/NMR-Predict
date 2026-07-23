@@ -122,7 +122,9 @@ export function FigureSvg({
     // x-axis spans the union, falling back to the shared grid when none do.
     const anyOwnX = visible.some((v) => v.sd.x);
     const xValues = anyOwnX ? visible.flatMap((v) => v.sd.x ?? data.x) : data.x;
-    const yValues = visible.flatMap((v) => v.sd.y);
+    const yValues = visible.flatMap((v) =>
+      v.sd.baseline == null ? v.sd.y : [...v.sd.y, v.sd.baseline],
+    );
     const xAxis = resolveAxis(options.x, xValues);
     const yAxis = resolveAxis(options.y, yValues);
 
@@ -155,7 +157,8 @@ export function FigureSvg({
       const ownX = sd.x ?? data.x;
       if (st.kind === "sticks") {
         // Stems are the sparse peak set already — never decimated.
-        const d = sticksPathD(ownX, sd.y, sx, sy, stickBaseY);
+        const baseY = sd.baseline == null ? stickBaseY : sy(sd.baseline);
+        const d = sticksPathD(ownX, sd.y, sx, sy, baseY);
         const markers =
           st.markers && sd.y.length <= MARKER_LIMIT
             ? ownX

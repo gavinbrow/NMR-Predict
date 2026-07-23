@@ -1,4 +1,4 @@
-import { Activity, ArrowRight, BarChart3, FlaskConical, LineChart, Sparkles, Spline, Waves } from "lucide-react";
+import { Activity, ArrowRight, BarChart3, Database, FlaskConical, LineChart, Sparkles, Spline, Waves } from "lucide-react";
 import { Link } from "react-router-dom";
 import { AppShell } from "@/components/AppShell";
 
@@ -94,6 +94,13 @@ const Home = () => {
           eyebrow="Mass spec"
           title="MALDI interpretation"
           description="Import a MALDI spectrum, pick peaks, detect polymer repeat units, and assign oligomer series — all in the browser."
+        />
+        <WorkspaceCard
+          href="/gcms"
+          icon={Database}
+          eyebrow="GC/MS"
+          title="GC/MS & ESI"
+          description="Read GC-MS, LC-MS and open MS formats. Scrub a chromatogram with the spectrum linked below it, extract ion chromatograms, integrate peaks and export."
         />
         <WorkspaceCard
           href="/ir"

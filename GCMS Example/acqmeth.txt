@@ -1,0 +1,178 @@
+
+
+                           INSTRUMENT CONTROL PARAMETERS:    Instrument #1
+                           -----------------------------------------------
+
+   C:\DOCUMENTS AND SETTINGS\KILYANEK-GROUP\DESKTOP\MCGRAW\GAVIN\GavinMethod.M
+
+Control Information
+------- -----------
+       Sample Inlet : GC
+   Injection Source : GC/ALS
+ Injection Location : ALS
+             Use MS : Yes
+
+=============================================================================
+                                6890 GC METHOD
+=============================================================================
+
+OVEN
+   Initial temp:  80 'C (On)               Maximum temp:  280 'C
+   Initial time:  2.00 min                 Equilibration time:  0.50 min
+   Ramps:
+      #  Rate  Final temp  Final time
+      1 20.00      280       10.00
+      2   0.0(Off)
+   Post temp:  0 'C
+   Post time:  0.00 min
+   Run time:  22.00 min
+
+FRONT INLET (SPLIT/SPLITLESS)           BACK INLET (UNKNOWN)
+   Mode:  Split
+   Initial temp:  250 'C (On)
+   Pressure:  9.33 psi (On)
+   Split ratio:  10:1
+   Split flow:  10.0 mL/min
+   Total flow:  13.8 mL/min
+   Gas saver:  Off
+   Gas type:  Helium
+
+COLUMN 1                                COLUMN 2
+   Capillary Column                        (not installed)
+   Model Number:  Agilent 19091S-433
+   HP-5MS  5% Phenyl Methyl Siloxane
+   Max temperature:  325 'C
+   Nominal length:  30.0 m
+   Nominal diameter:  250.00 um
+   Nominal film thickness:  0.25 um
+   Mode:  constant flow
+   Initial flow:  1.0 mL/min
+   Nominal init pressure:  9.33 psi
+   Average velocity:  37 cm/sec
+   Inlet:  Front Inlet
+   Outlet:  MSD
+   Outlet pressure:  vacuum
+
+FRONT DETECTOR (NO DET)                 BACK DETECTOR (NO DET)
+
+SIGNAL 1                                SIGNAL 2
+   Data rate:  20 Hz                       Data rate:  20 Hz
+   Type:  test plot                        Type:  test plot
+   Save Data:  Off                         Save Data:  Off
+   Zero:  0.0 (Off)                        Zero:  0.0 (Off)
+   Range:  0                               Range:  0
+   Fast Peaks:  Off                        Fast Peaks:  Off
+   Attenuation:  0                         Attenuation:  0
+
+COLUMN COMP 1                           COLUMN COMP 2
+   (No Detectors Installed)                (No Detectors Installed)
+
+THERMAL AUX 2
+   Use:  MSD Transfer Line Heater
+   Description:
+   Initial temp:  280 'C (On)
+   Initial time:  0.00 min
+      #  Rate  Final temp  Final time
+      1   0.0(Off)
+
+                                        POST RUN
+                                           Post Time: 0.00 min
+
+TIME TABLE
+   Time       Specifier                     Parameter & Setpoint
+
+
+                               GC Injector
+
+
+     Front Injector:
+        Sample Washes                 3
+        Sample Pumps                  3
+        Injection Volume           1.00 microliters
+        Syringe Size               10.0 microliters
+        PreInj Solvent A Washes       3
+        PreInj Solvent B Washes       3
+        PostInj Solvent A Washes      3
+        PostInj Solvent B Washes      0
+        Viscosity Delay               0 seconds
+        Plunger Speed              Fast
+        PreInjection Dwell         0.00 minutes
+        PostInjection Dwell        0.00 minutes
+
+     Back Injector:
+No parameters specified
+
+ Column 1 Inventory Number : AB001
+ Column 2 Inventory Number :  
+
+                                MS ACQUISITION PARAMETERS
+
+
+General Information
+------- -----------
+
+Tune File                : pcich07-05-2021-working.U
+Acquistion Mode          : Scan
+
+
+MS Information
+-- -----------
+
+Solvent Delay            : 3.00 min
+
+EM Absolute              : False
+EM Offset                : 0
+Resulting EM Voltage     : 1941.2
+
+[Scan Parameters]
+
+Low Mass                 : 50.0
+High Mass                : 550.0
+Threshold                : 150
+Sample #                 : 2       A/D Samples    4
+Plot 2 low mass          : 50.0
+Plot 2 high mass         : 550.0
+
+[MSZones]
+
+MS Quad                  : 150 C   maximum 200 C
+MS Source                : 250 C   maximum 300 C
+Timed Events
+----- ------
+
+[Timed MS Detector Entries]
+
+Time (min)          State (MS on/off)
+0.01                     Off
+3.80                     On
+
+
+                             END OF MS ACQUISITION PARAMETERS
+
+
+                              TUNE PARAMETERS for SN: G1030-60697
+                        -----------------------------
+
+ EMISSION    :     222.494
+ ENERGY      :     230.371
+ REPELLER    :       0.805
+ IONFOCUS    :     215.427
+ ENTRANCE_LE :      45.500
+ EMVOLTS     :    1941.176
+ AMUGAIN     :    2239.000
+ AMUOFFSET   :     111.000
+ FILAMENT    :       1.000
+ DCPOLARITY  :       0.000
+ ENTLENSOFFS :       6.525
+ MASSGAIN    :   -2048.000   
+ MASSOFFSET  :      75.000   
+ CI Flow Rate:      20
+
+                           END OF TUNE PARAMETERS
+                      ------------------------------------
+
+
+
+                                 END OF INSTRUMENT CONTROL PARAMETERS
+                                 ------------------------------------
+

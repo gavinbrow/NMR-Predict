@@ -1,11 +1,12 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { useEffect, useState, type JSX } from "react";
-import { BrowserRouter, Route, Routes, useLocation } from "react-router-dom";
+import { BrowserRouter, Navigate, Route, Routes, useLocation } from "react-router-dom";
 import { Toaster as Sonner } from "@/components/ui/sonner";
 import { Toaster } from "@/components/ui/toaster";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import Home from "./pages/Home.tsx";
 import Index from "./pages/Index.tsx";
+import Gcms from "./pages/Gcms.tsx";
 import IrKinetics from "./pages/IrKinetics.tsx";
 import Kinetics from "./pages/Kinetics.tsx";
 import Maldi from "./pages/Maldi.tsx";
@@ -26,6 +27,7 @@ const KEEP_ALIVE: { path: string; element: JSX.Element }[] = [
   { path: "/prediction", element: <Index /> },
   { path: "/kinetics", element: <Kinetics /> },
   { path: "/maldi", element: <Maldi /> },
+  { path: "/gcms", element: <Gcms /> },
   { path: "/ir", element: <IrKinetics /> },
   { path: "/tensile", element: <Tensile /> },
 ];
@@ -70,6 +72,7 @@ const AppRoutes = () => {
         <Routes>
           <Route path="/" element={<Home />} />
           {/* ADD ALL CUSTOM ROUTES ABOVE THE CATCH-ALL "*" ROUTE */}
+          <Route path="/gpc" element={<Navigate to="/gcms" replace />} />
           <Route path="*" element={<NotFound />} />
         </Routes>
       ) : null}

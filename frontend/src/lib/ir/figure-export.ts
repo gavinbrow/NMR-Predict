@@ -137,3 +137,83 @@ export async function downloadFigurePng(
     cleanup();
   }
 }
+
+/** Compose multiple figures into one stacked parent SVG (figure i translated
+ *  to y = sum of heights[0..i-1], parent width = max child width). Returns the
+ *  serialized markup plus the composed pixel dimensions. Shared by the SVG
+ *  and PNG stacked exporters. */
+async function composeStackedSvg(
+  figs: { data: FigureData; options: FigureOptions }[],
+): Promise<{ markup: string; width: number; height: number }> {
+  const rendered = await Promise.all(figs.map((f) => renderOffscreenFigure(f.data, f.options)));
+  const SVG_NS = "http://www.w3.org/2000/svg";
+  try {
+    let totalH = 0;
+    let maxW = 0;
+    const children: SVGSVGElement[] = [];
+    for (const { svg } of rendered) {
+      const vb = svg.viewBox.baseVal;
+      const w = vb?.width || svg.clientWidth || 900;
+      const h = vb?.height || svg.clientHeight || 560;
+      maxW = Math.max(maxW, w);
+      const clone = svg.cloneNode(true) as SVGSVGElement;
+      clone.setAttribute("x", "0");
+      clone.setAttribute("y", String(totalH));
+      clone.removeAttribute("class");
+      totalH += h;
+      children.push(clone);
+    }
+    const parent = document.createElementNS(SVG_NS, "svg");
+    parent.setAttribute("xmlns", SVG_NS);
+    parent.setAttribute("width", String(maxW));
+    parent.setAttribute("height", String(totalH));
+    parent.setAttribute("viewBox", `0 0 ${maxW} ${totalH}`);
+    for (const child of children) parent.appendChild(child);
+    const markup = new XMLSerializer().serializeToString(parent);
+    return { markup, width: maxW, height: totalH };
+  } finally {
+    for (const { cleanup } of rendered) cleanup();
+  }
+}
+
+/** Download multiple figures as a single stacked .svg file (chromatogram above,
+ *  spectrum below, one parent SVG with nested `<svg>` children). */
+export async function downloadStackedFigureSvg(
+  figs: { data: FigureData; options: FigureOptions }[],
+  filename: string,
+): Promise<void> {
+  const { markup } = await composeStackedSvg(figs);
+  triggerDownload(new Blob([markup], { type: "image/svg+xml;charset=utf-8" }), filename);
+}
+
+/** Download multiple figures as a single stacked .png file at `scale`× resolution. */
+export async function downloadStackedFigurePng(
+  figs: { data: FigureData; options: FigureOptions }[],
+  scale: number,
+  filename: string,
+): Promise<void> {
+  const { markup, width, height } = await composeStackedSvg(figs);
+  const { outW, outH, ok } = pngExportSize(width, height, scale);
+  if (!ok) {
+    throw new Error(
+      `Requested PNG (${outW}×${outH}px) exceeds the browser canvas limit — lower the scale/DPI or the figure size.`,
+    );
+  }
+  const src = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(markup)}`;
+  const img = new Image();
+  await new Promise<void>((resolve, reject) => {
+    img.onload = () => resolve();
+    img.onerror = () => reject(new Error("Failed to rasterize stacked figure SVG"));
+    img.src = src;
+  });
+  const canvas = document.createElement("canvas");
+  canvas.width = outW;
+  canvas.height = outH;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) throw new Error("Canvas 2D context unavailable");
+  ctx.scale(scale, scale);
+  ctx.drawImage(img, 0, 0, width, height);
+  const blob = await new Promise<Blob | null>((r) => canvas.toBlob(r, "image/png"));
+  if (!blob) throw new Error("PNG encoding failed");
+  triggerDownload(blob, filename);
+}

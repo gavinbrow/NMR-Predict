@@ -17,6 +17,9 @@ export interface FigureSeriesData {
    */
   x?: number[];
   y: number[];
+  /** Data-space baseline for stick series. Defaults to zero (or the visible
+   * y-axis floor). Hosts use this for vertically stacked mass spectra. */
+  baseline?: number;
   /** Host-suggested initial styling (e.g. scatter vs dashed fit line, sticks). */
   styleHints?: Partial<
     Pick<SeriesStyle, "color" | "lineWidth" | "lineStyle" | "markers" | "markerSize" | "kind">

@@ -73,6 +73,13 @@ export function AppShell({
                 MALDI
               </NavLink>
               <NavLink
+                to="/gcms"
+                className={navLinkClassName}
+                activeClassName={navLinkActiveClassName}
+              >
+                GC/MS
+              </NavLink>
+              <NavLink
                 to="/ir"
                 className={navLinkClassName}
                 activeClassName={navLinkActiveClassName}
