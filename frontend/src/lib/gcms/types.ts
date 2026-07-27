@@ -44,6 +44,21 @@ export interface MsRun {
   ticRange: [number, number];
   meta: RunMeta;
   warnings: string[];
+  /** Additional detector channels that belong to the same vendor run folder. */
+  chromatograms?: RunChromatogram[];
+}
+
+/** A non-MS chromatogram stored beside the primary data file in a vendor run. */
+export interface RunChromatogram {
+  name: string;
+  sourcePath: string;
+  detector: "uv" | "fid";
+  rtMin: Float64Array;
+  intensity: Float64Array;
+  rtRange: [number, number];
+  intensityRange: [number, number];
+  meta: RunMeta;
+  warnings: string[];
 }
 
 /** A chromatogram drawn in the top panel. */

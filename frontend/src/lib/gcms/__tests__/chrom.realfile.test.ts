@@ -4,14 +4,11 @@ import { describe, expect, it } from "vitest";
 import { parseChemStationMs } from "../agilent/chemstationMs";
 import { buildTic, combineScans } from "../chrom";
 
-// Acceptance test against the real Agilent DATA.MS fixture. The fixture lives
-// at the repo root in "GCMS Example/DATA.MS"; from this test directory that is
-// five `..` segments up (this dir -> gcms -> lib -> src -> frontend -> root).
-// The path is verified to resolve to the real file (a silently skipped test
-// is a failure of this package), so we resolve explicitly and assert.
+// Acceptance test against the original standalone Agilent DATA.MS regression
+// fixture retained under `public/__gcmstest`.
 const FIXTURE = resolve(
   __dirname,
-  "../../../../../GCMS Example/DATA.MS",
+  "../../../../public/__gcmstest/DATA.MS",
 );
 const present = existsSync(FIXTURE);
 

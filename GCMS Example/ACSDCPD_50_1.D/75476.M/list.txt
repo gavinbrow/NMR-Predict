@@ -1,0 +1,33 @@
+                                        Compound List Report Instrument #1
+
+  Method Path : C:\MSDChem\1\METHODS\
+  Method File : FAMES_BPX70_02.M                                    
+  Title     :  
+  Last Update  : Tue Sep 03 09:37:55 2013
+  Response Via : Initial Calibration
+
+  Total Cpnds  : 12
+
+ PK#     Compound Name                 QIon  Exp_RT Rel_RT Cal #Qual A/H ID
+ --------------------------------------------------------------------------
+  1      22:5n3                         TIC   0.000  1.000  L     0   A   B
+  2      22:5n6                         TIC   0.000  1.000  L     0   A   B
+  3      22:4n6                         TIC   0.000  1.000  L     0   A   B
+  4      18:2n3                         TIC   0.000  1.000  L     0   A   B
+  5      22:6n3                         TIC  32.400  1.000  L     0   A   B
+  6      20:5n3                         TIC  28.560  1.000  L     0   A   B
+  7      18:3n3                         TIC  20.220  1.000  L     0   A   B
+  8      20:4n6                         TIC  26.100  1.000  L     0   A   B
+  9      20:3n6                         TIC  24.900  1.000  L     0   A   B
+ 10      18:2n6                         TIC  18.000  1.000  L     0   A   B
+ 11      17:0                           TIC  13.151  1.000  L     0   A   B
+ 12      16:0                           TIC  11.286  1.000  L     0   A   B
+
+
+ Cal A = Average L = Linear LO = Linear w/origin Q = Quad QO = Quad w/origin
+ #Qual = number of qualifiers
+   A/H = Area or Height
+ ID  R = R.T.  B = R.T. & Q  Q = Qvalue L = Largest  A = All
+ --------------------------------------------------------------------------
+
+FAMES_BPX70_02.M Tue Sep 03 11:59:08 2013 BUDDY 

@@ -3,6 +3,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
+import { MAX_TRACE_SCALE } from "@/lib/gcms/chrom";
 import type { ChromTrace } from "@/lib/gcms/types";
 
 /**
@@ -142,7 +143,9 @@ export function TracesPanel({
                       .reduce((m, o) => Math.max(m, rawMax(o) * (o.scale || 1)), 0);
                     const mine = rawMax(t);
                     if (mine > 0 && target > 0) {
-                      onPatch(t.id, { scale: Math.min(1000, Math.max(0.01, target / mine)) });
+                      onPatch(t.id, {
+                        scale: Math.min(MAX_TRACE_SCALE, Math.max(0.01, target / mine)),
+                      });
                     }
                   }}
                 />

@@ -52,8 +52,10 @@ import {
 } from "@/lib/gcms/comparison";
 import {
   buildBpc,
+  buildDetectorTrace,
   buildTic,
   buildXic as buildXicMain,
+  MAX_TRACE_SCALE,
   nearestScanIndex,
   scanSpectrum,
 } from "@/lib/gcms/chrom";
@@ -1009,10 +1011,10 @@ const Gcms = () => {
           const newDocs: GcmsDocument[] = [];
           const newTraces: ChromTrace[] = [];
           for (const run of accepted) {
-            const color = nextDocColor(docsCreatedCountRef.current);
-            // Two palette slots per run (TIC + BPC) so a later run can never be
-            // handed a colour an earlier run's BPC is already using.
-            docsCreatedCountRef.current += 2;
+            const colorStart = docsCreatedCountRef.current;
+            const color = nextDocColor(colorStart);
+            const detectorChannels = run.chromatograms ?? [];
+            docsCreatedCountRef.current += 2 + detectorChannels.length;
             const docId = crypto.randomUUID();
             newDocs.push({ id: docId, name: run.name, run, color, visible: true, offset: 0 });
             // Seed a default cache entry so the very FIRST switch away from
@@ -1038,12 +1040,27 @@ const Gcms = () => {
             const tic = buildTic(run);
             tic.color = color;
             const bpc = buildBpc(run);
-            bpc.color = nextDocColor(docsCreatedCountRef.current + 1);
+            bpc.color = nextDocColor(colorStart + 1);
             bpc.visible = false;
             // Tag trace ids so they're unique.
             tic.id = `${docId}-tic`;
             bpc.id = `${docId}-bpc`;
             newTraces.push(tic, bpc);
+            detectorChannels.forEach((channel, index) => {
+              const trace = buildDetectorTrace(run, channel);
+              trace.id = `${docId}-detector-${index}`;
+              trace.color = nextDocColor(colorStart + 2 + index);
+              trace.visible = false;
+              const channelMax = channel.intensityRange[1];
+              const primaryMax = run.ticRange[1];
+              if (channelMax > 0 && primaryMax > 0) {
+                trace.scale = Math.min(
+                  MAX_TRACE_SCALE,
+                  Math.max(0.01, primaryMax / channelMax),
+                );
+              }
+              newTraces.push(trace);
+            });
           }
           setDocuments((prev) => [...prev, ...newDocs]);
           setTraces((prev) => [...prev, ...newTraces]);
@@ -1237,7 +1254,7 @@ const Gcms = () => {
 
   // --- Per-trace intensity gain (Phase 3 task D): Shift+wheel on the
   // chromatogram multiplies ONE trace's `scale` in place, leaving the shared
-  // y-axis and every other trace untouched. Clamped to [0.01, 1000] so a long
+  // y-axis and every other trace untouched. Clamped so a long
   // scroll can't zero a trace out or blow it up to where it swamps the float
   // range `buildData` reads back a max from.
   const handleScaleTrace = useCallback((id: string, factor: number) => {
@@ -1245,7 +1262,7 @@ const Gcms = () => {
       prev.map((t) => {
         if (t.id !== id) return t;
         const cur = Number.isFinite(t.scale) && t.scale !== 0 ? t.scale : 1;
-        const next = Math.min(1000, Math.max(0.01, cur * factor));
+        const next = Math.min(MAX_TRACE_SCALE, Math.max(0.01, cur * factor));
         return { ...t, scale: next };
       }),
     );
@@ -2557,8 +2574,9 @@ function EmptyWorkspace({
           never uploaded, never modified.
         </p>
         <p className="text-xs text-muted-foreground">
-          The reference sample folder is <span className="font-mono">ACSDCPD.D</span> (Agilent
-          6890/5973 ChemStation).
+          The reference sample folder is{" "}
+          <span className="font-mono">ACSDCPD_50_1.D</span> (Agilent 6890/5973
+          ChemStation).
         </p>
         <div className="mx-auto mt-3 w-full max-w-sm text-left">
           <ImportPanel

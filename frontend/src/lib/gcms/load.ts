@@ -17,7 +17,7 @@
 // not testable under jsdom, so `loadGcmsFiles` is exercised with synthetic `File`
 // objects in `__tests__/load.test.ts`.
 
-import type { MsRun } from "./types";
+import type { MsRun, RunChromatogram } from "./types";
 import { isChemStationMs, parseChemStationMs } from "./agilent/chemstationMs";
 import { parseChemStationCh, isChemStationCh } from "./agilent/chemstationCh";
 import {
@@ -124,6 +124,8 @@ interface GroupBucket {
   acqmeth: string | null;
   prePost: string | null;
   cnorm: string | null;
+  /** Direct-child `.CH` / `.UV` channels belonging to this DATA.MS run. */
+  chromatograms: RunChromatogram[];
   /** The names of files we have already seen in this bucket (for progress). */
   fileNames: string[];
 }
@@ -132,6 +134,31 @@ interface GroupBucket {
 function dirname(path: string): string {
   const i = path.lastIndexOf("/");
   return i < 0 ? "" : path.slice(0, i);
+}
+
+/** The path through the first `.D` directory segment, or null when absent. */
+function vendorRunRoot(path: string): string | null {
+  const parts = path.replace(/\\/g, "/").split("/");
+  const index = parts.findIndex((part) => /\.d$/i.test(part));
+  return index < 0 ? null : parts.slice(0, index + 1).join("/");
+}
+
+function isDirectChild(path: string, directory: string): boolean {
+  return dirname(path.replace(/\\/g, "/")) === directory;
+}
+
+function asRunChromatogram(run: MsRun): RunChromatogram {
+  return {
+    name: run.name,
+    sourcePath: run.sourcePath,
+    detector: run.detector === "uv" ? "uv" : "fid",
+    rtMin: run.rtMin,
+    intensity: run.tic,
+    rtRange: run.rtRange,
+    intensityRange: run.ticRange,
+    meta: run.meta,
+    warnings: run.warnings,
+  };
 }
 
 /** basename of a forward-slash path: everything after the last "/". */
@@ -260,6 +287,7 @@ export async function loadGcmsFiles(
         acqmeth: null,
         prePost: null,
         cnorm: null,
+        chromatograms: [],
         fileNames: [],
       };
       buckets.set(dir, b);
@@ -270,6 +298,22 @@ export async function loadGcmsFiles(
   const total = files.length;
   let done = 0;
 
+  // A ChemStation run folder is identified by a direct-child `.MS` payload.
+  // Once identified, nested method/audit files are auxiliary and must not be
+  // mistaken for additional runs (for example `75476.M/acq.ms`).
+  const chemStationRoots = new Set<string>();
+  for (const file of files) {
+    const rel = relPath(file).replace(/\\/g, "/");
+    const root = vendorRunRoot(rel);
+    if (
+      root &&
+      isDirectChild(rel, root) &&
+      file.name.toLowerCase().endsWith(".ms")
+    ) {
+      chemStationRoots.add(root);
+    }
+  }
+
   // --- Pass 1: classify each file ------------------------------------------
   // Standalone-format files (mzML/mzXML/MGF/CDF/textual/.ch) are parsed
   // immediately. ChemStation MS data + the three companion texts are filed
@@ -278,8 +322,17 @@ export async function loadGcmsFiles(
   for (const file of files) {
     try {
       const lower = file.name.toLowerCase();
-      const rel = relPath(file);
-      const dir = dirname(rel);
+      const rel = relPath(file).replace(/\\/g, "/");
+      const root = vendorRunRoot(rel);
+      const isChemStationFolder = root !== null && chemStationRoots.has(root);
+      const directRunChild = isChemStationFolder && isDirectChild(rel, root!);
+      const dir = isChemStationFolder ? root! : dirname(rel);
+
+      if (isChemStationFolder && !directRunChild) {
+        done += 1;
+        if (onProgress) onProgress(`ignored ${file.name}`, total > 0 ? done / total : 0);
+        continue;
+      }
 
       // --- companion text files (case-insensitive) -------------------------
       if (lower === "acqmeth.txt") {
@@ -331,7 +384,15 @@ export async function loadGcmsFiles(
           name: file.name,
           sourcePath: rel,
         });
-        runs.push(run);
+        if (isChemStationFolder) {
+          if (run.rtMin.length >= 2) {
+            bucketFor(dir).chromatograms.push(asRunChromatogram(run));
+          } else {
+            errors.push(`${file.name}: no chromatogram points could be decoded`);
+          }
+        } else {
+          runs.push(run);
+        }
         done += 1;
         if (onProgress) onProgress(`parsed ${file.name}`, total > 0 ? done / total : 0);
         continue;
@@ -409,6 +470,11 @@ export async function loadGcmsFiles(
       }
 
       // --- unrecognized -----------------------------------------------------
+      if (isChemStationFolder) {
+        done += 1;
+        if (onProgress) onProgress(`ignored ${file.name}`, total > 0 ? done / total : 0);
+        continue;
+      }
       errors.push(`${file.name}: unrecognized file type`);
       done += 1;
       if (onProgress) onProgress(`skipped ${file.name}`, total > 0 ? done / total : 0);
@@ -454,6 +520,9 @@ export async function loadGcmsFiles(
         prePost: bucket.prePost ?? undefined,
         cnorm: bucket.cnorm ?? undefined,
       };
+      if (bucket.chromatograms.length > 0) {
+        run.chromatograms = bucket.chromatograms;
+      }
 
       runs.push(run);
       bucketsDone += 1;

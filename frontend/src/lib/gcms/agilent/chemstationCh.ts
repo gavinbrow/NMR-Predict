@@ -5,23 +5,20 @@
 // traces. The result is an `MsRun` carrying only a chromatogram: `scanCount` is 0
 // and the time axis / signal live in `rtMin` / `tic`.
 //
-// IMPORTANT: the offsets below are taken from public reverse-engineering of the
-// format and are NOT verified against a real instrument file (we have no .ch
-// sample in the repo). Every parse therefore pushes a warning telling the caller
-// the values are unvalidated, and every field is defensively validated before
-// use. This module never throws on malformed input — it returns an empty `MsRun`
-// with warnings instead.
+// The version-181 path is validated against the real files in the repository's
+// ACSDCPD_50_1.D example. Other revisions remain defensive because ChemStation
+// changed offsets and encodings between releases. Malformed input produces an
+// empty `MsRun` with warnings rather than throwing.
 
 import type { MsRun, RunMeta } from "../types";
 
 const SUPPORTED_VERSIONS = new Set(["8", "81", "30", "130", "179", "181"]);
 const LATIN1_VERSIONS = new Set(["8", "81"]);
-const UTF16_VERSIONS = new Set(["130", "179", "181"]);
-const F64_VERSIONS = new Set(["179", "181"]);
+const F64_VERSIONS = new Set(["179"]);
 
 const EXPERIMENTAL_WARNING =
-  "Agilent .ch/.uv support is experimental and has not been validated against a " +
-  "real instrument file. Verify the values before use.";
+  "Agilent .ch/.uv support is experimental; detector-channel scaling can vary by " +
+  "ChemStation version. Verify values before quantitative use.";
 
 /** Max pascal-string length (characters) we will trust before calling it corrupt. */
 const MAX_PASCAL_LEN = 512;
@@ -106,6 +103,9 @@ function isDadUvDescription(desc: string | undefined): boolean {
 
 function canReadF64(view: DataView, offset: number): boolean {
   return offset >= 0 && offset + 8 <= view.byteLength;
+}
+function canReadF32(view: DataView, offset: number): boolean {
+  return offset >= 0 && offset + 4 <= view.byteLength;
 }
 function canReadU32(view: DataView, offset: number): boolean {
   return offset >= 0 && offset + 4 <= view.byteLength;
@@ -233,6 +233,55 @@ function decodeF64Run(
   return { values: out };
 }
 
+/**
+ * Version 181 stores a second-order delta stream. A normal signed i16 updates
+ * the running first delta and then the signal. Sentinel 0x7fff resets the
+ * signal from the following signed high word + unsigned low dword and clears
+ * the first delta.
+ */
+function decodeDoubleDeltaRun(
+  view: DataView,
+  bytes: Uint8Array,
+  dataStart: number,
+): DecodeResult {
+  if (dataStart < 0 || dataStart >= bytes.length) {
+    return { values: new Float64Array(0), warning: "No room for double-delta points" };
+  }
+
+  const out: number[] = [];
+  let signal = 0;
+  let firstDelta = 0;
+  let offset = dataStart;
+  while (offset + 2 <= bytes.length) {
+    const encoded = view.getInt16(offset, false);
+    offset += 2;
+    if (encoded === 0x7fff) {
+      if (offset + 6 > bytes.length) {
+        return {
+          values: Float64Array.from(out),
+          warning: "Truncated absolute value at end of double-delta stream",
+        };
+      }
+      const high = view.getInt16(offset, false);
+      const low = view.getUint32(offset + 2, false);
+      offset += 6;
+      signal = high * 0x1_0000_0000 + low;
+      firstDelta = 0;
+    } else {
+      firstDelta += encoded;
+      signal += firstDelta;
+    }
+    if (!Number.isSafeInteger(signal)) {
+      return {
+        values: Float64Array.from(out),
+        warning: "Double-delta signal exceeded JavaScript's safe integer range",
+      };
+    }
+    out.push(signal);
+  }
+  return { values: Float64Array.from(out) };
+}
+
 /* ------------------------------------------------------------------ *
  * Axis construction
  * ------------------------------------------------------------------ */
@@ -316,9 +365,8 @@ export function parseChemStationCh(
   }
 
   const isLatin1 = LATIN1_VERSIONS.has(version);
-  const isUtf16 = UTF16_VERSIONS.has(version);
   const isF64 = F64_VERSIONS.has(version);
-  const isModern = isUtf16; // 130/179/181
+  const isDoubleDelta = version === "181";
 
   // ---- header strings ------------------------------------------------
   const meta: RunMeta = {};
@@ -331,6 +379,13 @@ export function parseChemStationCh(
     meta.acquiredDate = readPascalString(view, bytes, 0x15e, false, warnings, "acq date");
     meta.instrument = readPascalString(view, bytes, 0x1e6, false, warnings, "instrument");
     meta.method = readPascalString(view, bytes, 0x254, false, warnings, "method");
+  } else if (version === "181") {
+    meta.sample = readPascalString(view, bytes, 858, true, warnings, "sample");
+    meta.operator = readPascalString(view, bytes, 1880, true, warnings, "operator");
+    meta.acquiredDate = readPascalString(view, bytes, 2391, true, warnings, "acq date");
+    meta.instrument = readPascalString(view, bytes, 2492, true, warnings, "instrument");
+    meta.method = readPascalString(view, bytes, 2574, true, warnings, "method");
+    description = readPascalString(view, bytes, 4213, true, warnings, "signal");
   } else {
     meta.sample = readPascalString(view, bytes, 0x15b, true, warnings, "sample");
     description = readPascalString(view, bytes, 0x35a, true, warnings, "description");
@@ -342,13 +397,23 @@ export function parseChemStationCh(
     if (sigDesc && description === undefined) description = sigDesc;
   }
 
-  const detector: "uv" | "fid" = isDadUvDescription(description) ? "uv" : "fid";
+  const detector: "uv" | "fid" =
+    version === "181"
+      ? "fid"
+      : isDadUvDescription(description)
+        ? "uv"
+        : "fid";
 
   // ---- times --------------------------------------------------------
   let startTimeMs = NaN;
   let endTimeMs = NaN;
-  if (canReadF64(view, 0x282)) startTimeMs = view.getFloat64(0x282, false);
-  if (canReadF64(view, 0x28a)) endTimeMs = view.getFloat64(0x28a, false);
+  if (version === "181") {
+    if (canReadF32(view, 282)) startTimeMs = view.getFloat32(282, false);
+    if (canReadF32(view, 286)) endTimeMs = view.getFloat32(286, false);
+  } else {
+    if (canReadF64(view, 0x282)) startTimeMs = view.getFloat64(0x282, false);
+    if (canReadF64(view, 0x28a)) endTimeMs = view.getFloat64(0x28a, false);
+  }
 
   // ---- slope / intercept --------------------------------------------
   let slope = 1;
@@ -365,7 +430,16 @@ export function parseChemStationCh(
     warnings.push(
       "Legacy slope offset 0x284 overlaps end-time 0x28a; slope not read (left at 1)",
     );
-  } else if (version === "179" || version === "181") {
+  } else if (version === "181") {
+    if (canReadF64(view, 4724)) {
+      const ic = view.getFloat64(4724, false);
+      if (Number.isFinite(ic)) intercept = ic;
+    }
+    if (canReadF64(view, 4732)) {
+      const sl = view.getFloat64(4732, false);
+      if (Number.isFinite(sl)) slope = sl;
+    }
+  } else if (version === "179") {
     if (canReadF64(view, 0x1e4)) {
       const sl = view.getFloat64(0x1e4, false);
       if (Number.isFinite(sl)) slope = sl;
@@ -378,7 +452,12 @@ export function parseChemStationCh(
 
   // ---- data start ---------------------------------------------------
   let dataStart = 0;
-  if (canReadU32(view, 0x11a)) {
+  if (version === "181") {
+    if (canReadU32(view, 264)) {
+      const page = view.getUint32(264, false);
+      if (page > 0) dataStart = (page - 1) * 512;
+    }
+  } else if (canReadU32(view, 0x11a)) {
     const words = view.getUint32(0x11a, false);
     if (words > 0) dataStart = words * 2 - 2;
   }
@@ -399,7 +478,12 @@ export function parseChemStationCh(
   // ---- decode the data run -----------------------------------------
   let rtMin: Float64Array;
   let tic: Float64Array;
-  if (isF64) {
+  if (isDoubleDelta) {
+    const out = decodeDoubleDeltaRun(view, bytes, dataStart);
+    if (out.warning) warnings.push(out.warning);
+    const signal = applySlopeIntercept(out.values, slope, intercept);
+    ({ rtMin, tic } = buildAxes(signal, startTimeMs, endTimeMs, warnings));
+  } else if (isF64) {
     const out = decodeF64Run(view, bytes, dataStart);
     if (out.warning) warnings.push(out.warning);
     ({ rtMin, tic } = buildAxes(out.values, startTimeMs, endTimeMs, warnings));

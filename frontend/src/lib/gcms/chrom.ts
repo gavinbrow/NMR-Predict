@@ -6,10 +6,13 @@
 // the whole point store. Every public function is total: it never throws and
 // handles empty runs, out-of-range indices, and swapped ranges by clamping.
 
-import type { ChromTrace, MassSpectrum, MsRun } from "./types";
+import type { ChromTrace, MassSpectrum, MsRun, RunChromatogram } from "./types";
 import { lowerBound, nearestIndex, upperBound } from "./numerics";
 
 // --- trace builders ---------------------------------------------------------
+
+/** Upper bound for interactive per-trace gain, including cross-detector data. */
+export const MAX_TRACE_SCALE = 1_000_000;
 
 /** Total-ion chromatogram. Shares the run's arrays; never mutates them. */
 export function buildTic(run: MsRun): ChromTrace {
@@ -36,6 +39,24 @@ export function buildBpc(run: MsRun): ChromTrace {
     label: "BPC",
     rtMin: run.rtMin,
     intensity: run.basePeakIntensity,
+    color: "",
+    visible: true,
+    offset: 0,
+    scale: 1,
+  };
+}
+
+/** A detector channel that was loaded as part of the same vendor run folder. */
+export function buildDetectorTrace(run: MsRun, channel: RunChromatogram): ChromTrace {
+  const kind = channel.detector === "uv" ? "UV" : "FID";
+  const stem = channel.name.replace(/\.(?:ch|uv)$/i, "");
+  return {
+    id: crypto.randomUUID(),
+    runId: run.id,
+    kind,
+    label: `${stem} · ${kind}`,
+    rtMin: channel.rtMin,
+    intensity: channel.intensity,
     color: "",
     visible: true,
     offset: 0,

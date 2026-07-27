@@ -1,0 +1,9 @@
+
+
+     Compound Name Duplication Report
+
+       Quant Method: C:\MSDChem\1\METHODS\FAMES_BPX70_02.M
+Number of Compounds: 12
+
+
+   No Duplicate Names Detected!!!

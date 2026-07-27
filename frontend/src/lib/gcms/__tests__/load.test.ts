@@ -3,16 +3,24 @@ import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import { collectDroppedFiles, loadGcmsFiles } from "../load";
 
-// The real Agilent DATA.MS fixture lives at the repo root in "GCMS Example/".
-// From this test directory that is five `..` segments up
-// (this dir -> gcms -> lib -> src -> frontend -> root).
 const ROOT = resolve(__dirname, "../../../../../");
-const FIXTURE_DIR = resolve(ROOT, "GCMS Example");
+const FIXTURE_DIR = resolve(ROOT, "frontend/public/__gcmstest");
+const NEW_FIXTURE_DIR = resolve(ROOT, "GCMS Example/ACSDCPD_50_1.D");
 const FIXTURE_PRESENT = existsSync(resolve(FIXTURE_DIR, "DATA.MS"));
+const NEW_FIXTURE_PRESENT = existsSync(resolve(NEW_FIXTURE_DIR, "DATA.MS"));
 
 function readFixture(name: string): ArrayBuffer {
   const buf = readFileSync(resolve(FIXTURE_DIR, name));
   return buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength);
+}
+
+function readNewFixture(name: string): ArrayBuffer {
+  const buf = readFileSync(resolve(NEW_FIXTURE_DIR, name));
+  return buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength);
+}
+
+function readNewFixtureText(name: string): string {
+  return readFileSync(resolve(NEW_FIXTURE_DIR, name), "utf8");
 }
 
 /** Build a minimal valid ChemStation DATA.MS buffer with one scan. */
@@ -152,6 +160,47 @@ describe("collectDroppedFiles", () => {
 });
 
 describe("loadGcmsFiles — grouping & regression", () => {
+  it.skipIf(!NEW_FIXTURE_PRESENT)(
+    "loads a complete ChemStation .D folder as one MS document with two detector channels",
+    async () => {
+      const root = "ACSDCPD_50_1.D";
+      const files = [
+        makeFile(readNewFixture("DATA.MS"), "DATA.MS", `${root}/DATA.MS`),
+        makeFile(readNewFixture("TST1A.CH"), "TST1A.CH", `${root}/TST1A.CH`),
+        makeFile(readNewFixture("TST2A.CH"), "TST2A.CH", `${root}/TST2A.CH`),
+        makeFile(readNewFixtureText("acqmeth.txt"), "acqmeth.txt", `${root}/acqmeth.txt`),
+        makeFile(readNewFixtureText("PRE_POST.INI"), "PRE_POST.INI", `${root}/PRE_POST.INI`),
+        makeFile(readNewFixtureText("cnorm.ini"), "cnorm.ini", `${root}/cnorm.ini`),
+        makeFile(
+          readNewFixture("75476.M/acq.ms"),
+          "acq.ms",
+          `${root}/75476.M/acq.ms`,
+        ),
+        makeFile(
+          readNewFixture("75476.M/Audit.txt"),
+          "Audit.txt",
+          `${root}/75476.M/Audit.txt`,
+        ),
+      ];
+
+      const { runs, errors } = await loadGcmsFiles(files);
+      expect(errors).toEqual([]);
+      expect(runs).toHaveLength(1);
+      expect(runs[0].name).toBe(root);
+      expect(runs[0].format).toBe("agilent-ms");
+      expect(runs[0].scanCount).toBe(20_330);
+      expect(runs[0].chromatograms).toHaveLength(2);
+      expect(runs[0].chromatograms?.map((channel) => channel.name)).toEqual([
+        "TST1A.CH",
+        "TST2A.CH",
+      ]);
+      expect(
+        runs[0].chromatograms?.every((channel) => channel.rtMin.length === 8100),
+      ).toBe(true);
+      expect(runs[0].meta.runTimeMin).toBe(27);
+    },
+  );
+
   it.skipIf(!FIXTURE_PRESENT)(
     "two different .D folders dropped together produce two runs each paired with its own acqmeth.txt",
     async () => {

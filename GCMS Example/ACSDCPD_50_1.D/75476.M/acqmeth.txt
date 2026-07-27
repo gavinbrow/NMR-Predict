@@ -1,0 +1,184 @@
+
+
+                                       INSTRUMENT CONTROL PARAMETERS:    Instrument #1
+                                       -----------------------------------------------
+
+   C:\MSDCHEM\1\METHODS\75476.M
+
+Control Information
+------- -----------
+       Sample Inlet : GC
+   Injection Source : GC/ALS
+ Injection Location : ALS
+             Use MS : Yes
+
+=============================================================================
+                                6890 GC METHOD
+=============================================================================
+
+OVEN
+   Initial temp:  50 'C (On)               Maximum temp:  280 'C
+   Initial time:  5.00 min                 Equilibration time:  0.50 min
+   Ramps:
+      #  Rate  Final temp  Final time
+      1 10.00      220        5.00
+      2   0.0(Off)
+   Post temp:  0 'C
+   Post time:  0.00 min
+   Run time:  27.00 min
+
+FRONT INLET (SPLIT/SPLITLESS)           BACK INLET (SPLIT/SPLITLESS)
+   Mode:  Split                            Mode:  Splitless
+   Initial temp:  280 'C (On)              Initial temp:  160 'C (On)
+   Pressure:  19.00 psi (On)               Pressure:  18.79 psi (Off)
+   Split ratio:  50:1                      Purge flow:  49.1 mL/min
+   Split flow:  113.7 mL/min               Purge time:  0.00 min
+   Total flow:  117.9 mL/min               Total flow:  56.0 mL/min
+   Gas saver:  On                          Gas saver:  Off
+   Saver flow:  20.0 mL/min                Gas type:  Helium
+   Saver time:  2.00 min
+   Gas type:  Helium
+
+COLUMN 1                                COLUMN 2
+   Capillary Column                        Capillary Column
+   Nominal length:  30.0 m                 Nominal length:  27.5 m
+   Nominal diameter:  250.00 um            Nominal diameter:  320.00 um
+   Nominal film thickness:  0.25 um        Nominal film thickness:  10.00 um
+   Mode:  constant pressure                Mode:  constant pressure
+   Pressure:  19.00 psi                    Pressure:  18.79 psi
+   Nominal initial flow:  2.3 mL/min       Nominal initial flow:  4.1 mL/min
+   Average velocity:  55 cm/sec            Average velocity:  61 cm/sec
+   Inlet:  Front Inlet                     Inlet:  Back Inlet
+   Outlet:  MSD                            Outlet:  MSD
+   Outlet pressure:  vacuum                Outlet pressure:  ambient
+
+FRONT DETECTOR (FID)                    BACK DETECTOR (NO DET)
+   Temperature:  250 'C (Off)
+   Hydrogen flow:  40.0 mL/min (Off)
+   Air flow:  450.0 mL/min (Off)
+   Mode:  Constant makeup flow
+   Makeup flow:  45.0 mL/min (Off)
+   Makeup Gas Type: Nitrogen
+   Flame:  Off
+   Electrometer:  Off
+   Lit offset:  2.0
+
+SIGNAL 1                                SIGNAL 2
+   Data rate:  5 Hz                        Data rate:  5 Hz
+   Type:  test plot                        Type:  test plot
+   Save Data:  On                          Save Data:  On
+   Zero:  0.0 (Off)                        Zero:  0.0 (Off)
+   Range:  0                               Range:  0
+   Fast Peaks:  Off                        Fast Peaks:  Off
+   Attenuation:  0                         Attenuation:  0
+
+COLUMN COMP 1                           COLUMN COMP 2
+   (No Detectors Installed)                (No Detectors Installed)
+
+THERMAL AUX 2
+   Use:  MSD Transfer Line Heater
+   Description:
+   Initial temp:  280 'C (On)
+   Initial time:  0.00 min
+      #  Rate  Final temp  Final time
+      1   0.0(Off)
+
+VALVES                                  POST RUN
+   Valve 1  Off                            Post Time: 0.00 min
+      Description:
+
+TIME TABLE
+   Time       Specifier                     Parameter & Setpoint
+
+
+                               GC Injector
+
+
+     Front Injector:
+        Sample Washes                 0
+        Sample Pumps                  3
+        Injection Volume           1.00 microliters
+        Syringe Size               10.0 microliters
+        PreInj Solvent A Washes       3
+        PreInj Solvent B Washes       3
+        PostInj Solvent A Washes      3
+        PostInj Solvent B Washes      3
+        Viscosity Delay               0 seconds
+        Plunger Speed              Fast
+        PreInjection Dwell         0.00 minutes
+        PostInjection Dwell        0.00 minutes
+
+     Back Injector:
+No parameters specified
+
+ Column 1 Inventory Number : FAME_WAX
+ Column 2 Inventory Number : PLOT_q
+
+                                MS ACQUISITION PARAMETERS
+
+
+General Information
+------- -----------
+
+Tune File                : atune.u
+Acquistion Mode          : Scan
+
+
+MS Information
+-- -----------
+
+Solvent Delay            : 3.00 min
+
+EM Absolute              : False
+EM Offset                : 0
+Resulting EM Voltage     : 1811.8
+
+[Scan Parameters]
+
+Low Mass                 : 50.0
+High Mass                : 550.0
+Threshold                : 150
+Sample #                 : 0       A/D Samples    1
+Plot 2 low mass          : 50.0
+Plot 2 high mass         : 550.0
+
+[Data Filters]
+
+Mass Filter              : 
+Time Filter              : Standard
+
+[MSZones]
+
+MS Quad                  : 150 C   maximum 200 C
+MS Source                : 230 C   maximum 250 C
+
+
+                             END OF MS ACQUISITION PARAMETERS
+
+
+                              TUNE PARAMETERS for SN:  
+                        -----------------------------
+
+ EMISSION    :      34.610
+ ENERGY      :      69.922
+ REPELLER    :      20.071
+ IONFOCUS    :      90.157
+ ENTRANCE_LE :      19.000
+ EMVOLTS     :    1811.765
+ AMUGAIN     :    1805.000
+ AMUOFFSET   :     132.000
+ FILAMENT    :       1.000
+ DCPOLARITY  :       0.000
+ ENTLENSOFFS :      15.812
+ MASSGAIN    :    -254.000   
+ MASSOFFSET  :     -10.000   
+
+
+                           END OF TUNE PARAMETERS
+                      ------------------------------------
+
+
+
+                                             END OF INSTRUMENT CONTROL PARAMETERS
+                                             ------------------------------------
+

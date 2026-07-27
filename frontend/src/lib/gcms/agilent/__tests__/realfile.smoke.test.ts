@@ -7,11 +7,18 @@ import { parseChemStationMs } from "../chemstationMs";
 // decoder end-to-end on genuine instrument bytes and checks the golden values
 // that match the user's reference software screenshot to two decimals.
 //
-// The fixture path resolves from `frontend/src/lib/gcms/agilent/__tests__/` up
-// five directories to the repo root, then into `GCMS Example/DATA.MS`. The file
-// MUST exist; a silently skipped test is a failure of this work package.
-const FIXTURE = resolve(__dirname, "../../../../../../GCMS Example/DATA.MS");
+// Keep the original standalone DATA.MS as a regression fixture while also
+// validating the newer full ChemStation `.D` example below.
+const FIXTURE = resolve(
+  __dirname,
+  "../../../../../public/__gcmstest/DATA.MS",
+);
 const present = existsSync(FIXTURE);
+const NEW_FIXTURE = resolve(
+  __dirname,
+  "../../../../../../GCMS Example/ACSDCPD_50_1.D/DATA.MS",
+);
+const newPresent = existsSync(NEW_FIXTURE);
 
 describe.skipIf(!present)("real DATA.MS file", () => {
   const buf = readFileSync(FIXTURE);
@@ -75,5 +82,31 @@ describe.skipIf(!present)("real DATA.MS file", () => {
 
   it("does not surface a scanCount/header mismatch warning", () => {
     expect(run.warnings.some((w) => /scanCount/.test(w))).toBe(false);
+  });
+});
+
+describe.skipIf(!newPresent)("real ACSDCPD_50_1.D DATA.MS file", () => {
+  const buf = readFileSync(NEW_FIXTURE);
+  const ab = buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength);
+  const run = parseChemStationMs(ab, { name: "ACSDCPD_50_1.D", sourcePath: NEW_FIXTURE });
+
+  it("parses the complete 27 minute run", () => {
+    expect(run.scanCount).toBe(20_330);
+    expect(run.pointCount).toBe(542_034);
+    expect(run.rtRange[0]).toBeCloseTo(3.0868333, 5);
+    expect(run.rtRange[1]).toBeCloseTo(27.0026, 4);
+  });
+
+  it("preserves the mass and TIC ranges", () => {
+    expect(run.mzRange[0]).toBeCloseTo(50, 5);
+    expect(run.mzRange[1]).toBeCloseTo(550, 5);
+    expect(run.ticRange[0]).toBe(0);
+    expect(run.ticRange[1]).toBe(8_201_460);
+  });
+
+  it("reads the method metadata without parser warnings", () => {
+    expect(run.meta.method).toBe("75476");
+    expect(run.meta.inlet).toBe("GC");
+    expect(run.warnings).toEqual([]);
   });
 });

@@ -1,8 +1,10 @@
 // Tests for the Agilent ChemStation .ch/.uv parser.
 //
-// There are no real sample files in the repo, so every test builds a synthetic
-// binary buffer with a DataView helper and asserts against the expected `MsRun`.
+// Synthetic buffers cover edge cases and the repository's `.D` example provides
+// real version-181 detector channels for end-to-end acceptance checks.
 
+import { existsSync, readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   chemStationChVersion,
@@ -45,6 +47,9 @@ class BufferBuilder {
   f64be(offset: number, v: number): void {
     this.view.setFloat64(offset, v, false);
   }
+  f32be(offset: number, v: number): void {
+    this.view.setFloat32(offset, v, false);
+  }
 
   /** Writes a latin1 pascal string: one length byte, then the ASCII bytes. */
   pascalLatin1(offset: number, text: string): void {
@@ -64,10 +69,6 @@ class BufferBuilder {
     }
   }
 }
-
-const EXPERIMENTAL =
-  "Agilent .ch/.uv support is experimental and has not been validated against a " +
-  "real instrument file. Verify the values before use.";
 
 function hasWarning(run: MsRun, substr: string): boolean {
   return run.warnings.some((w) => w.includes(substr));
@@ -223,54 +224,45 @@ describe("parseChemStationCh — version 8 (legacy latin1, i16 deltas)", () => {
   });
 });
 
-describe("parseChemStationCh — version 181 (modern UTF-16LE, f64)", () => {
-  it("decodes 4 big-endian f64 points and the UTF-16LE sample name", () => {
-    // data at 0x1800 (default for 179/181 if 0x11a is 0); write 4 f64s
+describe("parseChemStationCh — version 181 (modern FID double-delta)", () => {
+  it("decodes a scaled second-order delta stream and modern metadata", () => {
     const DATA_START = 0x1800;
-    const SIZE = DATA_START + 4 * 8;
-    const b = new BufferBuilder(SIZE);
+    const b = new BufferBuilder(DATA_START + 14);
 
     b.pascalLatin1(0x000, "181");
-    b.pascalUtf16(0x15b, "DAD 254nm"); // sample — contains DAD/nm so detector=uv
-    b.pascalUtf16(0x35a, "DAD signal"); // description
-    b.pascalUtf16(0x758, "Op2");
-    b.pascalUtf16(0x957, "2024-06-01");
-    b.pascalUtf16(0xa0e, "Inst2");
-    b.pascalUtf16(0xe11, "Meth2");
-    b.pascalUtf16(0xc11, "signal DAD 280nm");
+    b.pascalUtf16(858, "Sample B");
+    b.pascalUtf16(1880, "Op2");
+    b.pascalUtf16(2391, "2024-06-01");
+    b.pascalUtf16(2492, "Inst2");
+    b.pascalUtf16(2574, "Meth2");
+    b.pascalUtf16(4213, "FID signal");
+    b.u32be(264, DATA_START / 512 + 1);
+    b.f32be(282, 0);
+    b.f32be(286, 3 * 60_000);
+    b.f64be(4724, 1);
+    b.f64be(4732, 2);
 
-    // data start: write 0 at 0x11a so it falls back to 0x1800 with a warning
-    b.u32be(0x11a, 0);
+    let off = DATA_START;
+    b.i16be(off, 0x7fff); off += 2;
+    b.i16be(off, 0); off += 2;
+    b.u32be(off, 100); off += 4;
+    b.i16be(off, 5); off += 2;
+    b.i16be(off, 5); off += 2;
+    b.i16be(off, 5);
 
-    b.f64be(0x1e4, 1.0); // slope
-    b.f64be(0x1ec, 0.0); // intercept
-    b.f64be(0x282, 0); // start ms
-    b.f64be(0x28a, 3 * 60_000); // end ms = 3 minutes
+    const run = parseChemStationCh(b.buf, { name: "sig.ch" });
 
-    // 4 f64 values
-    b.f64be(DATA_START, 1.5);
-    b.f64be(DATA_START + 8, 2.5);
-    b.f64be(DATA_START + 16, 3.5);
-    b.f64be(DATA_START + 24, 4.5);
-
-    const run = parseChemStationCh(b.buf, { name: "sig.uv" });
-
-    expect(run.detector).toBe("uv");
+    expect(run.detector).toBe("fid");
     expect(run.rtMin.length).toBe(4);
-    expect(run.tic.length).toBe(4);
-    expect(Array.from(run.tic)).toEqual([1.5, 2.5, 3.5, 4.5]);
-
-    // RT 0..3 minutes, 4 points => 0, 1, 2, 3
+    expect(Array.from(run.tic)).toEqual([201, 211, 231, 261]);
     expect(run.rtMin[0]).toBeCloseTo(0, 6);
     expect(run.rtMin[1]).toBeCloseTo(1, 6);
     expect(run.rtMin[3]).toBeCloseTo(3, 6);
-
-    expect(run.meta.sample).toBe("DAD 254nm");
+    expect(run.meta.sample).toBe("Sample B");
     expect(run.meta.operator).toBe("Op2");
+    expect(run.meta.instrument).toBe("Inst2");
     expect(run.meta.method).toBe("Meth2");
-
     expect(hasWarning(run, "experimental")).toBe(true);
-    expect(hasWarning(run, "fell back to fixed 0x1800")).toBe(true);
   });
 });
 
@@ -305,10 +297,9 @@ describe("parseChemStationCh — robustness", () => {
   it("returns 0 points and a warning when data start is past end of buffer", () => {
     const b = new BufferBuilder(0x300); // small buffer
     b.pascalLatin1(0x000, "181");
-    // set data-start word so byte offset = 0x4000, well past 0x300
-    b.u32be(0x11a, (0x4000 + 2) / 2);
-    b.f64be(0x282, 0);
-    b.f64be(0x28a, 1000);
+    b.u32be(264, 0x4000 / 512 + 1);
+    b.f32be(282, 0);
+    b.f32be(286, 1000);
     const run = parseChemStationCh(b.buf);
     expect(() => parseChemStationCh(b.buf)).not.toThrow();
     expect(run.rtMin.length).toBe(0);
@@ -318,19 +309,52 @@ describe("parseChemStationCh — robustness", () => {
   });
 
   it("every successful parse carries the experimental warning", () => {
-    // re-use the version-181 happy path: 2 f64 points
     const DATA_START = 0x1800;
-    const b = new BufferBuilder(DATA_START + 2 * 8);
+    const b = new BufferBuilder(DATA_START + 10);
     b.pascalLatin1(0x000, "181");
-    b.u32be(0x11a, 0);
-    b.f64be(0x1e4, 1);
-    b.f64be(0x1ec, 0);
-    b.f64be(0x282, 0);
-    b.f64be(0x28a, 60_000);
-    b.f64be(DATA_START, 42);
-    b.f64be(DATA_START + 8, 43);
+    b.u32be(264, DATA_START / 512 + 1);
+    b.f32be(282, 0);
+    b.f32be(286, 60_000);
+    b.f64be(4724, 0);
+    b.f64be(4732, 1);
+    b.i16be(DATA_START, 0x7fff);
+    b.i16be(DATA_START + 2, 0);
+    b.u32be(DATA_START + 4, 42);
+    b.i16be(DATA_START + 8, 1);
     const run = parseChemStationCh(b.buf);
     expect(run.rtMin.length).toBe(2);
     expect(hasWarning(run, "experimental")).toBe(true);
   });
 });
+
+const REAL_RUN_DIR = resolve(
+  __dirname,
+  "../../../../../../GCMS Example/ACSDCPD_50_1.D",
+);
+
+describe.skipIf(!existsSync(resolve(REAL_RUN_DIR, "TST1A.CH")))(
+  "real ChemStation 181 detector channels",
+  () => {
+    for (const [name, rtStart, rtEnd, max] of [
+      ["TST1A.CH", 0.0005552, 27.0005542, 123.3125064],
+      ["TST2A.CH", 0.00322187, 27.0032208, 123.3833398],
+    ] as const) {
+      it(`decodes ${name}`, () => {
+        const buf = readFileSync(resolve(REAL_RUN_DIR, name));
+        const ab = buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength);
+        const run = parseChemStationCh(ab, { name });
+
+        expect(run.detector).toBe("fid");
+        expect(run.rtMin).toHaveLength(8100);
+        expect(run.tic).toHaveLength(8100);
+        expect(run.rtRange[0]).toBeCloseTo(rtStart, 6);
+        expect(run.rtRange[1]).toBeCloseTo(rtEnd, 5);
+        expect(run.ticRange[0]).toBe(0);
+        expect(run.ticRange[1]).toBeCloseTo(max, 5);
+        expect(run.meta.instrument).toBe("HP G1530A");
+        expect(run.meta.method).toBe("75476.M");
+        expect(run.warnings.some((warning) => /no points|past end/i.test(warning))).toBe(false);
+      });
+    }
+  },
+);
