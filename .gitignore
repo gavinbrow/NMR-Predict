@@ -23,6 +23,7 @@ frontend/node_modules/
 frontend/dist/
 frontend/test-results/
 frontend/package/
+frontend/_work/
 frontend/*.har
 frontend/*.png
 frontend/*.log

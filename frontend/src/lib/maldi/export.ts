@@ -9,6 +9,7 @@
 import ExcelJS from "exceljs";
 import { jsPDF } from "jspdf";
 import { adductById, neutralMass } from "./adducts";
+import { injectCharts, type ChartSpec } from "./excelChartInject";
 import type { EndGroupCandidate } from "./endgroups";
 import type { Finding } from "./interpret";
 import type { MolWeightStats } from "./molweight";
@@ -618,6 +619,7 @@ export async function exportReportExcel(payload: ReportPayload): Promise<void> {
     ws.getCell(`H${r}`).value = p.label ?? "";
   }
   let row = peakHeaderRow + 1 + sortedPeaks.length + 2;
+  const chartSpecs: ChartSpec[] = [];
 
   if (seriesToExport.length) {
     const peakById = new Map(payload.peaks.map((p) => [p.id, p] as const));
@@ -645,18 +647,29 @@ export async function exportReportExcel(payload: ReportPayload): Promise<void> {
       }
       if (points.length < 2) continue;
 
-      const { slope, intercept, r2 } = linearFit(xs, ys);
-      const firstNRow = row + 5;
-      const lastNRow = firstNRow + points.length - 1;
+      const { slope, intercept } = linearFit(xs, ys);
+      // Layout within one series block (row = top of block):
+      //   row+0  "Series N" (merged title)
+      //   row+1  A: adduct  B: "Slope ="  C: SLOPE()  D: "Intercept ="  E: INTERCEPT()  F: "R² ="  G: RSQ()
+      //   row+2  A: repeat   B-G: end group
+      //   row+3  A-G: equation
+      //   row+4  A-G: note
+      //   row+5  column headers (n, m/z raw, intensity, neutral mass, predicted, residual, fit line)
+      //   row+6..row+5+N  data rows
+      const headerRow = row + 5;
+      const firstDataRow = row + 6;
+      const lastDataRow = firstDataRow + points.length - 1;
       const nCol = "A";
       const rawCol = "B";
       const neutralCol = "D";
       const predictedCol = "E";
       const residualCol = "F";
-      const nRange = `${nCol}${firstNRow}:${nCol}${lastNRow}`;
-      const neutralRange = `${neutralCol}${firstNRow}:${neutralCol}${lastNRow}`;
-      const slopeCell = `B${row + 1}`;
-      const interceptCell = `D${row + 1}`;
+      const nRange = `${nCol}${firstDataRow}:${nCol}${lastDataRow}`;
+      const neutralRange = `${neutralCol}${firstDataRow}:${neutralCol}${lastDataRow}`;
+      // Absolute refs so dragging/down-filling the data rows never moves the
+      // slope/intercept cells (the value lives in C/E, NOT the label cells B/D).
+      const slopeCell = `$C$${row + 1}`;
+      const interceptCell = `$E$${row + 1}`;
 
       ws.getCell(`A${row}`).value = `Series ${seriesIndex + 1}`;
       ws.getCell(`A${row}`).font = { bold: true };
@@ -722,10 +735,18 @@ export async function exportReportExcel(payload: ReportPayload): Promise<void> {
       }
       row += points.length;
 
-      ws.getCell(`A${row}`).value = "Select the n and neutral mass columns, insert an Excel scatter chart, and add a linear trendline.";
-      ws.mergeCells(`A${row}:G${row}`);
-      row += 1;
-      row += 1;
+      // Drop the manual "insert a chart" note — a real embedded chart is
+      // injected below. Record the spec so we can post-process the xlsx zip.
+      chartSpecs.push({
+        sheetName: "Series",
+        title: `Series ${seriesIndex + 1} — ${adduct.label}`,
+        xRange: nRange,
+        yRange: neutralRange,
+        // Anchor in column I (0-based col 8), at the series title row (0-based).
+        anchorCol: 8,
+        anchorRow: headerRow - 6,
+      });
+      row += 1; // blank separator between series blocks
     }
   }
 
@@ -736,7 +757,10 @@ export async function exportReportExcel(payload: ReportPayload): Promise<void> {
     chart.addImage(imageId, { tl: { col: 0, row: 0 }, ext: { width: 900, height: 380 } });
   }
 
-  const buffer = await wb.xlsx.writeBuffer();
+  let buffer = Buffer.from(await wb.xlsx.writeBuffer());
+  if (chartSpecs.length) {
+    buffer = await injectCharts(buffer, chartSpecs);
+  }
   triggerDownload(
     new Blob([buffer], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" }),
     `${safeName(payload.projectName)}-report-${timestampSlug()}.xlsx`,
