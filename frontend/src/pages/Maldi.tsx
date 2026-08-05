@@ -53,12 +53,9 @@ import { usePersistedState } from "@/hooks/use-persisted-state";
 import { adductById, ALL_BUILTIN_ADDUCTS } from "@/lib/maldi/adducts";
 import { buildMaldiFigureData, type MaldiFigureSeriesGroup, type MaldiFigureSpectrum } from "@/lib/maldi/figure";
 import {
-  exportPeaksCsv,
   exportProjectJson,
   exportReportExcel,
   exportReportPdf,
-  exportSeriesCsv,
-  exportSpectrumCsv,
   deserializeProject,
   type ReportPayload,
 } from "@/lib/maldi/export";
@@ -1662,19 +1659,6 @@ const Maldi = () => {
             recordExport(kind, "Spectrum PNG");
             break;
           }
-          case "peaks-csv":
-            exportPeaksCsv(peaks, projectName);
-            recordExport(kind, "Peaks CSV");
-            break;
-          case "processed-csv":
-            if (!processed) return toast.error("No processed spectrum");
-            exportSpectrumCsv(processed, projectName, "processed");
-            recordExport(kind, "Processed CSV");
-            break;
-          case "series-csv":
-            exportSeriesCsv(series, allAdducts, projectName);
-            recordExport(kind, "Series CSV");
-            break;
           case "project-json":
             exportProjectJson({
               id: projectId ?? "unsaved",
@@ -1699,7 +1683,7 @@ const Maldi = () => {
         toast.error("Export failed");
       }
     },
-    [sourceName, peaks, projectName, processed, series, allAdducts, projectId, buildState, buildReportPayload],
+    [sourceName, projectName, projectId, buildState, buildReportPayload],
   );
 
   // --- Persisted sidebar collapse state (WP1d) -------------------------------

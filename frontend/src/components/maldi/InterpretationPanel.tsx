@@ -1,13 +1,11 @@
 import {
   CheckCircle2,
-  FileDown,
   FileJson,
   FileSpreadsheet,
   FileText,
   Image,
   Info,
   RefreshCw,
-  Table2,
   TriangleAlert,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -16,9 +14,6 @@ import type { ExportRecord } from "@/lib/maldi/types";
 
 export type ExportKind =
   | "png"
-  | "peaks-csv"
-  | "processed-csv"
-  | "series-csv"
   | "project-json"
   | "report-pdf"
   | "report-excel";
@@ -69,28 +64,21 @@ export function InterpretationPanel({ findings, onRefresh, onExport, exportHisto
 
       <div className="flex flex-col gap-3">
         <h3 className="text-xs font-semibold text-foreground">Export</h3>
-        <div className="grid grid-cols-2 gap-2">
-          <Button size="sm" variant="outline" className="h-8 justify-start" onClick={() => onExport("report-pdf")}>
-            <FileText className="mr-1.5 h-3.5 w-3.5" /> PDF report
+        <div className="grid gap-2">
+          <Button size="sm" className="h-9 justify-start" onClick={() => onExport("report-excel")}>
+            <FileSpreadsheet className="mr-1.5 h-4 w-4" /> Excel report
           </Button>
-          <Button size="sm" variant="outline" className="h-8 justify-start" onClick={() => onExport("report-excel")}>
-            <FileSpreadsheet className="mr-1.5 h-3.5 w-3.5" /> Excel report
-          </Button>
-          <Button size="sm" variant="outline" className="h-8 justify-start" onClick={() => onExport("png")}>
-            <Image className="mr-1.5 h-3.5 w-3.5" /> Spectrum PNG
-          </Button>
-          <Button size="sm" variant="outline" className="h-8 justify-start" onClick={() => onExport("project-json")}>
-            <FileJson className="mr-1.5 h-3.5 w-3.5" /> Project JSON
-          </Button>
-          <Button size="sm" variant="outline" className="h-8 justify-start" onClick={() => onExport("peaks-csv")}>
-            <Table2 className="mr-1.5 h-3.5 w-3.5" /> Peaks CSV
-          </Button>
-          <Button size="sm" variant="outline" className="h-8 justify-start" onClick={() => onExport("series-csv")}>
-            <Table2 className="mr-1.5 h-3.5 w-3.5" /> Series CSV
-          </Button>
-          <Button size="sm" variant="outline" className="h-8 justify-start" onClick={() => onExport("processed-csv")}>
-            <FileDown className="mr-1.5 h-3.5 w-3.5" /> Processed CSV
-          </Button>
+          <div className="grid grid-cols-3 gap-2">
+            <Button size="sm" variant="outline" className="h-8 justify-start" onClick={() => onExport("report-pdf")}>
+              <FileText className="mr-1.5 h-3.5 w-3.5" /> PDF
+            </Button>
+            <Button size="sm" variant="outline" className="h-8 justify-start" onClick={() => onExport("png")}>
+              <Image className="mr-1.5 h-3.5 w-3.5" /> PNG
+            </Button>
+            <Button size="sm" variant="outline" className="h-8 justify-start" onClick={() => onExport("project-json")}>
+              <FileJson className="mr-1.5 h-3.5 w-3.5" /> JSON
+            </Button>
+          </div>
         </div>
 
         {exportHistory.length > 0 && (

@@ -587,9 +587,8 @@ export async function exportReportExcel(payload: ReportPayload): Promise<void> {
   const seriesToExport = selectedIds.length ? payload.series.filter((s) => selectedIds.includes(s.id)) : payload.series;
   const ws = wb.addWorksheet("Series");
   const colWidths = [8, 14, 14, 14, 14, 14, 14];
-  ws.columns.forEach((c, i) => {
-    if (i < colWidths.length) c.width = colWidths[i];
-  });
+  for (let i = 0; i < colWidths.length; i += 1) ws.getColumn(i + 1).width = colWidths[i];
+  ws.getColumn(8).width = 28;
 
   ws.getCell("A1").value = "Raw peaks";
   ws.getCell("A1").font = { bold: true };
@@ -618,7 +617,6 @@ export async function exportReportExcel(payload: ReportPayload): Promise<void> {
     ws.getCell(`G${r}`).value = p.flag ?? "";
     ws.getCell(`H${r}`).value = p.label ?? "";
   }
-  ws.getColumn(8).width = 28;
   let row = peakHeaderRow + 1 + sortedPeaks.length + 2;
 
   if (seriesToExport.length) {
