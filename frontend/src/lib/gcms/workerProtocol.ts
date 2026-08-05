@@ -38,6 +38,11 @@ export interface WorkerOpMap {
     request: { run: MsRun; mzList: number[]; tol: number; mode: "sum" | "max" };
     result: { trace: ChromTrace };
   };
+  /** One independent, sum-mode extracted-ion chromatogram per requested m/z. */
+  buildXics: {
+    request: { run: MsRun; mzList: number[]; tol: number };
+    result: { traces: ChromTrace[] };
+  };
   /** Combine every scan in [rtLo, rtHi] into one spectrum. */
   sumScans: {
     request: {

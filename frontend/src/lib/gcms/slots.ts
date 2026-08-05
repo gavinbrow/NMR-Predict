@@ -76,6 +76,25 @@ export function resolveSlots(
 }
 
 /**
+ * Resolve slots that may belong to different runs. Drag-created range slots
+ * carry the run that owned the visible chromatogram trace, while cursor and
+ * legacy slots continue to follow the active document.
+ */
+export function resolveSlotsByRun(
+  slots: SpectrumSlot[],
+  activeRun: MsRun | null,
+  cursorRt: number | null,
+  runs: readonly MsRun[],
+): ResolvedSlot[] {
+  return slots.flatMap((slot) => {
+    const run = slot.runId
+      ? runs.find((candidate) => candidate.id === slot.runId) ?? null
+      : activeRun;
+    return resolveSlots([slot], run, cursorRt);
+  });
+}
+
+/**
  * Background subtraction: resolve EVERY slot's raw spectrum first (the
  * `resolveSlots` pass above), THEN subtract every background-mode slot's
  * spectrum from every OTHER (non-background) slot's spectrum. This ordering

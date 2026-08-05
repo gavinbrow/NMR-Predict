@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   buildXic,
+  buildXics,
   combineScans,
   nearestScanIndex,
   scanSpectrum,
@@ -173,6 +174,25 @@ describe("buildXic", () => {
     expect(buildXic(empty, [100], 0.1, "sum").intensity.length).toBe(0);
     const run = makeRun([{ rt: 1.0, points: [[100.0, 10]] }]);
     expect(buildXic(run, [], 0.1, "sum").intensity[0]).toBe(0);
+  });
+});
+
+describe("buildXics", () => {
+  it("returns one independently-profiled trace per m/z in input order", () => {
+    const run = makeRun([
+      { rt: 1.0, points: [[100.0, 10], [200.0, 1]] },
+      { rt: 2.0, points: [[100.0, 20], [200.0, 2]] },
+      { rt: 3.0, points: [[100.0, 3], [200.0, 30]] },
+    ]);
+
+    const traces = buildXics(run, [200.0, 100.0], 0.05);
+
+    expect(traces).toHaveLength(2);
+    expect(traces[0].label).toContain("200.00");
+    expect(traces[1].label).toContain("100.00");
+    expect(traces[0].id).not.toBe(traces[1].id);
+    expect(Array.from(traces[0].intensity)).toEqual([1, 2, 30]);
+    expect(Array.from(traces[1].intensity)).toEqual([10, 20, 3]);
   });
 });
 

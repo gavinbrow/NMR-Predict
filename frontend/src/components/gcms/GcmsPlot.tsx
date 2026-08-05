@@ -166,6 +166,7 @@ interface ThemeTokens {
   border: string;
   mutedFg: string;
   fg: string;
+  bg: string;
   primary: string;
   primaryAlpha: string; // primary at low alpha for the selection band
   bgAlpha: string; // primary at a more muted alpha for the background band
@@ -192,6 +193,7 @@ function readTheme(): ThemeTokens {
     border: hslVar("--border") || "hsl(214 25% 88%)",
     mutedFg: hslVar("--muted-foreground") || "hsl(215 16% 45%)",
     fg: hslVar("--foreground") || "hsl(222 47% 11%)",
+    bg: hslVar("--card") || "hsl(0 0% 100%)",
     primary: hslVar("--primary") || "hsl(190 90% 38%)",
     primaryAlpha: hslVarAlpha("--primary", 0.15) || "hsla(190, 90%, 38%, 0.15)",
     bgAlpha: hslVarAlpha("--primary", 0.06) || "hsla(190, 90%, 38%, 0.06)",
@@ -208,6 +210,74 @@ function compactNumber(v: number): string {
   if (a === 0) return "0";
   if (a < 1) return v.toFixed(2);
   return `${Math.round(v)}`;
+}
+
+/** Composite the rendered plot canvas with a wrapped trace legend. The live
+ * DOM legend sits outside uPlot and was previously absent from standalone PNG
+ * exports, which made separated XIC colours impossible to map back to m/z. */
+function plotPngWithLegend(
+  source: HTMLCanvasElement,
+  plotCssWidth: number,
+  traces: PanelTrace[],
+  theme: ThemeTokens,
+): string {
+  const visible = traces.filter((trace) => trace.visible);
+  if (visible.length <= 1) return source.toDataURL("image/png");
+
+  const pixelRatio = source.width / Math.max(1, plotCssWidth);
+  const pad = 8 * pixelRatio;
+  const gap = 14 * pixelRatio;
+  const swatch = 9 * pixelRatio;
+  const lineHeight = 18 * pixelRatio;
+  const fontSize = 11 * pixelRatio;
+  const probe = document.createElement("canvas").getContext("2d");
+  if (!probe) return source.toDataURL("image/png");
+  probe.font = `${fontSize}px ui-sans-serif, system-ui, sans-serif`;
+
+  const items: { trace: PanelTrace; x: number; row: number; width: number }[] = [];
+  let cursor = pad;
+  let row = 0;
+  const maxItemWidth = Math.max(40 * pixelRatio, source.width - pad * 2);
+  for (const trace of visible) {
+    const width = Math.min(maxItemWidth, swatch + 5 * pixelRatio + probe.measureText(trace.label).width);
+    if (cursor > pad && cursor + width > source.width - pad) {
+      row += 1;
+      cursor = pad;
+    }
+    items.push({ trace, x: cursor, row, width });
+    cursor += width + gap;
+  }
+
+  const legendHeight = pad * 2 + (row + 1) * lineHeight;
+  const output = document.createElement("canvas");
+  output.width = source.width;
+  output.height = source.height + legendHeight;
+  const ctx = output.getContext("2d");
+  if (!ctx) return source.toDataURL("image/png");
+  ctx.fillStyle = theme.bg;
+  ctx.fillRect(0, 0, output.width, output.height);
+  ctx.drawImage(source, 0, 0);
+  ctx.strokeStyle = theme.border;
+  ctx.lineWidth = Math.max(1, pixelRatio);
+  ctx.beginPath();
+  ctx.moveTo(0, source.height + 0.5 * pixelRatio);
+  ctx.lineTo(output.width, source.height + 0.5 * pixelRatio);
+  ctx.stroke();
+  ctx.font = `${fontSize}px ui-sans-serif, system-ui, sans-serif`;
+  ctx.textBaseline = "middle";
+  for (const item of items) {
+    const y = source.height + pad + item.row * lineHeight + lineHeight / 2;
+    ctx.fillStyle = item.trace.color;
+    ctx.fillRect(item.x, y - swatch / 2, swatch, swatch);
+    ctx.fillStyle = theme.mutedFg;
+    ctx.fillText(
+      item.trace.label,
+      item.x + swatch + 5 * pixelRatio,
+      y,
+      Math.max(1, item.width - swatch - 5 * pixelRatio),
+    );
+  }
+  return output.toDataURL("image/png");
 }
 
 /** Median of a sorted-ish ascending series' x spacings (used as maxGap basis). */
@@ -1100,7 +1170,12 @@ export function GcmsPlot(props: GcmsPlotProps): JSX.Element {
         const scale = Math.max(1, Math.min(8, Math.round(scaleArg ?? 1)));
         try {
           if (scale === 1) {
-            return plot.ctx.canvas.toDataURL("image/png");
+            return plotPngWithLegend(
+              plot.ctx.canvas,
+              plot.width,
+              tracesRef.current,
+              themeRef.current,
+            );
           }
           // Render at `scale`x: temporarily resize uPlot, grab, then restore.
           // setSize triggers a redraw, so the canvas holds the high-res image
@@ -1108,9 +1183,16 @@ export function GcmsPlot(props: GcmsPlotProps): JSX.Element {
           const w = plot.width;
           const h = plot.height;
           plot.setSize({ width: w * scale, height: h * scale });
-          const url = plot.ctx.canvas.toDataURL("image/png");
-          plot.setSize({ width: w, height: h });
-          return url;
+          try {
+            return plotPngWithLegend(
+              plot.ctx.canvas,
+              plot.width,
+              tracesRef.current,
+              themeRef.current,
+            );
+          } finally {
+            plot.setSize({ width: w, height: h });
+          }
         } catch {
           return null;
         }

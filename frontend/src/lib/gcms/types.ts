@@ -113,6 +113,22 @@ export interface SpecPeak {
   ion?: string;
 }
 
+/** A spectrum peak explicitly added by the user against a specific run/slot.
+ *  Kept separate from the derived `specPeaks` list so it survives re-picks. */
+export interface ManualSpecPeak extends SpecPeak {
+  runId: string;
+  slotId: string;
+}
+
+/** A picked mass-spectrum peak with the chromatographic peak that produced it.
+ * Live-view rows use `sourceLabel` without chromatographic RT bounds. */
+export interface SpectrumPeakRow extends SpecPeak {
+  sourcePeakId?: string;
+  sourceLabel: string;
+  sourceRtStart?: number;
+  sourceRtEnd?: number;
+}
+
 export interface GcmsTuneInfo {
   tuneFile?: string;
   tuneDate?: string;
@@ -204,6 +220,9 @@ export type SpectrumSlotSource =
 export interface SpectrumSlot {
   id: string;
   source: SpectrumSlotSource;
+  /** Run sampled by a chromatogram drag. Cursor/frozen slots omit this and
+   * continue to follow the active document. */
+  runId?: string;
   label: string;
   color: string;
   mode: "stack" | "overlay" | "background";

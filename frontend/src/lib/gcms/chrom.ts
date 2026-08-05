@@ -140,6 +140,17 @@ export function buildXic(
   };
 }
 
+/**
+ * Build one independent, sum-mode extracted-ion chromatogram per requested
+ * m/z, preserving the input order. Keeping this as one operation lets worker
+ * callers structured-clone the (potentially large) run only once while still
+ * returning ordinary {@link ChromTrace}s that the rest of the workspace can
+ * display and export independently.
+ */
+export function buildXics(run: MsRun, mzList: number[], tol: number): ChromTrace[] {
+  return mzList.map((mz) => buildXic(run, [mz], tol, "sum"));
+}
+
 // --- spectra ----------------------------------------------------------------
 
 /** Find the index of the largest point in a spectrum slice, or -1 if empty. */

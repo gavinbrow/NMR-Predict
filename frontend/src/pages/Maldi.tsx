@@ -568,6 +568,15 @@ const Maldi = () => {
       }));
   }, [figSelectedSeries, allAdducts, colorForSeries]);
 
+  const reportSeriesColors = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const s of figConfirmedSeries) {
+      const color = colorForSeries(s);
+      for (const mem of s.members) m.set(mem.peakId, color);
+    }
+    return m;
+  }, [figConfirmedSeries, colorForSeries]);
+
   // The figure-engine data: profile traces + optional stick series + m/z labels.
   // Recomputed when the inputs change; the options hook below carries the user's
   // styling across these updates (reconcileFigureOptions). The overlay set is
@@ -1628,11 +1637,13 @@ const Maldi = () => {
     repeatMass,
     molWeight: summarizeMolWeight(peaks, series, series.length ? "series" : "all", {}),
     findings,
+    selectedSeriesIds: highlightedSeriesIds ? [...highlightedSeriesIds] : [],
     // `primaryOnly` so a PDF/Excel report about the active document doesn't
     // silently embed the other open documents' traces now that overlays share
     // the canvas. (WP3 §9.)
     spectrumPng: plotHandleRef.current?.getPng({ primaryOnly: true }) ?? null,
-  }), [projectName, sourceName, raw, peaks, series, allAdducts, repeatMass, findings]);
+  }), [projectName, sourceName, raw, peaks, series, allAdducts, repeatMass, findings, highlightedSeriesIds]);
+
 
   const handleExport = useCallback(
     async (kind: ExportKind) => {
@@ -1941,6 +1952,7 @@ const Maldi = () => {
                         peaks={peaks}
                         highlightedPeakIds={highlightedPeakIds}
                         highlightGroups={plotHighlightGroups}
+                        reportSeriesColors={reportSeriesColors}
                         overlaySticks={overlay?.sticks ?? null}
                         onAddPeak={handleAddPeak}
                         onRemovePeak={handleRemovePeak}

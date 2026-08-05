@@ -33,6 +33,10 @@ interface GcmsFigurePanelProps {
   labelPeaks: boolean;
   onLabelPeaksChange: (v: boolean) => void;
 
+  /** Stack multiple spectrum slots vertically instead of overlaying them. */
+  stackSpectra: boolean;
+  onStackSpectraChange: (v: boolean) => void;
+
   /** Peaks hidden from the figure only (peak stays in the tables/exports). */
   hiddenPeakCount: number;
   onRestorePeaks: () => void;
@@ -128,6 +132,8 @@ export function GcmsFigurePanel({
   onToggleSpectrum,
   labelPeaks,
   onLabelPeaksChange,
+  stackSpectra,
+  onStackSpectraChange,
   hiddenPeakCount,
   onRestorePeaks,
   onDeletePeak,
@@ -173,6 +179,14 @@ export function GcmsFigurePanel({
           ))}
         </div>
         <ToggleLine id="fig-label-peaks" label="Label peaks" checked={labelPeaks} onChange={onLabelPeaksChange} />
+        {subject === "spectrum" && candidateSpectra.length >= 2 && (
+          <ToggleLine
+            id="fig-stack-spectra"
+            label="Stack spectra"
+            checked={stackSpectra}
+            onChange={onStackSpectraChange}
+          />
+        )}
         {hiddenPeakCount > 0 && (
           <span className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
             {hiddenPeakCount} hidden ·

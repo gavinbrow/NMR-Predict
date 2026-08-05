@@ -10,7 +10,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import type { SpecPeak } from "@/lib/gcms/types";
+import type { SpectrumPeakRow } from "@/lib/gcms/types";
 
 /**
  * The spectrum peak table. Columns: a select checkbox, m/z (3 dp — the
@@ -18,10 +18,8 @@ import type { SpecPeak } from "@/lib/gcms/types";
  * header is sortable (click to toggle asc/desc, chevron on the active column).
  *
  * MULTI-SELECT: per-row checkboxes plus a header select-all. A toolbar above
- * the table shows the selected count and an `XIC selected` button calling
- * `onXicSelected(mzList)`, disabled when nothing is selected — this is the
- * ONLY path from this table to building an XIC (Phase 1 removed the old
- * click-to-XIC row click). Row click reuses that SAME selection state: it
+ * the table can either sum the selected ions into one combined XIC or create
+ * one separate XIC per selected m/z. Row click reuses that SAME selection state: it
  * toggles the row's checkbox, highlighting it (`bg-muted`) and folding it
  * into the next XIC build, rather than inventing a separate single-row
  * highlight.
@@ -33,26 +31,37 @@ import type { SpecPeak } from "@/lib/gcms/types";
  * keeps the math simple. Nothing is silently capped.
  *
  * ADD / REMOVE (Phase 5 task C): an `m/z` input + `Add` button sits beside
- * `XIC selected`. `onAddPeak(mz)` does the snap-to-nearest-stick and relPct
+ * the XIC actions. `onAddPeak(mz)` does the snap-to-nearest-stick and relPct
  * math against the live spectrum (this table has no spectrum of its own to
  * search) and returns an error string to show inline — same
  * `text-xs text-destructive` convention the Traces panel's XIC builder uses —
  * or `null` on success. A trailing delete-× column calls `onDeletePeak(id)`.
  */
 interface SpectrumPeakTableProps {
-  peaks: SpecPeak[];
-  onXicSelected(mzList: number[]): void;
+  peaks: SpectrumPeakRow[];
+  sources: { id: string; label: string }[];
+  sourceId: string;
+  onSourceChange(id: string): void;
+  onXicSelected(mzList: number[], layout: "combined" | "separate"): void;
   /** Returns an error message to display inline, or null on success. */
-  onAddPeak(mz: number): string | null;
-  onDeletePeak(id: string): void;
+  onAddPeak?: (mz: number) => string | null;
+  onDeletePeak?: (id: string) => void;
 }
 
-type SortKey = "mz" | "intensity" | "relPct";
+type SortKey = "sourceLabel" | "mz" | "intensity" | "relPct";
 
 const ROW_H = 32;
 const OVERSCAN = 10;
 
-export function SpectrumPeakTable({ peaks, onXicSelected, onAddPeak, onDeletePeak }: SpectrumPeakTableProps) {
+export function SpectrumPeakTable({
+  peaks,
+  sources,
+  sourceId,
+  onSourceChange,
+  onXicSelected,
+  onAddPeak,
+  onDeletePeak,
+}: SpectrumPeakTableProps) {
   const [sortKey, setSortKey] = useState<SortKey | null>(null);
   const [sortDir, setSortDir] = useState<"asc" | "desc">("asc");
   const [scrollTop, setScrollTop] = useState(0);
@@ -80,6 +89,9 @@ export function SpectrumPeakTable({ peaks, onXicSelected, onAddPeak, onDeletePea
       if (aMissing && bMissing) return 0;
       if (aMissing) return 1;
       if (bMissing) return -1;
+      if (typeof av === "string" || typeof bv === "string") {
+        return String(av).localeCompare(String(bv)) * dir;
+      }
       return (av - bv) * dir;
     });
   }, [peaks, sortKey, sortDir]);
@@ -118,9 +130,9 @@ export function SpectrumPeakTable({ peaks, onXicSelected, onAddPeak, onDeletePea
       return next;
     });
 
-  const handleXicSelected = () => {
+  const handleXicSelected = (layout: "combined" | "separate") => {
     const mzList = sorted.filter((p) => selected.has(p.id)).map((p) => p.mz);
-    if (mzList.length) onXicSelected(mzList);
+    if (mzList.length) onXicSelected(mzList, layout);
   };
 
   // Parse-then-validate, mirroring the Traces panel's XIC builder: typing
@@ -133,7 +145,7 @@ export function SpectrumPeakTable({ peaks, onXicSelected, onAddPeak, onDeletePea
       setAddError("Enter a single m/z value, e.g. 162.3");
       return;
     }
-    const err = onAddPeak(mzNum);
+    const err = onAddPeak?.(mzNum) ?? "Peak editing is available in Live view.";
     if (err) {
       setAddError(err);
     } else {
@@ -144,8 +156,23 @@ export function SpectrumPeakTable({ peaks, onXicSelected, onAddPeak, onDeletePea
 
   return (
     <div className="flex h-full flex-col">
-      {/* Toolbar: selected count, add-by-m/z, and XIC selected button. */}
+      {/* Toolbar: selected count, add-by-m/z, and combined/separate XIC actions. */}
       <div className="mb-1 flex flex-wrap items-center justify-between gap-2 px-1">
+        <label className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+          <span>Spectrum source</span>
+          <select
+            aria-label="Spectrum peak source"
+            className="h-7 max-w-72 rounded-md border border-input bg-background px-2 text-xs text-foreground"
+            value={sourceId}
+            onChange={(event) => onSourceChange(event.target.value)}
+          >
+            {sources.map((source) => (
+              <option key={source.id} value={source.id}>
+                {source.label}
+              </option>
+            ))}
+          </select>
+        </label>
         <span className="text-[11px] text-muted-foreground">
           {total} peak{total === 1 ? "" : "s"}
           {selected.size > 0 && (
@@ -156,6 +183,7 @@ export function SpectrumPeakTable({ peaks, onXicSelected, onAddPeak, onDeletePea
           <Input
             className="h-7 w-24 px-1.5 text-xs"
             placeholder="m/z"
+            disabled={!onAddPeak}
             inputMode="decimal"
             value={mzText}
             onChange={(e) => {
@@ -173,7 +201,7 @@ export function SpectrumPeakTable({ peaks, onXicSelected, onAddPeak, onDeletePea
             variant="outline"
             className="h-7 px-2 text-[11px]"
             onClick={handleAdd}
-            disabled={mzText.trim() === ""}
+            disabled={!onAddPeak || mzText.trim() === ""}
           >
             <Plus className="mr-1 h-3.5 w-3.5" />
             Add
@@ -181,11 +209,23 @@ export function SpectrumPeakTable({ peaks, onXicSelected, onAddPeak, onDeletePea
           <Button
             type="button"
             size="sm"
+            variant="outline"
             className="h-7 px-2 text-[11px]"
-            onClick={handleXicSelected}
+            onClick={() => handleXicSelected("combined")}
             disabled={selected.size === 0}
+            title="Sum all selected ions into one extracted-ion chromatogram"
           >
-            XIC selected
+            Combined XIC
+          </Button>
+          <Button
+            type="button"
+            size="sm"
+            className="h-7 px-2 text-[11px]"
+            onClick={() => handleXicSelected("separate")}
+            disabled={selected.size === 0}
+            title="Create one chromatogram trace per selected m/z"
+          >
+            Separate XICs
           </Button>
         </div>
       </div>
@@ -209,6 +249,7 @@ export function SpectrumPeakTable({ peaks, onXicSelected, onAddPeak, onDeletePea
                     aria-label="Select all peaks"
                   />
                 </TableHead>
+                <SortHead label="Chromatogram peak" sortKey="sourceLabel" active={sortKey} dir={sortDir} onSort={toggleSort} />
                 <SortHead label="m/z" sortKey="mz" active={sortKey} dir={sortDir} onSort={toggleSort} />
                 <SortHead label="Intensity" sortKey="intensity" active={sortKey} dir={sortDir} onSort={toggleSort} />
                 <SortHead label="Rel %" sortKey="relPct" active={sortKey} dir={sortDir} onSort={toggleSort} />
@@ -218,7 +259,7 @@ export function SpectrumPeakTable({ peaks, onXicSelected, onAddPeak, onDeletePea
             <TableBody>
               {topSpacer > 0 && (
                 <tr aria-hidden style={{ height: topSpacer }}>
-                  <td colSpan={5} />
+                  <td colSpan={6} />
                 </tr>
               )}
               {visible.map((peak) => {
@@ -239,6 +280,12 @@ export function SpectrumPeakTable({ peaks, onXicSelected, onAddPeak, onDeletePea
                         aria-label="Select peak"
                       />
                     </TableCell>
+                    <TableCell
+                      className="h-8 max-w-56 truncate py-0 px-2 text-xs"
+                      title={peak.sourceLabel}
+                    >
+                      {peak.sourceLabel}
+                    </TableCell>
                     <TableCell className="h-8 py-0 px-2 font-mono text-xs">
                       {peak.mz.toFixed(3)}
                     </TableCell>
@@ -249,21 +296,23 @@ export function SpectrumPeakTable({ peaks, onXicSelected, onAddPeak, onDeletePea
                       {peak.relPct.toFixed(2)}
                     </TableCell>
                     <TableCell className="h-8 py-0 px-1" onClick={(e) => e.stopPropagation()}>
-                      <button
-                        type="button"
-                        onClick={() => onDeletePeak(peak.id)}
-                        className="text-muted-foreground/60 hover:text-destructive"
-                        title="Remove this peak"
-                      >
-                        <X className="h-3.5 w-3.5" />
-                      </button>
+                      {onDeletePeak && (
+                        <button
+                          type="button"
+                          onClick={() => onDeletePeak(peak.id)}
+                          className="text-muted-foreground/60 hover:text-destructive"
+                          title="Remove this peak"
+                        >
+                          <X className="h-3.5 w-3.5" />
+                        </button>
+                      )}
                     </TableCell>
                   </TableRow>
                 );
               })}
               {bottomSpacer > 0 && (
                 <tr aria-hidden style={{ height: bottomSpacer }}>
-                  <td colSpan={5} />
+                  <td colSpan={6} />
                 </tr>
               )}
             </TableBody>
@@ -275,8 +324,10 @@ export function SpectrumPeakTable({ peaks, onXicSelected, onAddPeak, onDeletePea
 }
 
 /** Numeric value a peak sorts by for a given column. */
-function sortValue(peak: SpecPeak, key: SortKey): number | undefined {
+function sortValue(peak: SpectrumPeakRow, key: SortKey): number | string | undefined {
   switch (key) {
+    case "sourceLabel":
+      return peak.sourceLabel;
     case "mz":
       return peak.mz;
     case "intensity":

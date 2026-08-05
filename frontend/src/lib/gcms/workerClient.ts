@@ -185,6 +185,11 @@ export function buildXic(
   return callWorker("buildXic", { run, mzList, tol, mode }, options);
 }
 
+/** Build one independent, sum-mode XIC per m/z in a single worker request. */
+export function buildXics(run: MsRun, mzList: number[], tol: number, options?: CallOptions) {
+  return callWorker("buildXics", { run, mzList, tol }, options);
+}
+
 export function sumScans(
   run: MsRun,
   rtLo: number,

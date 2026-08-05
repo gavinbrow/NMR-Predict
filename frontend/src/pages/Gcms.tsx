@@ -11,6 +11,7 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import { AppShell } from "@/components/AppShell";
+import { useGcmsUndo } from "@/hooks/useGcmsUndo";
 import { ChromPeakTable } from "@/components/gcms/ChromPeakTable";
 import { ChromatogramPanel } from "@/components/gcms/ChromatogramPanel";
 import { ComparisonTray } from "@/components/gcms/ComparisonTray";
@@ -55,14 +56,16 @@ import {
   buildDetectorTrace,
   buildTic,
   buildXic as buildXicMain,
+  buildXics as buildXicsMain,
+  combineScans,
   MAX_TRACE_SCALE,
   nearestScanIndex,
   scanSpectrum,
 } from "@/lib/gcms/chrom";
-import { applyBackgroundSubtraction, assemblePanels, resolveSlots } from "@/lib/gcms/slots";
+import { applyBackgroundSubtraction, assemblePanels, resolveSlotsByRun } from "@/lib/gcms/slots";
 import { subtractChromBackground } from "@/lib/gcms/chromBackground";
 import { detectChromPeaks as detectChromPeaksMain } from "@/lib/gcms/peaks";
-import { integratePeakAt, normalizeAreaPct, pickSpectrumPeaks, spectrumSimilarity } from "@/lib/gcms/peaks";
+import { integratePeakRange, normalizeAreaPct, pickSpectrumPeaks, spectrumSimilarity } from "@/lib/gcms/peaks";
 import type { DetectChromPeaksOpts } from "@/lib/gcms/peaks";
 import { nearestIndex } from "@/lib/gcms/numerics";
 import {
@@ -89,16 +92,19 @@ import type {
   MassSpectrum,
   MsRun,
   SpecPeak,
+  SpectrumPeakRow,
   SpectrumSlot,
 } from "@/lib/gcms/types";
 import {
   buildXic as buildXicWorker,
+  buildXics as buildXicsWorker,
   detectChromPeaks as detectChromPeaksWorker,
   disposeWorker,
   isCancelledError,
   ping,
   type CallOptions,
 } from "@/lib/gcms/workerClient";
+import type { ManualSpecPeak } from "@/lib/gcms/types";
 
 type WorkerStatus = "checking" | "ready" | "error" | "fallback";
 
@@ -162,6 +168,25 @@ function primaryToken(): string {
   return raw.startsWith("hsl") ? raw : `hsl(${raw})`;
 }
 
+/** Attach the base-peak m/z from the MS scan nearest a chromatographic apex.
+ *  A chromatogram trace can have a different sample grid from the run's MS
+ *  scans (notably UV/FID channels), so `peak.scanApex` is not a safe index
+ *  into `run.basePeakMz`. */
+function withBasePeakMz(peak: ChromPeak, run: MsRun | null): ChromPeak {
+  if (!run) return { ...peak, basePeakMz: null };
+  const scanIndex = nearestScanIndex(run, peak.rtApex);
+  if (scanIndex < 0 || scanIndex >= run.basePeakMz.length) {
+    return { ...peak, basePeakMz: null };
+  }
+  const mz = run.basePeakMz[scanIndex];
+  return { ...peak, basePeakMz: Number.isFinite(mz) ? mz : null };
+}
+
+function chromatogramPeakSourceLabel(peak: ChromPeak, index: number): string {
+  const identity = peak.name?.trim() || `Peak ${index + 1}`;
+  return `${identity} · RT ${peak.rtApex.toFixed(3)} (${peak.rtStart.toFixed(3)}–${peak.rtEnd.toFixed(3)})`;
+}
+
 // ---------------------------------------------------------------------------
 // Phase 5 task D — manual (hand-added) peaks vs. the DERIVED peak lists.
 //
@@ -191,7 +216,7 @@ function primaryToken(): string {
 // `crypto.randomUUID()`), a stale dismissed id can never accidentally hide an
 // unrelated future peak, so the dismissed sets don't strictly need clearing —
 // they're cleared alongside their derived list anyway, purely for hygiene.
-type ManualSpecPeak = SpecPeak & { runId: string; slotId: string };
+
 
 const Gcms = () => {
   const [workerStatus, setWorkerStatus] = useState<WorkerStatus>("checking");
@@ -211,6 +236,10 @@ const Gcms = () => {
   // slot(s), so a slot's user-chosen mode (e.g. flipped to "background")
   // survives a region being added/removed instead of resetting every drag.
   const [selections, setSelections] = useState<[number, number][]>([]);
+  // The run whose visible chromatogram received the selection drag. This is
+  // deliberately independent of the active document: a hidden active file
+  // must never supply spectra for a visible file's RT selection.
+  const [selectionRunId, setSelectionRunId] = useState<string | null>(null);
   const [splitRegions, setSplitRegions] = useState(false);
   const [mode, setMode] = useState<"zoom" | "select" | "background">("select");
   // Explicit spectrum slots for the bottom panel (Phase 4 task A). Slot 0
@@ -248,6 +277,7 @@ const Gcms = () => {
   // list, so it is cleared alongside it (peak ids are regenerated per run).
   const [selectedChromPeakId, setSelectedChromPeakId] = useState<string | null>(null);
   const [specPeaks, setSpecPeaks] = useState<SpecPeak[]>([]);
+  const [spectrumPeakSourceId, setSpectrumPeakSourceId] = useState("live");
   // Manual peaks + "dismissed derived peak" sets (Phase 5 task D — see the
   // big comment above the component for why these are separate from
   // chromPeaks/specPeaks rather than appended into them).
@@ -255,8 +285,9 @@ const Gcms = () => {
   const [manualSpecPeaks, setManualSpecPeaks] = useState<ManualSpecPeak[]>([]);
   const [dismissedChromPeakIds, setDismissedChromPeakIds] = useState<Set<string>>(new Set());
   const [dismissedSpecPeakIds, setDismissedSpecPeakIds] = useState<Set<string>>(new Set());
-  // "Add peak" toolbar toggle (task B): while armed, a chromatogram click
-  // integrates a peak instead of pinning the cursor (see `handlePinRt`).
+  const undo = useGcmsUndo();
+  // "Add peak" toolbar toggle: while armed, a chromatogram DRAG defines the
+  // exact peak integration range. Single clicks deliberately do nothing.
   const [addPeakArmed, setAddPeakArmed] = useState(false);
   const [fragmentHits, setFragmentHits] = useState<
     { rtMin: number; relPct: number; basePeakMz: number | null; abundance: number }[] | null
@@ -271,6 +302,7 @@ const Gcms = () => {
   interface DocViewState {
     pinnedRt: number | null;
     selections: [number, number][];
+    selectionRunId: string | null;
     slots: SpectrumSlot[];
     chromPeaks: ChromPeak[];
     manualChromPeaks: ChromPeak[];
@@ -336,6 +368,35 @@ const Gcms = () => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // --- Global undo: Ctrl/Cmd+Z reverts the last peak action -----------------
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      const mod = event.ctrlKey || event.metaKey;
+      if (!mod) return;
+      const isUndo = event.key.toLowerCase() === "z" && !event.shiftKey;
+      if (!isUndo) return;
+      const target = event.target as HTMLElement | null;
+      if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable)) {
+        return;
+      }
+      event.preventDefault();
+      const snapshot = undo.popSnapshot();
+      if (!snapshot) {
+        toast.message("Nothing to undo");
+        return;
+      }
+      setChromPeaks(snapshot.chromPeaks);
+      setManualChromPeaks(snapshot.manualChromPeaks);
+      setDismissedChromPeakIds(snapshot.dismissedChromPeakIds);
+      setSpecPeaks(snapshot.specPeaks);
+      setManualSpecPeaks(snapshot.manualSpecPeaks);
+      setDismissedSpecPeakIds(snapshot.dismissedSpecPeakIds);
+      toast.success(`Undo: ${snapshot.label}`);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [undo]);
+
   // --- Derived: active document + run ---------------------------------------
   const activeDoc = useMemo(
     () => documents.find((d) => d.id === activeDocId) ?? null,
@@ -350,19 +411,30 @@ const Gcms = () => {
     return m;
   }, [documents]);
 
-  // The active trace: the one the cursor/peaks follow. Falls back to the first
-  // visible trace, then the first trace.
-  const effectiveActiveTraceId = useMemo(
-    () =>
-      activeTraceId ??
-      traces.find((t) => t.visible && (activeRun ? t.runId === activeRun.id : true))?.id ??
-      traces[0]?.id ??
-      null,
-    [activeTraceId, traces, activeRun],
-  );
+  // The active trace: the visible curve the cursor/peaks follow. A trace can
+  // be hidden either directly or through its owning document; never retain a
+  // hidden id here because drag-to-add must integrate the curve the user can
+  // actually see. Prefer a visible trace from the active run, then any visible
+  // trace, and leave peak actions disabled when none remain.
+  const effectiveActiveTraceId = useMemo(() => {
+    const docVisibleByRun = new Map(documents.map((doc) => [doc.run.id, doc.visible]));
+    const visible = traces.filter(
+      (trace) => trace.visible && docVisibleByRun.get(trace.runId) !== false,
+    );
+    return (
+      visible.find((trace) => trace.id === activeTraceId)?.id ??
+      visible.find((trace) => (activeRun ? trace.runId === activeRun.id : true))?.id ??
+      visible[0]?.id ??
+      null
+    );
+  }, [activeTraceId, activeRun, documents, traces]);
   const activeTrace = useMemo(
     () => traces.find((t) => t.id === effectiveActiveTraceId) ?? null,
     [traces, effectiveActiveTraceId],
+  );
+  const activeTraceRun = useMemo(
+    () => (activeTrace ? documents.find((d) => d.run.id === activeTrace.runId)?.run ?? null : null),
+    [activeTrace, documents],
   );
 
   // Suggested XIC tolerance: 0.3 Da on a coarse m/z grid (>0.1 Da spacing),
@@ -440,8 +512,8 @@ const Gcms = () => {
   //    on that function for why background slots must resolve first and are
   //    never themselves subtracted from.
   const resolvedSlots = useMemo(
-    () => resolveSlots(slots, activeRun, liveRt),
-    [slots, activeRun, liveRt],
+    () => resolveSlotsByRun(slots, activeRun, liveRt, documents.map((document) => document.run)),
+    [slots, activeRun, liveRt, documents],
   );
   const subtractedSlots = useMemo(
     () => applyBackgroundSubtraction(resolvedSlots),
@@ -451,6 +523,84 @@ const Gcms = () => {
     () => subtractedSlots.find((r) => r.slot.id === "live")?.spectrum ?? null,
     [subtractedSlots],
   );
+
+  const spectrumPeakSources = useMemo(
+    () => [
+      { id: "live", label: "Live peak view" },
+      ...(displayedChromPeaks.length > 0
+        ? [
+            {
+              id: "chrom:all",
+              label: `All chromatogram peaks (${displayedChromPeaks.length})`,
+            },
+          ]
+        : []),
+      ...displayedChromPeaks.map((peak, index) => ({
+        id: `chrom:${peak.id}`,
+        label: chromatogramPeakSourceLabel(peak, index),
+      })),
+    ],
+    [displayedChromPeaks],
+  );
+
+  // Keep the source selector valid when peak detection, deletion, or a trace
+  // switch removes the chromatographic peak it previously referenced.
+  useEffect(() => {
+    if (!spectrumPeakSources.some((source) => source.id === spectrumPeakSourceId)) {
+      setSpectrumPeakSourceId("live");
+    }
+  }, [spectrumPeakSourceId, spectrumPeakSources]);
+
+  const displayedSpectrumPeakRows = useMemo<SpectrumPeakRow[]>(() => {
+    if (spectrumPeakSourceId === "live") {
+      return displayedSpecPeaks.map((peak) => ({ ...peak, sourceLabel: "Live view" }));
+    }
+
+    const wanted =
+      spectrumPeakSourceId === "chrom:all"
+        ? displayedChromPeaks
+        : displayedChromPeaks.filter(
+            (peak) => `chrom:${peak.id}` === spectrumPeakSourceId,
+          );
+    const sourceIndex = new Map(
+      displayedChromPeaks.map((peak, index) => [peak.id, index] as const),
+    );
+
+    return wanted.flatMap((chromPeak) => {
+      const run = documents.find((document) => document.run.id === chromPeak.runId)?.run;
+      if (!run) return [];
+      const spectrum = combineScans(run, chromPeak.rtStart, chromPeak.rtEnd, "sum");
+      const label = chromatogramPeakSourceLabel(
+        chromPeak,
+        sourceIndex.get(chromPeak.id) ?? 0,
+      );
+      return pickSpectrumPeaks(spectrum, {
+        thresholdPct: 1,
+        maxPeaks: 200,
+        minSeparationMz: 0.3,
+      }).map((peak) => ({
+        ...peak,
+        id: `${chromPeak.id}:${peak.id}`,
+        sourcePeakId: chromPeak.id,
+        sourceLabel: label,
+        sourceRtStart: chromPeak.rtStart,
+        sourceRtEnd: chromPeak.rtEnd,
+      }));
+    });
+  }, [displayedChromPeaks, displayedSpecPeaks, documents, spectrumPeakSourceId]);
+
+  const spectrumPeakRun = useMemo(() => {
+    if (spectrumPeakSourceId === "live") return activeRun;
+    const sourcePeak =
+      spectrumPeakSourceId === "chrom:all"
+        ? displayedChromPeaks[0]
+        : displayedChromPeaks.find(
+            (peak) => `chrom:${peak.id}` === spectrumPeakSourceId,
+          );
+    return sourcePeak
+      ? documents.find((document) => document.run.id === sourcePeak.runId)?.run ?? null
+      : null;
+  }, [activeRun, displayedChromPeaks, documents, spectrumPeakSourceId]);
 
   // Effective trace visibility = doc.visible AND trace.visible. The
   // chromatogram filters on both so unchecking a file in the Documents panel
@@ -480,6 +630,17 @@ const Gcms = () => {
     }
     return out;
   }, [backgroundBlankByDoc, documents, traces]);
+
+  /** The exact trace set drawn in the chromatogram. Reused for every
+   * chromatogram export so separated XICs, document visibility, and derived
+   * background traces are consistently WYSIWYG. */
+  const visibleChromTraces = useMemo(
+    () =>
+      [...traces, ...bgTraces].filter(
+        (trace) => trace.visible && (trace.kind === "TIC-bg" || docVisibleByRunId.get(trace.runId) !== false),
+      ),
+    [bgTraces, docVisibleByRunId, traces],
+  );
 
   // "Lock spectra to cursor RT" (pre-existing, cross-DOCUMENT feature — every
   // visible OTHER document's own scan at the live RT) is orthogonal to the
@@ -545,9 +706,8 @@ const Gcms = () => {
           });
         }
       }
-      // The live panel uses the host-level `displayedSpecPeaks` (which the
-      // peak table / XIC / export also consume, and which the user can
-      // dismiss/edit). Non-live panels (selections, frozen "Add spectrum"
+      // The live plot uses the host-level `displayedSpecPeaks`, which the user
+      // can dismiss/edit. Non-live panels (selections, frozen "Add spectrum"
       // slots) pick their OWN peaks from their anchor spectrum so the user
       // sees m/z labels on every panel, not just the live one — bug 3.
       const anchorSpec = p.entries[0]?.spectrum;
@@ -614,6 +774,7 @@ const Gcms = () => {
           desired.set(id, {
             id,
             source: { kind: "range", regions: [region] },
+            runId: selectionRunId ?? undefined,
             label: `Selection ${i + 1}`,
             color: ex?.color ?? nextSlotColor(),
             mode: ex?.mode ?? "stack",
@@ -624,6 +785,7 @@ const Gcms = () => {
         desired.set("sel", {
           id: "sel",
           source: { kind: "range", regions: selections },
+          runId: selectionRunId ?? undefined,
           label: "Selection",
           color: ex?.color ?? nextSlotColor(),
           mode: ex?.mode ?? "stack",
@@ -648,7 +810,7 @@ const Gcms = () => {
       }
       return [...merged, ...toAppend];
     });
-  }, [selections, splitRegions, nextSlotColor]);
+  }, [selections, selectionRunId, splitRegions, nextSlotColor]);
 
   // Re-pick spectrum peaks whenever the LIVE spectrum changes (not every
   // panel — peak-table/XIC actions are tied to the live scan specifically).
@@ -699,6 +861,7 @@ const Gcms = () => {
       docViewStateCacheRef.current.set(prevId, {
         pinnedRt,
         selections,
+        selectionRunId,
         slots: slots.filter((s) => s.id !== "live"),
         chromPeaks,
         manualChromPeaks,
@@ -708,12 +871,15 @@ const Gcms = () => {
         splitRegions,
       });
     }
+    // Undo history is tied to the current document's peak ids.
+    undo.clear();
     // Restore new (if any).
     if (newId && prevId !== newId) {
       const cached = docViewStateCacheRef.current.get(newId);
       if (cached) {
         setPinnedRt(cached.pinnedRt);
         setSelections(cached.selections);
+        setSelectionRunId(cached.selectionRunId);
         // Merge cached non-live slots back in front of the always-present
         // "live" slot. "live" is never cached (it's re-derived from the
         // cursor) so it stays as the initializer created it.
@@ -733,6 +899,7 @@ const Gcms = () => {
         // Fresh doc — reset to defaults.
         setPinnedRt(null);
         setSelections([]);
+        setSelectionRunId(null);
         setSlots((prev) => prev.filter((s) => s.id === "live"));
         setChromPeaks([]);
         setDismissedChromPeakIds(new Set());
@@ -760,6 +927,7 @@ const Gcms = () => {
   const [figIncludedTraceIds, setFigIncludedTraceIds] = useState<Set<string>>(() => new Set());
   const [figIncludedSlotIds, setFigIncludedSlotIds] = useState<Set<string>>(() => new Set());
   const [figLabelPeaks, setFigLabelPeaks] = useState(true);
+  const [figStackSpectra, setFigStackSpectra] = useState(false);
   // Figure-only peak hides: the peak stays in the Chrom./Spectrum peak tables
   // and every export — only its stick/line label is dropped from THIS
   // figure. Peak ids are freshly minted on every detect/pick (see the
@@ -768,8 +936,8 @@ const Gcms = () => {
   const [figExcludedPeakIds, setFigExcludedPeakIds] = useState<Set<string>>(() => new Set());
 
   const figCandidateTraces = useMemo(
-    () => [...traces, ...bgTraces].filter((t) => t.visible),
-    [traces, bgTraces],
+    () => visibleChromTraces,
+    [visibleChromTraces],
   );
   const figIncludedTraces = useMemo(
     () =>
@@ -926,9 +1094,10 @@ const Gcms = () => {
         chromPeaks: [],
         specPeaks: figShownSpecPeaks,
         labelPeaks: figLabelPeaks,
+        stackSpectra: figStackSpectra,
         sourceName: figSpectrumSourceName,
       }),
-    [figIncludedSpectra, figShownSpecPeaks, figLabelPeaks, figSpectrumSourceName],
+    [figIncludedSpectra, figShownSpecPeaks, figLabelPeaks, figStackSpectra, figSpectrumSourceName],
   );
   const [chromFigureOptions, setChromFigureOptions] = useFigureOptions(chromFigureData);
   const [specFigureOptions, setSpecFigureOptions] = useFigureOptions(specFigureData);
@@ -1024,6 +1193,7 @@ const Gcms = () => {
             docViewStateCacheRef.current.set(docId, {
               pinnedRt: null,
               selections: [],
+              selectionRunId: null,
               slots: [],
               chromPeaks: [],
               manualChromPeaks: [],
@@ -1160,6 +1330,8 @@ const Gcms = () => {
       // Drop this doc's cached view state so a re-imported same-name doc
       // starts fresh.
       docViewStateCacheRef.current.delete(id);
+      // Peak ids in the undo stack reference the closed document; clear it.
+      undo.clear();
       // Drop every reference to that run's typed arrays: remove its traces,
       // peaks and spectra from state so the buffers can be collected.
       setTraces((prev) => prev.filter((t) => t.runId !== doc.run.id));
@@ -1194,13 +1366,14 @@ const Gcms = () => {
         }
         setPinnedRt(null);
         setSelections([]);
+        setSelectionRunId(null);
         setSlots((prev) => prev.filter((s) => s.id === "live"));
         setChromPeaks([]);
         setFragmentHits(null);
         setSimilarity(null);
       }
     },
-    [documents, activeDocId, traces],
+    [documents, activeDocId, traces, undo],
   );
 
   const handlePatchDoc = useCallback(
@@ -1282,24 +1455,46 @@ const Gcms = () => {
     [],
   );
 
+  /** Append one or more XICs as individually coloured, exportable traces. */
+  const appendXicTraces = useCallback((built: ChromTrace[]) => {
+    if (built.length === 0) return;
+    setTraces((prev) => {
+      const used = new Set(prev.map((trace) => trace.color));
+      const colored = built.map((trace, index) => {
+        const free = SERIES_COLORS.find((color) => !used.has(color));
+        let color = free;
+        if (!color) {
+          // Continue beyond the fixed palette with deterministic golden-angle
+          // hues so a large "Separate XICs" batch never silently reuses a live
+          // trace's exact colour.
+          let attempt = 0;
+          do {
+            const hue = Math.round(((prev.length + index + attempt) * 137.508) % 360);
+            color = `hsl(${hue} 72% 46%)`;
+            attempt += 1;
+          } while (used.has(color));
+        }
+        used.add(color);
+        return { ...trace, color };
+      });
+      return [...prev, ...colored];
+    });
+    // Every separated ion remains visible; emphasize the first selected ion.
+    setActiveTraceId(built[0].id);
+  }, []);
+
   const handleAddXic = useCallback(
-    async (mzList: number[], tol: number, mode: "sum" | "max") => {
-      if (!activeRun) return;
+    async (
+      mzList: number[],
+      tol: number,
+      mode: "sum" | "max",
+      sourceRun: MsRun | null = activeRun,
+    ) => {
+      if (!sourceRun) return;
       setBusy(true);
       try {
-        const trace = await runBuildXic(activeRun, mzList, tol, mode, workerStatus);
-        setTraces((prev) => {
-          // Every XIC gets its OWN colour — the first palette entry no live
-          // trace is using. Inheriting the document colour made superimposed
-          // XICs (a headline feature) indistinguishable from each other and
-          // from the TIC.
-          const used = new Set(prev.map((x) => x.color));
-          const free = SERIES_COLORS.find((c) => !used.has(c));
-          const color = free ?? SERIES_COLORS[prev.length % SERIES_COLORS.length];
-          return [...prev, { ...trace, color }];
-        });
-        // Make the new trace the active one so the user immediately sees it.
-        setActiveTraceId(trace.id);
+        const trace = await runBuildXic(sourceRun, mzList, tol, mode, workerStatus);
+        appendXicTraces([trace]);
         toast.success(`Added XIC ${trace.label}`);
       } catch (error) {
         if (!isCancelledError(error)) {
@@ -1310,7 +1505,7 @@ const Gcms = () => {
         setBusy(false);
       }
     },
-    [activeRun, workerStatus],
+    [activeRun, appendXicTraces, workerStatus],
   );
 
   // --- Gestures: hover, click, select ---------------------------------------
@@ -1318,56 +1513,83 @@ const Gcms = () => {
     setHoverRt(rt);
   }, []);
 
-  // --- "Add peak" (task B): while armed, a chromatogram click adds a peak
-  // instead of moving the pin. This is the SAME onClick->onPinRt path Phase 1
-  // wired for pinning, branched here rather than adding a second listener —
-  // keeps the drag-suppression guard and trace-pick gating in GcmsPlot (see
-  // the ChromatogramPanel's onPickTrace prop below, disabled while armed) as
-  // the single source of truth for "was this really a click".
-  const handleAddPeakAtRt = useCallback(
-    (rt: number) => {
-      if (!activeTrace || !activeRun) return;
-      const peak = integratePeakAt(activeTrace, rt, {
+  // --- "Add peak": the drag supplies the authoritative integration limits.
+  // The helper may choose the apex *inside* that region, but never expands the
+  // user's start/end to automatically discovered valleys.
+  const handleAddPeakRange = useCallback(
+    (lo: number, hi: number) => {
+      if (!activeTrace) return;
+      const peak = integratePeakRange(activeTrace, lo, hi, {
         smoothWindow: peakParams.smoothWindow,
         minWidthScans: peakParams.minWidthScans,
         baseline: peakParams.baseline,
       });
       if (!peak) {
-        toast.error("No peak there — try clicking closer to a chromatographic peak's apex.");
+        toast.error("Drag across at least two chromatogram data points to add a peak.");
         return;
       }
-      if (peak.scanApex >= 0 && peak.scanApex < activeRun.basePeakMz.length) {
-        const bpm = activeRun.basePeakMz[peak.scanApex];
-        peak.basePeakMz = Number.isFinite(bpm) ? bpm : null;
-      }
-      setManualChromPeaks((prev) => [...prev, peak]);
-      toast.success(`Added peak at RT ${peak.rtApex.toFixed(3)}`);
+      const tagged = withBasePeakMz(peak, activeTraceRun);
+      undo.pushSnapshot({
+        chromPeaks: chromPeaks.map((p) => ({ ...p })),
+        manualChromPeaks: manualChromPeaks.map((p) => ({ ...p })),
+        dismissedChromPeakIds: new Set(dismissedChromPeakIds),
+        specPeaks: specPeaks.map((p) => ({ ...p })),
+        manualSpecPeaks: manualSpecPeaks.map((p) => ({ ...p })),
+        dismissedSpecPeakIds: new Set(dismissedSpecPeakIds),
+        label: "Add peak",
+      });
+      setManualChromPeaks((prev) => [...prev, tagged]);
+      setSelectedChromPeakId(tagged.id);
+      setPinnedRt(tagged.rtApex);
+      toast.success(
+        `Added peak from RT ${tagged.rtStart.toFixed(3)} to ${tagged.rtEnd.toFixed(3)}`,
+      );
     },
-    [activeTrace, activeRun, peakParams],
+    [
+      activeTrace,
+      activeTraceRun,
+      peakParams,
+      undo,
+      chromPeaks,
+      manualChromPeaks,
+      dismissedChromPeakIds,
+      specPeaks,
+      manualSpecPeaks,
+      dismissedSpecPeakIds,
+    ],
   );
 
   const handlePinRt = useCallback(
     (rt: number) => {
-      if (addPeakArmed) {
-        handleAddPeakAtRt(rt);
-        return;
-      }
+      // Add-peak mode is drag-only. Never fall back to the old click-to-detect
+      // path when the pointer does not travel far enough to form a selection.
+      if (addPeakArmed) return;
       setPinnedRt(rt);
     },
-    [addPeakArmed, handleAddPeakAtRt],
+    [addPeakArmed],
   );
 
   const handleSelectRange = useCallback(
     (lo: number, hi: number, mode: "zoom" | "select" | "background", additive: boolean) => {
+      if (addPeakArmed) {
+        handleAddPeakRange(lo, hi);
+        return;
+      }
       setMode(mode);
       if (mode === "select") {
+        if (!activeTrace) return;
         // Task D: Shift-drag (additive) APPENDS a region; a plain drag
         // REPLACES the whole selection set. Pinning is cleared on a fresh
         // (non-additive) select drag only — an additive one is refining an
         // existing multi-region comparison the user is mid-way through.
-        setSelections((prev) => (additive ? [...prev, [lo, hi]] : [[lo, hi]]));
+        const sameRun = selectionRunId === activeTrace.runId;
+        setSelections((prev) =>
+          additive && sameRun ? [...prev, [lo, hi]] : [[lo, hi]],
+        );
+        setSelectionRunId(activeTrace.runId);
         if (!additive) setPinnedRt(null);
       } else if (mode === "background") {
+        if (!activeTrace) return;
         // Ctrl-drag seeds/updates the implicit "bg" slot — this REPLACES the
         // old global `background` + `subtractBg` state pair (task A). A
         // fresh drag is an explicit "subtract this" gesture, so it always
@@ -1378,6 +1600,7 @@ const Gcms = () => {
           const next: SpectrumSlot = {
             id: "bg",
             source: { kind: "range", regions: [[lo, hi]] },
+            runId: activeTrace.runId,
             label: "Background",
             color: existing?.color ?? nextSlotColor(),
             mode: "background",
@@ -1387,7 +1610,7 @@ const Gcms = () => {
       }
       // zoom mode is handled entirely inside GcmsPlot.
     },
-    [nextSlotColor],
+    [activeTrace, addPeakArmed, handleAddPeakRange, nextSlotColor, selectionRunId],
   );
 
   // --- "Add spectrum" (task A): freeze the CURRENT live view (whatever RT
@@ -1423,6 +1646,7 @@ const Gcms = () => {
     // or the effect would simply recreate the slot on the next render.
     if (id === "sel") {
       setSelections([]);
+      setSelectionRunId(null);
       return;
     }
     const splitMatch = /^sel-(\d+)$/.exec(id);
@@ -1530,15 +1754,42 @@ const Gcms = () => {
     }
   }, []);
 
-  // --- Spectrum peak table -> XIC (the only click-to-XIC path; Phase 1 ------
-  // removed the mass-spectrum click handler entirely, since a zoom-drag's
-  // release on the spectrum was firing it unintentionally).
+  // --- Spectrum peak table -> XIC. Selected ions can stay combined in one
+  // trace or be extracted separately so their chromatographic origins are
+  // visible (and exported) one m/z per trace.
   const handleXicSelected = useCallback(
-    (mzList: number[]) => {
-      if (mzList.length === 0) return;
-      void handleAddXic(mzList, suggestedTol, "sum");
+    (mzList: number[], layout: "combined" | "separate") => {
+      const uniqueMz = [...new Set(mzList)];
+      if (uniqueMz.length === 0) return;
+      if (layout === "combined") {
+        void handleAddXic(uniqueMz, suggestedTol, "sum", spectrumPeakRun);
+        return;
+      }
+      if (!spectrumPeakRun) return;
+      void (async () => {
+        setBusy(true);
+        try {
+          const built = await runBuildXics(
+            spectrumPeakRun,
+            uniqueMz,
+            suggestedTol,
+            workerStatus,
+          );
+          appendXicTraces(built);
+          toast.success(
+            `Added ${built.length} separate XIC trace${built.length === 1 ? "" : "s"}`,
+          );
+        } catch (error) {
+          if (!isCancelledError(error)) {
+            console.error(error);
+            toast.error("Separate XIC build failed");
+          }
+        } finally {
+          setBusy(false);
+        }
+      })();
     },
-    [handleAddXic, suggestedTol],
+    [appendXicTraces, handleAddXic, spectrumPeakRun, suggestedTol, workerStatus],
   );
 
   // --- Spectrum peak table: add-by-m/z (task C) ------------------------------
@@ -1570,36 +1821,69 @@ const Gcms = () => {
         runId: liveSpectrum.runId,
         slotId: "live",
       };
+      undo.pushSnapshot({
+        chromPeaks: chromPeaks.map((p) => ({ ...p })),
+        manualChromPeaks: manualChromPeaks.map((p) => ({ ...p })),
+        dismissedChromPeakIds: new Set(dismissedChromPeakIds),
+        specPeaks: specPeaks.map((p) => ({ ...p })),
+        manualSpecPeaks: manualSpecPeaks.map((p) => ({ ...p })),
+        dismissedSpecPeakIds: new Set(dismissedSpecPeakIds),
+        label: "Add spectrum peak",
+      });
       setManualSpecPeaks((prev) => [...prev, peak]);
       return null;
     },
-    [liveSpectrum, suggestedTol],
+    [
+      liveSpectrum,
+      suggestedTol,
+      undo,
+      chromPeaks,
+      manualChromPeaks,
+      dismissedChromPeakIds,
+      specPeaks,
+      manualSpecPeaks,
+      dismissedSpecPeakIds,
+    ],
   );
 
   // Same dismiss-or-remove contract as handleChromPeakDelete.
   const handleSpecPeakDelete = useCallback((id: string) => {
+    undo.pushSnapshot({
+      chromPeaks: chromPeaks.map((p) => ({ ...p })),
+      manualChromPeaks: manualChromPeaks.map((p) => ({ ...p })),
+      dismissedChromPeakIds: new Set(dismissedChromPeakIds),
+      specPeaks: specPeaks.map((p) => ({ ...p })),
+      manualSpecPeaks: manualSpecPeaks.map((p) => ({ ...p })),
+      dismissedSpecPeakIds: new Set(dismissedSpecPeakIds),
+      label: "Delete spectrum peak",
+    });
     setManualSpecPeaks((prev) => prev.filter((p) => p.id !== id));
     setDismissedSpecPeakIds((prev) => (prev.has(id) ? prev : new Set(prev).add(id)));
-  }, []);
+  }, [undo, chromPeaks, manualChromPeaks, dismissedChromPeakIds, specPeaks, manualSpecPeaks, dismissedSpecPeakIds]);
 
   // --- Chromatographic peak detection ---------------------------------------
   const handleDetectPeaks = useCallback(async () => {
-    if (!activeTrace || !activeRun) return;
+    if (!activeTrace) return;
     setBusy(true);
     try {
       const peaks = await runDetectChromPeaks(activeTrace, peakParams, workerStatus);
-      // Tag the base-peak m/z from the run's basePeakMz array.
-      for (const p of peaks) {
-        if (p.scanApex >= 0 && p.scanApex < activeRun.basePeakMz.length) {
-          const bpm = activeRun.basePeakMz[p.scanApex];
-          p.basePeakMz = Number.isFinite(bpm) ? bpm : null;
-        }
-      }
-      setChromPeaks(peaks);
+      // Tag from the nearest MS scan by RT. The trace's sample index is not
+      // necessarily the run's scan index (UV/FID grids can differ).
+      const tagged = peaks.map((peak) => withBasePeakMz(peak, activeTraceRun));
+      undo.pushSnapshot({
+        chromPeaks: chromPeaks.map((p) => ({ ...p })),
+        manualChromPeaks: manualChromPeaks.map((p) => ({ ...p })),
+        dismissedChromPeakIds: new Set(dismissedChromPeakIds),
+        specPeaks: specPeaks.map((p) => ({ ...p })),
+        manualSpecPeaks: manualSpecPeaks.map((p) => ({ ...p })),
+        dismissedSpecPeakIds: new Set(dismissedSpecPeakIds),
+        label: "Detect peaks",
+      });
+      setChromPeaks(tagged);
       // Fresh ids every run (peakId() in lib/gcms/peaks.ts) — bound the
       // dismissed set's size rather than let it grow across repeated detects.
       setDismissedChromPeakIds(new Set());
-      toast.success(`Detected ${peaks.length} chromatographic peak${peaks.length === 1 ? "" : "s"}`);
+      toast.success(`Detected ${tagged.length} chromatographic peak${tagged.length === 1 ? "" : "s"}`);
     } catch (error) {
       if (!isCancelledError(error)) {
         console.error(error);
@@ -1608,7 +1892,19 @@ const Gcms = () => {
     } finally {
       setBusy(false);
     }
-  }, [activeTrace, activeRun, peakParams, workerStatus]);
+  }, [
+    activeTrace,
+    activeTraceRun,
+    peakParams,
+    workerStatus,
+    undo,
+    chromPeaks,
+    manualChromPeaks,
+    dismissedChromPeakIds,
+    specPeaks,
+    manualSpecPeaks,
+    dismissedSpecPeakIds,
+  ]);
 
   // --- Chrom peak table row click: move the cursor --------------------------
   // Item 8: this no longer clears `selections` — moving the pin updates the
@@ -1621,16 +1917,56 @@ const Gcms = () => {
 
   const handleChromPeakRename = useCallback((id: string, name: string) => {
     setChromPeaks((prev) => prev.map((p) => (p.id === id ? { ...p, name } : p)));
+    setManualChromPeaks((prev) => prev.map((p) => (p.id === id ? { ...p, name } : p)));
   }, []);
+
+  /** Re-integrate a peak after the user edits its explicit RT start/end. The
+   *  same fixed-bound helper used by drag-to-add keeps table edits, plot
+   *  markers, area percentages, and exports on one canonical definition. */
+  const handleChromPeakRangeChange = useCallback(
+    (id: string, rtStart: number, rtEnd: number): string | null => {
+      const current = displayedChromPeaks.find((peak) => peak.id === id);
+      if (!current) return "That peak is no longer available.";
+      const trace = traces.find((candidate) => candidate.id === current.traceId);
+      if (!trace) return "The chromatogram trace for this peak is no longer available.";
+      const reintegrated = integratePeakRange(trace, rtStart, rtEnd, {
+        smoothWindow: peakParams.smoothWindow,
+        minWidthScans: peakParams.minWidthScans,
+        baseline: peakParams.baseline,
+      });
+      if (!reintegrated) return "Start and end must include at least two chromatogram data points.";
+
+      const run = documents.find((doc) => doc.run.id === current.runId)?.run ?? null;
+      const next = withBasePeakMz(
+        { ...reintegrated, id: current.id, name: current.name },
+        run,
+      );
+      setChromPeaks((prev) => prev.map((peak) => (peak.id === id ? next : peak)));
+      setManualChromPeaks((prev) => prev.map((peak) => (peak.id === id ? next : peak)));
+      setSelectedChromPeakId(id);
+      setPinnedRt(next.rtApex);
+      return null;
+    },
+    [displayedChromPeaks, documents, peakParams, traces],
+  );
 
   // Delete works whether `id` belongs to a manual peak (removed outright) or
   // a derived one (dismissed — see the task-D comment above the component).
   // Both branches run unconditionally: a manual id never matches anything in
   // `chromPeaks`, so adding it to the dismissed set too is a harmless no-op.
   const handleChromPeakDelete = useCallback((id: string) => {
+    undo.pushSnapshot({
+      chromPeaks: chromPeaks.map((p) => ({ ...p })),
+      manualChromPeaks: manualChromPeaks.map((p) => ({ ...p })),
+      dismissedChromPeakIds: new Set(dismissedChromPeakIds),
+      specPeaks: specPeaks.map((p) => ({ ...p })),
+      manualSpecPeaks: manualSpecPeaks.map((p) => ({ ...p })),
+      dismissedSpecPeakIds: new Set(dismissedSpecPeakIds),
+      label: "Delete chrom peak",
+    });
     setManualChromPeaks((prev) => prev.filter((p) => p.id !== id));
     setDismissedChromPeakIds((prev) => (prev.has(id) ? prev : new Set(prev).add(id)));
-  }, []);
+  }, [undo, chromPeaks, manualChromPeaks, dismissedChromPeakIds, specPeaks, manualSpecPeaks, dismissedSpecPeakIds]);
 
   // Peak ids are minted fresh on every detection run, so drop the highlight
   // whenever the peak it pointed at is gone (re-detect, trace or run switch,
@@ -1782,8 +2118,11 @@ const Gcms = () => {
       try {
         switch (kind) {
           case "chromCsv": {
-            const vis = traces.filter((t) => t.visible);
-            downloadText(`${baseName}-chromatogram.csv`, chromatogramCsv(vis), "text/csv");
+            downloadText(
+              `${baseName}-chromatogram.csv`,
+              chromatogramCsv(visibleChromTraces),
+              "text/csv",
+            );
             break;
           }
           case "spectrumCsv": {
@@ -1796,7 +2135,11 @@ const Gcms = () => {
             break;
           }
           case "spectrumPeakCsv": {
-            downloadText(`${baseName}-spectrum-peaks.csv`, spectrumPeakCsv(displayedSpecPeaks), "text/csv");
+            downloadText(
+              `${baseName}-spectrum-peaks.csv`,
+              spectrumPeakCsv(displayedSpectrumPeakRows),
+              "text/csv",
+            );
             break;
           }
           case "msp": {
@@ -1859,20 +2202,20 @@ const Gcms = () => {
       }
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [activeRun, activeDoc, traces, displayedChromPeaks, displayedSpecPeaks, liveSpectrum, exportScale],
+    [activeRun, activeDoc, visibleChromTraces, displayedChromPeaks, displayedSpecPeaks, displayedSpectrumPeakRows, liveSpectrum, exportScale],
   );
 
   /** Build the two-panel report spec from the current chromatogram + spectrum. */
   function buildReportPanels(): { top: ReportPanelSpec; bottom: ReportPanelSpec } {
-    const visTraces = traces.filter((t) => t.visible);
     const top: ReportPanelSpec = {
       title: "Chromatogram",
       xLabel: "Retention time (min)",
-      traces: visTraces.map((t) => ({
+      traces: visibleChromTraces.map((t) => ({
         x: t.rtMin,
         y: t.intensity,
         color: t.color,
         width: 1,
+        label: t.label,
       })),
       drawMode: "line",
       labels: displayedChromPeaks.map((p) => ({
@@ -2001,19 +2344,20 @@ const Gcms = () => {
                 >
                   Detect peaks
                 </Button>
-                {/* Add peak (task B): arms a click-to-integrate mode on the
-                    chromatogram. While armed, GcmsPlot's trace-pick is
-                    disabled (onPickTrace={null} below) so a click can only
-                    mean "add a peak here", never "switch the active trace". */}
+                {/* Add peak is intentionally drag-only: the user supplies the
+                    integration start/end instead of a click asking the system
+                    to discover an apex and valleys. */}
                 <Button
+                  type="button"
                   size="sm"
                   variant={addPeakArmed ? "default" : "outline"}
                   className="h-8"
                   onClick={() => setAddPeakArmed((v) => !v)}
                   disabled={!activeTrace}
-                  title="Click the chromatogram to add a peak at that retention time"
+                  aria-pressed={addPeakArmed}
+                  title="Drag across the full chromatographic peak to set its integration range"
                 >
-                  Add peak
+                  {addPeakArmed ? "Drag peak region" : "Add peak"}
                 </Button>
                 <Button
                   size="sm"
@@ -2031,6 +2375,7 @@ const Gcms = () => {
                   className="h-8"
                   onClick={() => {
                     setSelections([]);
+                    setSelectionRunId(null);
                     setSlots((prev) => prev.filter((s) => s.id !== "bg"));
                     setPinnedRt(null);
                   }}
@@ -2049,7 +2394,8 @@ const Gcms = () => {
                     <div className="flex flex-col gap-1">
                       <p className="font-semibold text-foreground">Shortcuts</p>
                       <p><span className="font-mono">Hover</span> — RT cursor follows; readout + spectrum live-update</p>
-                      <p><span className="font-mono">Click</span> — pin the scan (or add a peak, while "Add peak" is armed)</p>
+                      <p><span className="font-mono">Click</span> — pin the scan (disabled while Add peak is armed)</p>
+                      <p><span className="font-mono">Add peak + drag</span> — set the peak's exact RT start/end</p>
                       <p><span className="font-mono">← / →</span> — step the pinned scan by ±1 (±10 with Shift)</p>
                       <p><span className="font-mono">Drag</span> — x zoom</p>
                       <p><span className="font-mono">Shift + drag</span> — set the summed-spectrum window</p>
@@ -2057,6 +2403,7 @@ const Gcms = () => {
                       <p><span className="font-mono">Wheel</span> — y scaling (minimum pinned at 0)</p>
                       <p><span className="font-mono">Shift + scroll</span> — scale the active trace</p>
                       <p><span className="font-mono">Double-click</span> — pop one level of zoom, else full range</p>
+                      <p><span className="font-mono">Ctrl/Cmd + Z</span> — Undo last peak action</p>
                     </div>
                   </PopoverContent>
                 </Popover>
@@ -2191,7 +2538,7 @@ const Gcms = () => {
                       <ResizablePanel defaultSize={38} minSize={20}>
                         <div className="h-full min-h-0">
                           <ChromatogramPanel
-                            traces={[...traces, ...bgTraces].filter((t) => t.visible && (t.kind === "TIC-bg" || docVisibleByRunId.get(t.runId) !== false))}
+                            traces={visibleChromTraces}
                             peaks={displayedChromPeaks}
                             cursorRt={cursorRt}
                             selections={visibleSelections}
@@ -2202,14 +2549,14 @@ const Gcms = () => {
                             normalize={normalize}
                             stacked={stacked}
                             logY={logY}
-                            dragMode={mode}
+                            dragMode={addPeakArmed ? "select" : mode}
                             captureRef={chromCaptureRef}
                             onHoverRt={handleHoverRt}
                             onPinRt={handlePinRt}
                             onSelectRange={handleSelectRange}
-                            // Disabled while "Add peak" is armed so a click can
-                            // only mean "integrate a peak here", never "switch
-                            // the active trace" (task B's coherence constraint).
+                            // Disabled while "Add peak" is armed: the selected
+                            // region is always integrated on the visibly active
+                            // trace, never whichever overlaid line was clicked.
                             onPickTrace={addPeakArmed ? undefined : setActiveTraceId}
                             onScaleTrace={handleScaleTrace}
                           />
@@ -2262,6 +2609,7 @@ const Gcms = () => {
                             selectedPeakId={selectedChromPeakId}
                             onRowClick={handleChromPeakRowClick}
                             onRename={handleChromPeakRename}
+                            onRangeChange={handleChromPeakRangeChange}
                             onDelete={handleChromPeakDelete}
                           />
                         </div>
@@ -2269,10 +2617,13 @@ const Gcms = () => {
                       <TabsContent value="spectrum-peaks" className="mt-3">
                         <div className="h-[420px]">
                           <SpectrumPeakTable
-                            peaks={displayedSpecPeaks}
+                            peaks={displayedSpectrumPeakRows}
+                            sources={spectrumPeakSources}
+                            sourceId={spectrumPeakSourceId}
+                            onSourceChange={setSpectrumPeakSourceId}
                             onXicSelected={handleXicSelected}
-                            onAddPeak={handleAddSpecPeak}
-                            onDeletePeak={handleSpecPeakDelete}
+                            onAddPeak={spectrumPeakSourceId === "live" ? handleAddSpecPeak : undefined}
+                            onDeletePeak={spectrumPeakSourceId === "live" ? handleSpecPeakDelete : undefined}
                           />
                         </div>
                       </TabsContent>
@@ -2303,6 +2654,8 @@ const Gcms = () => {
                           onToggleSpectrum={handleToggleFigSlot}
                           labelPeaks={figLabelPeaks}
                           onLabelPeaksChange={setFigLabelPeaks}
+                          stackSpectra={figStackSpectra}
+                          onStackSpectraChange={setFigStackSpectra}
                           hiddenPeakCount={figHiddenPeakCount}
                           onRestorePeaks={handleFigureRestorePeaks}
                           onDeletePeak={handleFigureDeletePeak}
@@ -2370,6 +2723,22 @@ async function runBuildXic(
     return trace;
   }
   return buildXicMain(run, mzList, tol, mode);
+}
+
+/** Build one independent XIC per m/z in one worker request (or synchronously
+ *  through the identical main-thread helper when the worker is unavailable). */
+async function runBuildXics(
+  run: MsRun,
+  mzList: number[],
+  tol: number,
+  status: WorkerStatus,
+  options?: CallOptions,
+): Promise<ChromTrace[]> {
+  if (status === "ready") {
+    const { traces } = await buildXicsWorker(run, mzList, tol, options);
+    return traces;
+  }
+  return buildXicsMain(run, mzList, tol);
 }
 
 /**

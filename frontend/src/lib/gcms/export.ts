@@ -16,6 +16,7 @@ import type {
   MsRun,
   RunMeta,
   SpecPeak,
+  SpectrumPeakRow,
 } from "./types";
 
 // ---------------------------------------------------------------------------
@@ -139,12 +140,24 @@ export function spectrumCsv(spec: MassSpectrum): string {
   return csvText(rows);
 }
 
-/** "rt,height,area,area%,width,basePeakMz,name" */
+/** Peak apex plus the user-visible integration boundaries and derived values. */
 export function chromPeakCsv(peaks: ChromPeak[]): string {
-  const rows: string[][] = [["rt", "height", "area", "area%", "width", "basePeakMz", "name"]];
+  const rows: string[][] = [[
+    "rt",
+    "rtStart",
+    "rtEnd",
+    "height",
+    "area",
+    "area%",
+    "width",
+    "basePeakMz",
+    "name",
+  ]];
   for (const p of peaks) {
     rows.push([
       fmtRt(p.rtApex),
+      fmtRt(p.rtStart),
+      fmtRt(p.rtEnd),
       fmtIntensity(p.height),
       fmtIntensity(p.area),
       fmtRel(p.areaPct),
@@ -156,11 +169,29 @@ export function chromPeakCsv(peaks: ChromPeak[]): string {
   return csvText(rows);
 }
 
-/** "m/z,intensity,rel%" for a picked peak list. */
-export function spectrumPeakCsv(peaks: SpecPeak[]): string {
-  const rows: string[][] = [["m/z", "intensity", "rel%"]];
+/** Picked spectrum peaks. Provenance columns are included when the table rows
+ * identify a live view or chromatographic source peak. */
+export function spectrumPeakCsv(peaks: (SpecPeak | SpectrumPeakRow)[]): string {
+  const withSources = peaks.some((peak) => "sourceLabel" in peak);
+  const rows: string[][] = [
+    withSources
+      ? ["chromatogramPeak", "rtStart", "rtEnd", "m/z", "intensity", "rel%"]
+      : ["m/z", "intensity", "rel%"],
+  ];
   for (const p of peaks) {
-    rows.push([fmtMz(p.mz), fmtIntensity(p.intensity), fmtRel(p.relPct)]);
+    if (withSources) {
+      const sourced = p as SpectrumPeakRow;
+      rows.push([
+        sourced.sourceLabel ?? "",
+        sourced.sourceRtStart == null ? "" : fmtRt(sourced.sourceRtStart),
+        sourced.sourceRtEnd == null ? "" : fmtRt(sourced.sourceRtEnd),
+        fmtMz(p.mz),
+        fmtIntensity(p.intensity),
+        fmtRel(p.relPct),
+      ]);
+    } else {
+      rows.push([fmtMz(p.mz), fmtIntensity(p.intensity), fmtRel(p.relPct)]);
+    }
   }
   return csvText(rows);
 }
@@ -296,7 +327,7 @@ export function metadataText(run: MsRun): string {
 export interface ReportPanelSpec {
   title: string;
   xLabel: string;
-  traces: { x: Float64Array; y: Float64Array; color: string; width: number }[];
+  traces: { x: Float64Array; y: Float64Array; color: string; width: number; label?: string }[];
   drawMode: "line" | "stick";
   labels: { x: number; y: number; lines: string[]; priority: number }[];
 }
@@ -322,6 +353,10 @@ const LABEL_LINE_HEIGHT = 13;
 const LABEL_CHAR_WIDTH = 6.6;
 const TICK_FONT = "10px ui-sans-serif, system-ui, sans-serif";
 const TITLE_FONT = "11px ui-sans-serif, system-ui, sans-serif";
+const LEGEND_ROW_HEIGHT = 13;
+/** Keep the fixed-height report useful even when hundreds of separate XICs
+ * are present. The final visible item summarizes every omitted trace. */
+const MAX_LEGEND_ROWS = 3;
 
 interface PanelLayout {
   left: number;
@@ -344,6 +379,7 @@ interface PanelLayout {
   yTicks: number[];
   // Traces with points already converted to PIXEL coordinates.
   traces: { pts: Array<[number, number]>; color: string; width: number; mode: "line" | "stick" }[];
+  legend: { label: string; color: string | null; x: number; y: number }[];
   placed: PlacedLabel[];
   // Recomputed label box sizes (w/h) aligned with `placed` for leader drawing.
   boxes: { w: number; h: number }[];
@@ -381,6 +417,78 @@ function boxSizeFor(lines: string[]): { w: number; h: number } {
   return { w: maxLen * LABEL_CHAR_WIDTH, h: lines.length * LABEL_LINE_HEIGHT };
 }
 
+interface LegendSource {
+  label: string;
+  color: string | null;
+}
+
+/** Lay out one candidate legend, returning null when it needs too many rows. */
+function packLegend(
+  items: LegendSource[],
+  plotLeft: number,
+  top: number,
+  plotWidth: number,
+  maxRows: number,
+): { items: PanelLayout["legend"]; rows: number } | null {
+  const packed: PanelLayout["legend"] = [];
+  let row = 0;
+  let cursor = 0;
+  for (const item of items) {
+    // A summary has no colour swatch, so it needs less horizontal space.
+    const itemWidth = (item.color == null ? 0 : 18) + item.label.length * 5.5;
+    if (cursor > 0 && cursor + itemWidth > plotWidth) {
+      row += 1;
+      cursor = 0;
+    }
+    if (row >= maxRows) return null;
+    packed.push({
+      ...item,
+      x: plotLeft + cursor,
+      y: top + MARGIN_TOP + row * LEGEND_ROW_HEIGHT,
+    });
+    cursor += itemWidth + 10;
+  }
+  return { items: packed, rows: items.length > 0 ? row + 1 : 0 };
+}
+
+/** Preserve as many m/z-to-colour mappings as fit, then state exactly how
+ * many traces were omitted rather than allowing the legend to crush the plot. */
+function boundedLegend(
+  labelled: { label?: string; color: string }[],
+  plotLeft: number,
+  top: number,
+  plotWidth: number,
+): { items: PanelLayout["legend"]; rows: number } {
+  if (labelled.length <= 1) return { items: [], rows: 0 };
+  const all = labelled.map((trace) => ({ label: trace.label!, color: trace.color }));
+  const full = packLegend(all, plotLeft, top, plotWidth, MAX_LEGEND_ROWS);
+  if (full) return full;
+
+  // Find the largest prefix that still leaves room for an explicit overflow
+  // summary. Continue through every prefix because the summary can become one
+  // character shorter when its count crosses a power-of-ten boundary.
+  let best = packLegend(
+    [{ label: `+${all.length} more traces`, color: null }],
+    plotLeft,
+    top,
+    plotWidth,
+    MAX_LEGEND_ROWS,
+  )!;
+  for (let visibleCount = 1; visibleCount < all.length; visibleCount += 1) {
+    const omitted = all.length - visibleCount;
+    const summary = `+${omitted} more trace${omitted === 1 ? "" : "s"}`;
+    const candidate = packLegend(
+      [...all.slice(0, visibleCount), { label: summary, color: null }],
+      plotLeft,
+      top,
+      plotWidth,
+      MAX_LEGEND_ROWS,
+    );
+    if (candidate) best = candidate;
+  }
+  return best;
+}
+
 function layoutPanel(
   spec: ReportPanelSpec,
   left: number,
@@ -389,8 +497,16 @@ function layoutPanel(
   height: number,
 ): PanelLayout {
   const plotLeft = left + MARGIN_LEFT;
-  const plotTop = top + MARGIN_TOP;
   const plotRight = left + width - MARGIN_RIGHT;
+  const basePlotWidth = Math.max(1, plotRight - plotLeft);
+  const labelled = spec.traces.filter((trace) => trace.label);
+  const { items: legend, rows: legendRows } = boundedLegend(
+    labelled,
+    plotLeft,
+    top,
+    basePlotWidth,
+  );
+  const plotTop = top + MARGIN_TOP + legendRows * LEGEND_ROW_HEIGHT;
   const plotBottom = top + height - MARGIN_BOTTOM;
   const plotWidth = Math.max(1, plotRight - plotLeft);
   const plotHeight = Math.max(1, plotBottom - plotTop);
@@ -476,6 +592,7 @@ function layoutPanel(
     xTicks: niceTicks(xMin, xMax, 6),
     yTicks: niceTicks(yMin, yMax, 5),
     traces,
+    legend,
     placed,
     boxes,
   };
@@ -504,6 +621,18 @@ function svgPanel(p: PanelLayout, theme: ReportTheme): string {
   parts.push(
     `<text x="${p.left + 4}" y="${p.top + 14}" font-family="ui-sans-serif, system-ui, sans-serif" font-size="11" fill="${theme.muted}">${xmlEsc(p.title)}</text>`,
   );
+  // Trace legend lives in reserved space between the title and plot, so
+  // separated XIC colours remain attributable to their m/z in standalone SVG.
+  for (const item of p.legend) {
+    if (item.color != null) {
+      parts.push(
+        `<line x1="${item.x}" y1="${item.y + 5}" x2="${item.x + 10}" y2="${item.y + 5}" stroke="${item.color}" stroke-width="2"/>`,
+      );
+    }
+    parts.push(
+      `<text x="${item.x + (item.color == null ? 0 : 14)}" y="${item.y + 8}" font-family="ui-sans-serif, system-ui, sans-serif" font-size="9" fill="${theme.muted}">${xmlEsc(item.label)}</text>`,
+    );
+  }
   // Y axis ticks + labels.
   for (const t of p.yTicks) {
     const y = p.plotTop + p.plotHeight - ((t - p.yMin) / (p.yMax - p.yMin || 1)) * p.plotHeight;
@@ -599,6 +728,25 @@ function canvasPanel(ctx: CanvasRenderingContext2D, p: PanelLayout, theme: Repor
   ctx.textAlign = "left";
   ctx.textBaseline = "alphabetic";
   ctx.fillText(p.title, p.left + 4, p.top + 14);
+  // Same reserved-space legend as SVG, preserving m/z-to-colour provenance.
+  ctx.font = "9px ui-sans-serif, system-ui, sans-serif";
+  ctx.textBaseline = "alphabetic";
+  for (const item of p.legend) {
+    if (item.color != null) {
+      ctx.strokeStyle = item.color;
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(item.x, item.y + 5);
+      ctx.lineTo(item.x + 10, item.y + 5);
+      ctx.stroke();
+    }
+    ctx.fillStyle = theme.muted;
+    ctx.fillText(item.label, item.x + (item.color == null ? 0 : 14), item.y + 8);
+  }
+  // Legend swatches change both properties; axes must retain their normal
+  // neutral border styling in PNG just as they do in the SVG renderer.
+  ctx.strokeStyle = theme.border;
+  ctx.lineWidth = 1;
   // Y ticks.
   ctx.font = TICK_FONT;
   ctx.textAlign = "right";

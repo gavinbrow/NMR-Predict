@@ -31,6 +31,13 @@ function safeName(name: string): string {
   return (name || "maldi").replace(/[^a-z0-9_-]+/gi, "-").replace(/^-+|-+$/g, "") || "maldi";
 }
 
+function formatEquation(slope: number, intercept: number): string {
+  const slopeStr = slope.toFixed(4);
+  if (Math.abs(intercept) < 1e-6) return `y = ${slopeStr}·n`;
+  const sign = intercept < 0 ? "-" : "+";
+  return `y = ${slopeStr}·n ${sign} ${Math.abs(intercept).toFixed(4)}`;
+}
+
 function triggerDownload(blob: Blob, filename: string): void {
   const url = URL.createObjectURL(blob);
   const anchor = document.createElement("a");
@@ -200,6 +207,8 @@ export interface ReportPayload {
   findings?: Finding[];
   /** PNG data URL of the on-screen spectrum, captured by the caller. */
   spectrumPng?: string | null;
+  /** Ids of series currently selected/highlighted in the UI. Empty = export all. */
+  selectedSeriesIds?: string[];
 }
 
 function topPeaks(peaks: Peak[], limit: number): Peak[] {
@@ -572,67 +581,154 @@ export async function exportReportExcel(payload: ReportPayload): Promise<void> {
   summary.getColumn(1).width = 32;
   summary.getColumn(2).width = 80;
 
-  // Peaks.
-  const peakSheet = wb.addWorksheet("Peaks");
-  peakSheet.addRow(["m/z", "intensity", "S/N", "width", "confidence", "accepted", "flag", "label"]).font = { bold: true };
-  for (const p of [...payload.peaks].sort((a, b) => (a.centroid ?? a.mz) - (b.centroid ?? b.mz))) {
-    peakSheet.addRow([
-      p.centroid ?? p.mz,
-      p.intensity,
-      p.snr ?? "",
-      p.width ?? "",
-      p.confidence ?? "",
-      p.accepted === false ? "no" : "yes",
-      p.flag ?? "",
-      p.label ?? "",
-    ]);
-  }
-  peakSheet.columns.forEach((c) => (c.width = 14));
+  // Series (consolidated sheet: raw peaks at the top, then one block per
+  // selected series with live formulas for n, predicted, end group and R²).
+  const selectedIds = payload.selectedSeriesIds ?? [];
+  const seriesToExport = selectedIds.length ? payload.series.filter((s) => selectedIds.includes(s.id)) : payload.series;
+  const ws = wb.addWorksheet("Series");
+  const colWidths = [8, 14, 14, 14, 14, 14, 14];
+  ws.columns.forEach((c, i) => {
+    if (i < colWidths.length) c.width = colWidths[i];
+  });
 
-  // Series.
-  if (payload.series.length) {
-    const seriesSheet = wb.addWorksheet("Series");
-    seriesSheet.addRow(["adduct", "label", "description", "endGroupLabel", "repeatMass", "endGroupMass", "members", "meanErrorDa", "score", "n", "peakId"]).font = { bold: true };
-    for (const s of payload.series) {
-      const adduct = adductById(payload.adducts, s.adductId).label;
-      for (const m of s.members) {
-        seriesSheet.addRow([adduct, s.label ?? "", s.description ?? "", s.endGroupLabel ?? "", s.repeatMass, s.endGroupMass, s.members.length, s.meanErrorDa ?? "", s.score, m.n, m.peakId]);
-      }
-    }
-    seriesSheet.columns.forEach((c) => (c.width = 14));
+  ws.getCell("A1").value = "Raw peaks";
+  ws.getCell("A1").font = { bold: true };
+  ws.mergeCells("A1:H1");
+  const peakHeaderRow = 2;
+  ws.getCell(`A${peakHeaderRow}`).value = "m/z";
+  ws.getCell(`B${peakHeaderRow}`).value = "intensity";
+  ws.getCell(`C${peakHeaderRow}`).value = "S/N";
+  ws.getCell(`D${peakHeaderRow}`).value = "width";
+  ws.getCell(`E${peakHeaderRow}`).value = "confidence";
+  ws.getCell(`F${peakHeaderRow}`).value = "accepted";
+  ws.getCell(`G${peakHeaderRow}`).value = "flag";
+  ws.getCell(`H${peakHeaderRow}`).value = "label";
+  for (let c = 1; c <= 8; c += 1) ws.getCell(peakHeaderRow, c).font = { bold: true };
+  const sortedPeaks = [...payload.peaks].sort((a, b) => (a.centroid ?? a.mz) - (b.centroid ?? b.mz));
+  for (let i = 0; i < sortedPeaks.length; i += 1) {
+    const p = sortedPeaks[i];
+    const r = peakHeaderRow + 1 + i;
+    ws.getCell(`A${r}`).value = p.centroid ?? p.mz;
+    ws.getCell(`A${r}`).numFmt = "0.0000";
+    ws.getCell(`B${r}`).value = p.intensity;
+    ws.getCell(`C${r}`).value = p.snr ?? "";
+    ws.getCell(`D${r}`).value = p.width ?? "";
+    ws.getCell(`E${r}`).value = p.confidence ?? "";
+    ws.getCell(`F${r}`).value = p.accepted === false ? "no" : "yes";
+    ws.getCell(`G${r}`).value = p.flag ?? "";
+    ws.getCell(`H${r}`).value = p.label ?? "";
   }
+  ws.getColumn(8).width = 28;
+  let row = peakHeaderRow + 1 + sortedPeaks.length + 2;
 
-  // End-group regression: per-end-group stats + the mass-vs-n points (so the user
-  // can re-plot in Excel), each annotated with the fitted repeat, end group and R².
-  const egFits = collectEndGroupFits(payload);
-  if (egFits.length) {
-    const egSheet = wb.addWorksheet("End groups");
-    egSheet.addRow(["End-group regression: neutral mass = end group + n × repeat"]).font = { bold: true };
-    egSheet.addRow([]);
-    // Summary table.
-    egSheet.addRow(["adduct", "end group (mod repeat)", "repeat fit (Da)", "end group fit (Da)", "R²", "points", "library match"]).font = { bold: true };
-    for (const f of egFits) {
-      egSheet.addRow([
-        f.adductLabel,
-        Number(f.residualMass.toFixed(4)),
-        Number(f.repeatFit.toFixed(4)),
-        Number(f.endGroupFit.toFixed(4)),
-        Number(f.r2.toFixed(5)),
-        f.points.length,
-        f.libraryMatch ?? "",
-      ]);
-    }
-    egSheet.addRow([]);
-    // Per-fit point tables (for charting in Excel).
-    for (const f of egFits) {
-      egSheet.addRow([`${f.adductLabel} · end ${f.residualMass.toFixed(2)} Da · R² ${f.r2.toFixed(4)}`]).font = { bold: true };
-      egSheet.addRow(["n", "observed mass (Da)", "predicted mass (Da)", "residual (Da)"]).font = { bold: true };
-      for (const p of f.points) {
-        egSheet.addRow([p.n, Number(p.mass.toFixed(4)), Number(p.predicted.toFixed(4)), Number((p.mass - p.predicted).toFixed(4))]);
+  if (seriesToExport.length) {
+    const peakById = new Map(payload.peaks.map((p) => [p.id, p] as const));
+
+    ws.getCell(`A${row}`).value = "Series";
+    ws.getCell(`A${row}`).font = { bold: true };
+    ws.mergeCells(`A${row}:G${row}`);
+    row += 2;
+
+    for (let seriesIndex = 0; seriesIndex < seriesToExport.length; seriesIndex += 1) {
+      const s = seriesToExport[seriesIndex];
+      const adduct = adductById(payload.adducts, s.adductId);
+      const members = [...s.members].sort((a, b) => a.n - b.n);
+      const xs: number[] = [];
+      const ys: number[] = [];
+      const points: { peak: Peak; n: number; rawMz: number; neutral: number }[] = [];
+      for (const m of members) {
+        const peak = peakById.get(m.peakId);
+        if (!peak) continue;
+        const rawMz = peak.centroid ?? peak.mz;
+        const neutral = neutralMass(rawMz, adduct);
+        xs.push(m.n);
+        ys.push(neutral);
+        points.push({ peak, n: m.n, rawMz, neutral });
       }
-      egSheet.addRow([]);
+      if (points.length < 2) continue;
+
+      const { slope, intercept, r2 } = linearFit(xs, ys);
+      const firstNRow = row + 5;
+      const lastNRow = firstNRow + points.length - 1;
+      const nCol = "A";
+      const rawCol = "B";
+      const neutralCol = "D";
+      const predictedCol = "E";
+      const residualCol = "F";
+      const nRange = `${nCol}${firstNRow}:${nCol}${lastNRow}`;
+      const neutralRange = `${neutralCol}${firstNRow}:${neutralCol}${lastNRow}`;
+      const slopeCell = `B${row + 1}`;
+      const interceptCell = `D${row + 1}`;
+
+      ws.getCell(`A${row}`).value = `Series ${seriesIndex + 1}`;
+      ws.getCell(`A${row}`).font = { bold: true };
+      ws.mergeCells(`A${row}:G${row}`);
+      row += 1;
+
+      const endGroupLabel = s.endGroupLabel ? ` (${s.endGroupLabel})` : "";
+      ws.getCell(`A${row}`).value = `Adduct: ${adduct.id} (${adduct.label})`;
+      ws.getCell(`B${row}`).value = "Slope =";
+      ws.getCell(`C${row}`).value = { formula: `SLOPE(${neutralRange},${nRange})` };
+      ws.getCell(`C${row}`).numFmt = "0.0000";
+      ws.getCell(`D${row}`).value = "Intercept =";
+      ws.getCell(`E${row}`).value = { formula: `INTERCEPT(${neutralRange},${nRange})` };
+      ws.getCell(`E${row}`).numFmt = "0.0000\" Da\"";
+      ws.getCell(`F${row}`).value = "R² =";
+      ws.getCell(`G${row}`).value = { formula: `RSQ(${neutralRange},${nRange})` };
+      ws.getCell(`G${row}`).numFmt = "0.0000";
+      row += 1;
+
+      ws.getCell(`A${row}`).value = `Repeat: ${s.repeatMass.toFixed(2)} Da`;
+      ws.getCell(`B${row}`).value = `End group: ${s.endGroupMass.toFixed(2)} Da${endGroupLabel}`;
+      ws.mergeCells(`B${row}:G${row}`);
+      row += 1;
+
+      ws.getCell(`A${row}`).value = `Equation: ${formatEquation(slope, intercept)}`;
+      ws.mergeCells(`A${row}:G${row}`);
+      row += 1;
+
+      ws.getCell(`A${row}`).value = "(Edit the top n cell — the n column, predicted, residual, slope, intercept and R² all recalculate.)";
+      ws.mergeCells(`A${row}:G${row}`);
+      ws.getCell(`A${row}`).font = { italic: true };
+      row += 1;
+
+      ws.getCell(`A${row}`).value = "n";
+      ws.getCell(`B${row}`).value = "m/z (raw)";
+      ws.getCell(`C${row}`).value = "intensity";
+      ws.getCell(`D${row}`).value = "neutral mass";
+      ws.getCell(`E${row}`).value = "predicted";
+      ws.getCell(`F${row}`).value = "residual";
+      ws.getCell(`G${row}`).value = "fit line";
+      for (let c = 1; c <= 7; c += 1) ws.getCell(row, c).font = { bold: true };
+      row += 1;
+
+      for (let i = 0; i < points.length; i += 1) {
+        const pt = points[i];
+        const currentRow = row + i;
+        const nCell = `${nCol}${currentRow}`;
+        const neutralCell = `${neutralCol}${currentRow}`;
+        const predictedCell = `${predictedCol}${currentRow}`;
+
+        ws.getCell(`A${currentRow}`).value = i === 0 ? pt.n : { formula: `=${nCol}${currentRow - 1}+1` };
+        ws.getCell(`B${currentRow}`).value = pt.rawMz;
+        ws.getCell(`B${currentRow}`).numFmt = "0.0000";
+        ws.getCell(`C${currentRow}`).value = pt.peak.intensity;
+        ws.getCell(`D${currentRow}`).value = pt.neutral;
+        ws.getCell(`D${currentRow}`).numFmt = "0.0000";
+        ws.getCell(`E${currentRow}`).value = { formula: `=${slopeCell}*${nCell}+${interceptCell}` };
+        ws.getCell(`E${currentRow}`).numFmt = "0.0000";
+        ws.getCell(`F${currentRow}`).value = { formula: `=${neutralCell}-${predictedCell}` };
+        ws.getCell(`F${currentRow}`).numFmt = "0.0000";
+        ws.getCell(`G${currentRow}`).value = { formula: `=${slopeCell}*${nCell}+${interceptCell}` };
+        ws.getCell(`G${currentRow}`).numFmt = "0.0000";
+      }
+      row += points.length;
+
+      ws.getCell(`A${row}`).value = "Select the n and neutral mass columns, insert an Excel scatter chart, and add a linear trendline.";
+      ws.mergeCells(`A${row}:G${row}`);
+      row += 1;
+      row += 1;
     }
-    egSheet.columns.forEach((c) => (c.width = 20));
   }
 
   // Spectrum image.

@@ -17,6 +17,12 @@ export interface MaldiSpectrumPlotHandle {
    * documents' traces — then restores both the view and the overlay visibility.
    */
   getPng: (opts?: { primaryOnly?: boolean }) => string | null;
+  /**
+   * Snapshot the rendered canvas for a report: full m/z range, all assigned
+   * series shown in their ladder colours, and no isolation. Restores the user's
+   * on-screen state after the capture.
+   */
+  getReportPng: () => string | null;
 }
 
 /** A simulated isotope stick (m/z, relative abundance 0..1) drawn over the data. */
@@ -57,6 +63,13 @@ interface MaldiSpectrumPlotProps {
    *  group's peaks are drawn in its colour; takes precedence over
    *  `highlightedPeakIds` for any peak it contains. */
   highlightGroups?: { color: string; ids: Set<string> }[];
+  /**
+   * Peak-id → colour map for report captures. When non-empty,
+   * `getReportPng()` will temporarily force every listed peak to be coloured
+   * (in its series colour) and will ignore the current isolate/highlight state.
+   * Hosts build this from the full set of confirmed series.
+   */
+  reportSeriesColors?: Map<string, string>;
   /** Simulated isotope pattern to overlay as sticks (null/empty hides it). */
   overlaySticks?: OverlayStick[] | null;
   /** Manually add a peak (click-to-pick mode snaps to the nearest apex). */
@@ -209,6 +222,7 @@ export const MaldiSpectrumPlot = forwardRef<MaldiSpectrumPlotHandle, MaldiSpectr
       peaks,
       highlightedPeakIds,
       highlightGroups,
+      reportSeriesColors,
       overlaySticks,
       onAddPeak,
       onRemovePeak,
@@ -279,6 +293,7 @@ export const MaldiSpectrumPlot = forwardRef<MaldiSpectrumPlotHandle, MaldiSpectr
     const showLabelsRef = useRef(showLabels);
     const highlightRef = useRef(highlightedPeakIds);
     const groupColorsRef = useRef(groupColors);
+    const reportSeriesColorsRef = useRef(reportSeriesColors);
     const measureRef = useRef(measure);
     const overlayRef = useRef(overlaySticks);
     const isolateRef = useRef(isolate);
@@ -316,6 +331,7 @@ export const MaldiSpectrumPlot = forwardRef<MaldiSpectrumPlotHandle, MaldiSpectr
     showLabelsRef.current = showLabels;
     highlightRef.current = highlightedPeakIds;
     groupColorsRef.current = groupColors;
+    reportSeriesColorsRef.current = reportSeriesColors;
     measureRef.current = measure;
     overlayRef.current = overlaySticks;
     isolateRef.current = isolate;
@@ -384,7 +400,7 @@ export const MaldiSpectrumPlot = forwardRef<MaldiSpectrumPlotHandle, MaldiSpectr
     // report about the active document doesn't silently embed the other open
     // documents' traces. (WP3 §9 — once overlays share the canvas, the report's
     // `spectrumPng` would otherwise contain every visible document.)
-    const captureFullPng = (primaryOnly = false): string | null => {
+    const doCapturePng = (primaryOnly: boolean, reportMode: boolean): string | null => {
       const plot = plotRef.current;
       if (!plot) return null;
       const apply = applyViewRef.current;
@@ -436,13 +452,44 @@ export const MaldiSpectrumPlot = forwardRef<MaldiSpectrumPlotHandle, MaldiSpectr
       }
       return url;
     };
+
+    const captureFullPng = (primaryOnly = false): string | null => doCapturePng(primaryOnly, false);
+
+    const captureReportPng = (): string | null => {
+      const reportColors = reportSeriesColorsRef.current;
+      const plot = plotRef.current;
+      if (!plot) return null;
+      const savedIsolate = isolateRef.current;
+      const savedHighlight = highlightRef.current;
+      const savedGroupColors = groupColorsRef.current;
+      const reportGroupSet = reportColors && reportColors.size > 0
+        ? new Map(reportColors)
+        : new Map<string, string>();
+      try {
+        isolateRef.current = false;
+        highlightRef.current = undefined;
+        groupColorsRef.current = reportGroupSet;
+        plot.redraw();
+        const url = captureFullPng(true);
+        return url;
+      } finally {
+        isolateRef.current = savedIsolate;
+        highlightRef.current = savedHighlight;
+        groupColorsRef.current = savedGroupColors;
+        plot.redraw();
+      }
+    };
+
     const captureFullPngRef = useRef(captureFullPng);
     captureFullPngRef.current = captureFullPng;
+    const captureReportPngRef = useRef(captureReportPng);
+    captureReportPngRef.current = captureReportPng;
 
     useImperativeHandle(
       ref,
       () => ({
         getPng: (opts?: { primaryOnly?: boolean }) => captureFullPngRef.current(opts?.primaryOnly ?? false),
+        getReportPng: () => captureReportPngRef.current(),
       }),
       [],
     );

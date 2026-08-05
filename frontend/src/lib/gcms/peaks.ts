@@ -113,6 +113,55 @@ function computeRollingMin(raw: Float64Array, win: number): Float64Array {
 }
 
 /**
+ * Integrate the raw trace between two already-resolved sample indices. The
+ * bounds are authoritative: this helper never expands them or applies a peak
+ * width/height test. `rollingMin`, when supplied, must be aligned to the full
+ * trace (the same contract used by automatic peak detection).
+ */
+function integrateBoundedArea(
+  trace: ChromTrace,
+  left: number,
+  right: number,
+  baseline: DetectChromPeaksOpts["baseline"],
+  rollingMin: Float64Array | null,
+): number {
+  const rt = trace.rtMin;
+  const raw = trace.intensity;
+  const width = right - left + 1;
+  if (width < 2) return 0;
+
+  if (baseline === "valley") {
+    // Straight line joining the two user/detector boundary samples.
+    const y0 = raw[left];
+    const y1 = raw[right];
+    const corrected = new Float64Array(width);
+    for (let k = 0; k < width; k += 1) {
+      const t = k / (width - 1);
+      const base = y0 + t * (y1 - y0);
+      corrected[k] = Math.max(0, raw[left + k] - base);
+    }
+    return trapezoid(rt.subarray(left, right + 1), corrected, 0, width - 1);
+  }
+
+  if (baseline === "rolling" && rollingMin) {
+    const corrected = new Float64Array(width);
+    for (let k = 0; k < width; k += 1) {
+      corrected[k] = Math.max(0, raw[left + k] - rollingMin[left + k]);
+    }
+    return trapezoid(rt.subarray(left, right + 1), corrected, 0, width - 1);
+  }
+
+  // "none" integrates the raw signal against a zero baseline. The rolling branch also falls
+  // back here if no rolling baseline was supplied, matching the old behavior.
+  return trapezoid(
+    rt.subarray(left, right + 1),
+    raw.subarray(left, right + 1),
+    0,
+    width - 1,
+  );
+}
+
+/**
  * Given an APEX INDEX already known to be a local max on `smoothed` (or at
  * least the point to integrate around), walk left/right to the enclosing
  * valleys, reject if narrower than `minWidthScans`, and integrate the RAW
@@ -150,30 +199,7 @@ function integrateAt(
   if (width < minWidthScans) return null;
 
   const height = raw[apex];
-  // Compute the baseline-subtracted area on the RAW trace.
-  let area: number;
-  if (baseline === "valley") {
-    // Straight line joining the two valley points.
-    const y0 = raw[left];
-    const y1 = raw[right];
-    const corrected = new Float64Array(width);
-    for (let k = 0; k < width; k += 1) {
-      const t = width > 1 ? k / (width - 1) : 0;
-      const base = y0 + t * (y1 - y0);
-      corrected[k] = Math.max(0, raw[left + k] - base);
-    }
-    // Integrate corrected over rt[left..right].
-    area = trapezoid(rt.subarray(left, right + 1), corrected, 0, width - 1);
-  } else if (baseline === "rolling" && rollingMin) {
-    const corrected = new Float64Array(width);
-    for (let k = 0; k < width; k += 1) {
-      corrected[k] = Math.max(0, raw[left + k] - rollingMin[left + k]);
-    }
-    area = trapezoid(rt.subarray(left, right + 1), corrected, 0, width - 1);
-  } else {
-    // "none" integrates to zero.
-    area = trapezoid(rt.subarray(left, right + 1), raw.subarray(left, right + 1), 0, width - 1);
-  }
+  const area = integrateBoundedArea(trace, left, right, baseline, rollingMin);
 
   return {
     id: peakId(),
@@ -267,6 +293,63 @@ export function integratePeakAt(
 
   const rollingMin = baseline === "rolling" ? computeRollingMin(raw, Math.max(1, 4 * minWidthScans)) : null;
   return integrateAt(trace, smoothed, apex, { minWidthScans, baseline }, rollingMin);
+}
+
+/**
+ * Integrate one manually selected chromatogram region. Unlike
+ * {@link integratePeakAt}, the user's two endpoints are the peak boundaries:
+ * each is snapped to the nearest trace sample, the pair is ordered/clamped by
+ * that snapping, and neither boundary is expanded to an enclosing valley.
+ *
+ * The apex is the greatest RAW intensity sample inside the selected region
+ * (ties choose the earlier sample). Automatic detection's smoothing,
+ * threshold, and minimum-width gates do not apply; any region containing at
+ * least two distinct samples is valid, including narrow and flat regions.
+ * `smoothWindow` is consequently unused, while `minWidthScans` is retained
+ * only to preserve the existing rolling-baseline window definition.
+ */
+export function integratePeakRange(
+  trace: ChromTrace,
+  rtLo: number,
+  rtHi: number,
+  opts: IntegratePeakAtOpts,
+): ChromPeak | null {
+  const { minWidthScans, baseline } = opts;
+  const rt = trace.rtMin;
+  const raw = trace.intensity;
+  const n = Math.min(rt.length, raw.length);
+  if (n < 2 || !Number.isFinite(rtLo) || !Number.isFinite(rtHi)) return null;
+
+  const boundedRt = n === rt.length ? rt : rt.subarray(0, n);
+  let left = nearestIndex(boundedRt, rtLo);
+  let right = nearestIndex(boundedRt, rtHi);
+  if (left > right) [left, right] = [right, left];
+  if (left === right) return null;
+
+  let apex = left;
+  for (let i = left + 1; i <= right; i += 1) {
+    if (raw[i] > raw[apex]) apex = i;
+  }
+
+  const rollingMin =
+    baseline === "rolling"
+      ? computeRollingMin(raw, Math.max(1, 4 * Math.max(1, minWidthScans)))
+      : null;
+  const area = integrateBoundedArea(trace, left, right, baseline, rollingMin);
+
+  return {
+    id: peakId(),
+    runId: trace.runId,
+    traceId: trace.id,
+    rtApex: rt[apex],
+    rtStart: rt[left],
+    rtEnd: rt[right],
+    scanApex: apex,
+    height: raw[apex],
+    area,
+    areaPct: 0,
+    basePeakMz: null,
+  };
 }
 
 // --- spectrum peaks ---------------------------------------------------------

@@ -1,7 +1,8 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   chromPeakCsv,
   chromatogramCsv,
+  renderReportPng,
   renderReportSvg,
   spectrumCsv,
   spectrumMsp,
@@ -9,7 +10,14 @@ import {
   type ReportPanelSpec,
   type ReportTheme,
 } from "../export";
-import type { ChromPeak, ChromTrace, MassSpectrum, RunMeta, SpecPeak } from "../types";
+import type {
+  ChromPeak,
+  ChromTrace,
+  MassSpectrum,
+  RunMeta,
+  SpecPeak,
+  SpectrumPeakRow,
+} from "../types";
 
 const THEME: ReportTheme = { fg: "#0f172a", muted: "#64748b", border: "#cbd5e1", bg: "#ffffff" };
 
@@ -95,16 +103,18 @@ describe("chromPeakCsv", () => {
     ];
     const csv = chromPeakCsv(peaks);
     const lines = csv.split("\r\n");
-    expect(lines[0]).toBe("rt,height,area,area%,width,basePeakMz,name");
+    expect(lines[0]).toBe("rt,rtStart,rtEnd,height,area,area%,width,basePeakMz,name");
     // The last cell is wrapped in quotes; inner quote doubled.
     const row = lines[1].split(",");
-    // The 7th field is the quoted name: comma inside means CSV split lands the
+    // The final field is the quoted name: comma inside means CSV split lands the
     // pieces across cells — rejoin and verify round-trip of the quoted block.
     const lastCellIdx = csv.lastIndexOf('"Benzene, ""spectral""');
     expect(lastCellIdx).toBeGreaterThan(0);
     // Basic numeric formatting sanity.
     expect(row[0]).toBe("7.4010");
-    expect(row[3]).toBe("12.34");
+    expect(row[1]).toBe("7.2000");
+    expect(row[2]).toBe("7.6000");
+    expect(row[5]).toBe("12.34");
   });
 });
 
@@ -122,6 +132,16 @@ describe("chromatogramCsv", () => {
     expect(cells[1]).toEqual(["2.0000", "20", "5"]);
     expect(cells[2]).toEqual(["3.0000", "30", ""]);
     expect(cells[3]).toEqual(["4.0000", "", "9"]);
+  });
+
+  it("keeps separated spectrum-ion XICs as independently labelled columns", () => {
+    const mz100 = makeTrace("xic-100", "XIC 100.00 ± 0.30", [1, 2], [90, 5]);
+    const mz200 = makeTrace("xic-200", "XIC 200.00 ± 0.30", [1, 2], [2, 80]);
+
+    const lines = chromatogramCsv([mz100, mz200]).split("\r\n");
+    expect(lines[0]).toBe("rt,XIC 100.00 ± 0.30,XIC 200.00 ± 0.30");
+    expect(lines[1]).toBe("1.0000,90,2");
+    expect(lines[2]).toBe("2.0000,5,80");
   });
 });
 
@@ -176,6 +196,27 @@ describe("spectrumPeakCsv", () => {
     const lines = csv.split("\r\n");
     expect(lines[0]).toBe("m/z,intensity,rel%");
     expect(lines[1]).toBe("120.500,800,100");
+  });
+
+  it("labels every MS peak with its chromatographic source and RT range", () => {
+    const peaks: SpectrumPeakRow[] = [
+      {
+        id: "chrom-1:p120",
+        mz: 120.5,
+        intensity: 800,
+        relPct: 100,
+        sourcePeakId: "chrom-1",
+        sourceLabel: "Solvent, peak · RT 1.250 (1.100–1.400)",
+        sourceRtStart: 1.1,
+        sourceRtEnd: 1.4,
+      },
+    ];
+
+    const lines = spectrumPeakCsv(peaks).split("\r\n");
+    expect(lines[0]).toBe("chromatogramPeak,rtStart,rtEnd,m/z,intensity,rel%");
+    expect(lines[1]).toBe(
+      '"Solvent, peak · RT 1.250 (1.100–1.400)",1.1000,1.4000,120.500,800,100',
+    );
   });
 });
 
@@ -232,5 +273,123 @@ describe("renderReportSvg", () => {
       i = gt + 1;
     }
     expect(depth).toBeGreaterThan(4);
+  });
+
+  it("includes trace labels so separated XIC colours remain identifiable", () => {
+    const top = panel("Chromatogram", "Retention time (min)");
+    top.traces = [
+      { ...top.traces[0], color: "#ef4444", label: "XIC 100.00 ± 0.30" },
+      { ...top.traces[0], color: "#3b82f6", label: "XIC 200.00 ± 0.30" },
+    ];
+
+    const svg = renderReportSvg(top, panel("Mass spectrum", "m/z"), {
+      width: 800,
+      height: 600,
+      theme: THEME,
+    });
+
+    expect(svg).toContain("XIC 100.00 ± 0.30");
+    expect(svg).toContain("XIC 200.00 ± 0.30");
+  });
+
+  it("bounds a large XIC legend and clearly summarizes omitted trace origins", () => {
+    const top = panel("Chromatogram", "Retention time (min)");
+    top.traces = Array.from({ length: 200 }, (_, index) => ({
+      ...top.traces[0],
+      color: `hsl(${index} 70% 45%)`,
+      label: `XIC ${100 + index}.000 ± 0.300`,
+    }));
+
+    const svg = renderReportSvg(top, panel("Mass spectrum", "m/z"), {
+      width: 800,
+      height: 600,
+      theme: THEME,
+    });
+
+    expect(svg).toContain("XIC 100.000 ± 0.300");
+    expect(svg).toMatch(/\+\d+ more traces/);
+    expect(svg).not.toContain("XIC 299.000 ± 0.300");
+
+    // At most three 13px legend rows are reserved, leaving a useful top plot
+    // rather than the previous 1px collapse for a large separated-XIC batch.
+    const topFrame = svg.match(
+      /<rect x="56" y="([^"]+)" width="730" height="([^"]+)" fill="none"/,
+    );
+    expect(topFrame).not.toBeNull();
+    expect(Number(topFrame![1])).toBeLessThanOrEqual(63);
+    expect(Number(topFrame![2])).toBeGreaterThan(150);
+  });
+
+  it("resets PNG axis strokes after drawing coloured legend swatches", () => {
+    const top = panel("Chromatogram", "Retention time (min)");
+    top.traces = [
+      { ...top.traces[0], color: "#ef4444", label: "XIC 100.00 ± 0.30" },
+      { ...top.traces[0], color: "#3b82f6", label: "XIC 200.00 ± 0.30" },
+    ];
+
+    type StrokeCall = { style: string | CanvasGradient | CanvasPattern; width: number; path: number[][] };
+    const strokes: StrokeCall[] = [];
+    let path: number[][] = [];
+    const context = {
+      strokeStyle: "#000000" as string | CanvasGradient | CanvasPattern,
+      fillStyle: "#000000" as string | CanvasGradient | CanvasPattern,
+      lineWidth: 1,
+      lineJoin: "miter" as CanvasLineJoin,
+      lineCap: "butt" as CanvasLineCap,
+      font: "",
+      textAlign: "start" as CanvasTextAlign,
+      textBaseline: "alphabetic" as CanvasTextBaseline,
+      scale: vi.fn(),
+      fillRect: vi.fn(),
+      save: vi.fn(),
+      restore: vi.fn(),
+      strokeRect: vi.fn(),
+      fillText: vi.fn(),
+      beginPath() {
+        path = [];
+      },
+      moveTo(x: number, y: number) {
+        path.push([x, y]);
+      },
+      lineTo(x: number, y: number) {
+        path.push([x, y]);
+      },
+      stroke() {
+        strokes.push({ style: this.strokeStyle, width: this.lineWidth, path: [...path] });
+      },
+    };
+    const canvas = {
+      width: 0,
+      height: 0,
+      getContext: () => context,
+      toDataURL: () => "data:image/png;base64,test",
+    };
+    const createElement = vi
+      .spyOn(document, "createElement")
+      .mockReturnValue(canvas as unknown as HTMLCanvasElement);
+    try {
+      expect(
+        renderReportPng(top, panel("Mass spectrum", "m/z"), {
+          width: 800,
+          height: 600,
+          scale: 1,
+          theme: THEME,
+        }),
+      ).toBe("data:image/png;base64,test");
+    } finally {
+      createElement.mockRestore();
+    }
+
+    // Top-panel Y ticks run from x=56 to x=52. Without the reset they inherit
+    // the final blue swatch and its 2px width.
+    const topYTicks = strokes.filter(
+      (call) =>
+        call.path.length === 2 &&
+        call.path[0][0] === 56 &&
+        call.path[1][0] === 52 &&
+        call.path[0][1] < 294,
+    );
+    expect(topYTicks.length).toBeGreaterThan(0);
+    expect(topYTicks.every((call) => call.style === THEME.border && call.width === 1)).toBe(true);
   });
 });

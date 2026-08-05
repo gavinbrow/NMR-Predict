@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { applyBackgroundSubtraction, assemblePanels, resolveSlots } from "../slots";
+import { applyBackgroundSubtraction, assemblePanels, resolveSlots, resolveSlotsByRun } from "../slots";
 import type { MsRun, SpectrumSlot } from "../types";
 
 // Minimal synthetic CSR MsRun builder (mirrors chrom.test.ts's `makeRun`).
@@ -134,6 +134,43 @@ describe("resolveSlots", () => {
   it("returns nothing when the run is null", () => {
     const slots = [slot("live", { kind: "cursor" })];
     expect(resolveSlots(slots, null, 1.0)).toEqual([]);
+  });
+});
+
+describe("resolveSlotsByRun", () => {
+  it("resolves a drag-selected range against its visible trace run, not the hidden active run", () => {
+    const hiddenActiveRun = { ...run, id: "hidden-active" };
+    const visibleRun = makeRun([
+      { rt: 1.0, points: [[444.0, 77]] },
+      { rt: 2.0, points: [[555.0, 88]] },
+    ]);
+    visibleRun.id = "visible-trace";
+    const rangeSlot = {
+      ...slot("selection", { kind: "range", regions: [[0.5, 1.5]] }),
+      runId: visibleRun.id,
+    };
+
+    const out = resolveSlotsByRun(
+      [rangeSlot],
+      hiddenActiveRun,
+      null,
+      [hiddenActiveRun, visibleRun],
+    );
+
+    expect(Array.from(out[0].spectrum.mz)).toEqual([444]);
+    expect(Array.from(out[0].spectrum.intensity)).toEqual([77]);
+  });
+
+  it("keeps cursor slots attached to the active run", () => {
+    const otherRun = { ...run, id: "other-run" };
+    const out = resolveSlotsByRun(
+      [slot("live", { kind: "cursor" })],
+      run,
+      2.0,
+      [run, otherRun],
+    );
+    expect(Array.from(out[0].spectrum.mz)).toEqual([100, 200]);
+    expect(Array.from(out[0].spectrum.intensity)).toEqual([20, 8]);
   });
 });
 

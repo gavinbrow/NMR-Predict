@@ -51,6 +51,8 @@ export interface BuildGcmsFigureArgs {
   specPeaks: SpecPeak[];
   /** Annotate peaks with their retention time / m/z. */
   labelPeaks: boolean;
+  /** Stack multiple included spectrum slots vertically with a 15% gap. */
+  stackSpectra?: boolean;
   /** File-name stem for downloads. */
   sourceName?: string;
   /**
@@ -99,6 +101,12 @@ function traceGain(trace: ChromTrace): { scale: number; offset: number } {
  * ladder grouping, just without the ladder concept (GC/MS peaks don't belong
  * to assigned series the way MALDI's do).
  *
+ * `stackSpectra` (spectrum subject only): when multiple spectrum slots are
+ * included, raise each one by the previous slot's max intensity plus a 15%
+ * gap so the sticks don't overlap. The figure engine renders stick series from
+ * their `baseline` value, so each slot's sticks and their peak labels anchor at
+ * the computed offset.
+ *
  * "both": the engine's `FigureData` has ONE shared x-axis label, but a
  * chromatogram's x is retention time (minutes, roughly 0-60) and a spectrum's
  * x is m/z (roughly 50-500) — genuinely different quantities with no natural
@@ -116,7 +124,7 @@ function traceGain(trace: ChromTrace): { scale: number; offset: number } {
  * limitation worth an engine change.
  */
 export function buildGcmsFigureData(args: BuildGcmsFigureArgs): FigureData {
-  const { subject, traces, spectra, chromPeaks, specPeaks, labelPeaks, sourceName, maxTracePoints } =
+  const { subject, traces, spectra, chromPeaks, specPeaks, labelPeaks, stackSpectra, sourceName, maxTracePoints } =
     args;
   const maxPoints = maxTracePoints ?? DEFAULT_MAX_TRACE_POINTS;
 
@@ -163,27 +171,46 @@ export function buildGcmsFigureData(args: BuildGcmsFigureArgs): FigureData {
   }
 
   if (includeSpec) {
+    let runningOffset = 0;
+    const doStack = stackSpectra && spectra.length > 1 && subject === "spectrum";
     for (const entry of spectra) {
+      const maxI = doStack
+        ? (() => {
+            let m = 0;
+            for (const v of entry.spectrum.intensity) {
+              if (Number.isFinite(v) && v > m) m = v;
+            }
+            return m;
+          })()
+        : 0;
+      const baseline = doStack ? runningOffset : entry.baseline;
+      if (doStack) {
+        const gap = maxI * 0.15;
+        runningOffset += maxI + gap;
+      }
       series.push({
         id: `sticks:${entry.id}`,
         label: entry.label,
         x: toNumbers(entry.spectrum.mz),
         y: toNumbers(entry.spectrum.intensity),
-        baseline: entry.baseline,
+        baseline,
         styleHints: { kind: "sticks", lineWidth: 1, color: entry.color },
       });
     }
     if (labelPeaks) {
       // Spec peaks (picked against the LIVE spectrum elsewhere in the host)
       // are labelled against the primary — first — included spectrum, mirroring
-      // MALDI's "spectra[0] is primary" convention.
+      // MALDI's "spectra[0] is primary" convention. When stacking is on, labels
+      // are anchored at the spectrum's own baseline offset.
       spectra.forEach((entry, index) => {
         const peaks = entry.peaks ?? (index === 0 ? specPeaks : []);
+        const seriesEntry = series.find((s) => s.id === `sticks:${entry.id}`);
+        const baseline = seriesEntry?.baseline ?? 0;
         for (const p of peaks) {
           peakLabels.push({
             id: p.id,
             x: p.mz,
-            y: p.intensity,
+            y: p.intensity + baseline,
             text: p.mz.toFixed(2),
             seriesId: `sticks:${entry.id}`,
           });

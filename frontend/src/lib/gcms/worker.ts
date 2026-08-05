@@ -34,7 +34,7 @@ import { isNetcdf, readNetcdf } from "./open/netcdf";
 import { isAndiMs } from "./open/andims";
 import { parseAndiMs } from "./open/andims";
 import { parseCsvChromatogram, parseJcamp, sniffTextual } from "./open/textual";
-import { buildXic } from "./chrom";
+import { buildXic, buildXics } from "./chrom";
 import { combineScans } from "./chrom";
 import { detectChromPeaks } from "./peaks";
 import type { DetectChromPeaksOpts } from "./peaks";
@@ -175,6 +175,11 @@ const handlers: { [Op in WorkerOp]: Handler<Op> } = {
     return { trace };
   },
 
+  buildXics: (payload) => {
+    const traces = buildXics(payload.run, payload.mzList, payload.tol);
+    return { traces };
+  },
+
   sumScans: (payload) => {
     const spectrum = combineScans(
       payload.run,
@@ -240,6 +245,17 @@ function traceTransferList(trace: ChromTrace): ArrayBuffer[] {
   return list;
 }
 
+/** Collect and de-duplicate all typed-array buffers across a trace batch. */
+function tracesTransferList(traces: ChromTrace[]): ArrayBuffer[] {
+  const list: ArrayBuffer[] = [];
+  for (const trace of traces) {
+    for (const buffer of traceTransferList(trace)) {
+      if (!list.includes(buffer)) list.push(buffer);
+    }
+  }
+  return list;
+}
+
 function spectrumTransferList(spec: MassSpectrum): ArrayBuffer[] {
   const list: ArrayBuffer[] = [];
   for (const arr of [spec.mz, spec.intensity]) {
@@ -276,6 +292,9 @@ async function dispatch(id: string, op: WorkerOp, payload: WorkerRequestPayload<
     } else if (op === "buildXic") {
       const r = result as { trace: ChromTrace };
       transfer = traceTransferList(r.trace);
+    } else if (op === "buildXics") {
+      const r = result as { traces: ChromTrace[] };
+      transfer = tracesTransferList(r.traces);
     } else if (op === "sumScans") {
       const r = result as { spectrum: MassSpectrum };
       transfer = spectrumTransferList(r.spectrum);

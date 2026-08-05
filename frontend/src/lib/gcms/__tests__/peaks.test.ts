@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   detectChromPeaks,
   integratePeakAt,
+  integratePeakRange,
   normalizeAreaPct,
   pickSpectrumPeaks,
   spectrumSimilarity,
@@ -33,6 +34,22 @@ function makeTrace(
     label: "TIC",
     rtMin,
     intensity,
+    color: "",
+    visible: true,
+    offset: 0,
+    scale: 1,
+  };
+}
+
+/** Build a small, exact trace for fixed-bound integration assertions. */
+function makePointTrace(values: number[], dt = 1): ChromTrace {
+  return {
+    id: "trace-points",
+    runId: "run-points",
+    kind: "TIC",
+    label: "TIC points",
+    rtMin: Float64Array.from(values, (_value, i) => i * dt),
+    intensity: Float64Array.from(values),
     color: "",
     visible: true,
     offset: 0,
@@ -148,6 +165,85 @@ describe("integratePeakAt", () => {
       baseline: "none",
     });
     expect(result).toBeNull();
+  });
+});
+
+describe("integratePeakRange", () => {
+  const opts = { smoothWindow: 11, minWidthScans: 13, baseline: "none" as const };
+
+  it("preserves the two nearest selected samples as exact bounds", () => {
+    const trace = makePointTrace([0, 2, 1, 5, 1, 2, 0]);
+    // 1.6 -> sample 2; 4.4 -> sample 4. No valley expansion to samples 1/5.
+    const peak = integratePeakRange(trace, 1.6, 4.4, opts);
+
+    expect(peak).not.toBeNull();
+    expect(peak!.rtStart).toBe(2);
+    expect(peak!.rtEnd).toBe(4);
+    expect(peak!.scanApex).toBe(3);
+    expect(peak!.rtApex).toBe(3);
+    expect(peak!.height).toBe(5);
+    expect(peak!.area).toBe(6);
+  });
+
+  it("chooses the apex only inside the selected range", () => {
+    const trace = makePointTrace([0, 100, 2, 8, 3, 200, 0]);
+    const peak = integratePeakRange(trace, 2, 4, opts);
+
+    expect(peak).not.toBeNull();
+    expect(peak!.scanApex).toBe(3);
+    expect(peak!.height).toBe(8);
+  });
+
+  it("orders reversed endpoints and clamps them to the trace", () => {
+    const trace = makePointTrace([1, 3, 2, 7, 1]);
+    const peak = integratePeakRange(trace, 99, -99, opts);
+
+    expect(peak).not.toBeNull();
+    expect(peak!.rtStart).toBe(0);
+    expect(peak!.rtEnd).toBe(4);
+    expect(peak!.scanApex).toBe(3);
+  });
+
+  it("accepts a two-sample flat range regardless of minWidthScans", () => {
+    const trace = makePointTrace([0, 7, 7, 0]);
+    const peak = integratePeakRange(trace, 1, 2, {
+      smoothWindow: 99,
+      minWidthScans: 999,
+      baseline: "valley",
+    });
+
+    expect(peak).not.toBeNull();
+    expect(peak!.rtStart).toBe(1);
+    expect(peak!.rtEnd).toBe(2);
+    expect(peak!.scanApex).toBe(1); // flat-top ties choose the earlier sample
+    expect(peak!.height).toBe(7);
+    expect(peak!.area).toBe(0);
+  });
+
+  it("retains none, valley, and rolling baseline area behavior", () => {
+    const trace = makePointTrace([1, 3, 1]);
+    const none = integratePeakRange(trace, 0, 2, { ...opts, minWidthScans: 1 });
+    const valley = integratePeakRange(trace, 0, 2, {
+      ...opts,
+      minWidthScans: 1,
+      baseline: "valley",
+    });
+    const rolling = integratePeakRange(trace, 0, 2, {
+      ...opts,
+      minWidthScans: 1,
+      baseline: "rolling",
+    });
+
+    expect(none!.area).toBe(4);
+    expect(valley!.area).toBe(2);
+    expect(rolling!.area).toBe(2);
+  });
+
+  it("rejects selections that resolve to fewer than two samples", () => {
+    const trace = makePointTrace([0, 5, 0]);
+    expect(integratePeakRange(trace, 1.01, 1.1, opts)).toBeNull();
+    expect(integratePeakRange(makePointTrace([5]), -10, 10, opts)).toBeNull();
+    expect(integratePeakRange(trace, Number.NaN, 2, opts)).toBeNull();
   });
 });
 
