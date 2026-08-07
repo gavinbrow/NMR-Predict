@@ -47,54 +47,159 @@ function xmlEscape(s: string): string {
   return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }
 
+/** Absolute-ify an A1 range ("A6:A9" → "$A$6:$A$9") — the form Excel itself writes
+ *  into `c:f`, and the form that survives a user inserting rows above the block. */
+function absoluteRange(range: string): string {
+  return range.replace(/(\$?)([A-Z]+)(\$?)(\d+)/g, (_m, _d1, col, _d2, row) => `$${col}$${row}`);
+}
+
+/** A chart title / axis title block (CT_Title: tx?, layout?, overlay?, …). */
+function titleXml(text: string, sizeHundredths: number, bold: boolean): string {
+  return `<c:title><c:tx><c:rich><a:bodyPr/><a:lstStyle/><a:p><a:pPr><a:defRPr sz="${sizeHundredths}" b="${bold ? 1 : 0}"/></a:pPr><a:r><a:rPr lang="en-US" sz="${sizeHundredths}" b="${bold ? 1 : 0}"/><a:t>${xmlEscape(text)}</a:t></a:r></a:p></c:rich></c:tx><c:overlay val="0"/></c:title>`;
+}
+
 /**
- * Build the chartN.xml body for one scatter chart with a linear trendline
- * that displays the equation and R² on the chart.
+ * One value axis. The child order below is the CT_ValAx sequence from the OOXML
+ * schema — axId, scaling, delete, axPos, majorGridlines?, title?, numFmt?,
+ * majorTickMark?, minorTickMark?, tickLblPos?, …, crossAx, crosses?, crossBetween?.
+ * Excel validates the sequence strictly: getting `numFmt` and `title` the wrong way
+ * round is enough for it to discard the whole drawing on open.
+ */
+function valAxXml(
+  axId: number,
+  crossAxId: number,
+  pos: "b" | "l",
+  title: string,
+  numFmt: string,
+  sourceLinked: boolean,
+  gridlines: boolean,
+): string {
+  return (
+    `<c:valAx><c:axId val="${axId}"/><c:scaling><c:orientation val="minMax"/></c:scaling>` +
+    `<c:delete val="0"/><c:axPos val="${pos}"/>` +
+    (gridlines ? `<c:majorGridlines/>` : "") +
+    titleXml(title, 1000, false) +
+    `<c:numFmt formatCode="${xmlEscape(numFmt)}" sourceLinked="${sourceLinked ? 1 : 0}"/>` +
+    `<c:majorTickMark val="out"/><c:minorTickMark val="none"/><c:tickLblPos val="nextTo"/>` +
+    `<c:crossAx val="${crossAxId}"/><c:crosses val="autoZero"/><c:crossBetween val="midCat"/>` +
+    `</c:valAx>`
+  );
+}
+
+/**
+ * Build the chartN.xml body for one scatter chart with a linear trendline that
+ * displays the equation and R² on the chart.
+ *
+ * Every element here is in schema order and every part is closed. That sounds
+ * obvious, but this file is hand-written OOXML with no validator in the loop: a
+ * single unclosed `c:spPr` or an out-of-sequence child makes Excel drop the
+ * drawing on open ("Removed Part: /xl/drawings/drawingN.xml") rather than report
+ * an error, so the charts silently vanish. `excelChartInject.test.ts` asserts the
+ * well-formedness and the orderings that previously broke.
  */
 function buildChartXml(spec: ChartSpec, chartIndex: number): string {
-  const sheetRef = `'${spec.sheetName}'!`;
-  const xRef = `${sheetRef}${spec.xRange}`;
-  const yRef = `${sheetRef}${spec.yRange}`;
-  const titleEsc = xmlEscape(spec.title);
-  // Two series: the data points (markers, no line) and an invisible helper
-  // is unnecessary — a single scatter series with a trendline is the standard
-  // form. We emit one scatter series with markers + a linear trendline.
-  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<c:chartSpace xmlns:c="${NS.c}" xmlns:a="${NS.a}" xmlns:r="${NS.r}"><c:chart><c:title><c:tx><c:rich><a:bodyPr/><a:lstStyle/><a:p><a:pPr><a:defRPr sz="1200" b="1"/></a:pPr><a:r><a:rPr><a:latin typeface="Calibri"/><a:defRPr sz="1200" b="1"/></a:rPr><a:t>${titleEsc}</a:t></a:r></a:p></c:rich></c:tx></c:title><c:autoTitleDeleted val="0"/><c:plotArea><c:layout/><c:scatterChart c:scatterStyle="lineMarker"><c:ser><c:idx val="0"/><c:order val="0"/><c:tx><c:v>Polymer series</c:v></c:tx><c:spPr><a:ln w="12700"><a:solidFill><a:srgbClr val="1F77B4"/></a:solidFill><a:prstDash val="solid"/></a:ln><a:effectLst/></c:spPr><c:marker><c:symbol val="circle"/><c:size val="5"/><c:spPr><a:solidFill><a:srgbClr val="1F77B4"/></a:solidFill><a:ln><a:solidFill><a:srgbClr val="1F77B4"/></a:solidFill></a:ln></c:marker><c:xVal><c:numRef><c:f>${xRef}</c:f></c:numRef></c:xVal><c:yVal><c:numRef><c:f>${yRef}</c:f></c:numRef></c:yVal><c:trendline><c:spPr><a:ln w="19050"><a:solidFill><a:srgbClr val="D62728"/></a:solidFill><a:prstDash val="dash"/></a:ln></c:spPr><c:trendlineType val="linear"/><c:dispEq val="1"/><c:dispRSqr val="1"/></c:trendline></c:ser><c:axId val="111111"/><c:axId val="222222"/></c:scatterChart><c:valAx><c:axId val="111111"/><c:scaling><c:orientation val="minMax"/></c:scaling><c:delete val="0"/><c:axPos val="b"/><c:numFmt formatCode="General" sourceLinked="1"/><c:title><c:tx><c:rich><a:bodyPr/><a:lstStyle/><a:p><a:pPr><a:defRPr sz="1000"/></a:pPr><a:r><a:rPr><a:latin typeface="Calibri"/><a:defRPr sz="1000"/></a:rPr><a:t>n (oligomer number)</a:t></a:r></a:p></c:rich></c:tx></c:title><c:crossAx val="222222"/></c:valAx><c:valAx><c:axId val="222222"/><c:scaling><c:orientation val="minMax"/></c:scaling><c:delete val="0"/><c:axPos val="l"/><c:numFmt formatCode="0.0000" sourceLinked="0"/><c:title><c:tx><c:rich><a:bodyPr/><a:lstStyle/><a:p><a:pPr><a:defRPr sz="1000"/></a:pPr><a:r><a:rPr><a:latin typeface="Calibri"/><a:defRPr sz="1000"/></a:rPr><a:t>Neutral mass (Da)</a:t></a:r></a:p></c:rich></c:tx></c:title><c:crossAx val="111111"/></c:valAx></c:plotArea><c:plotVisOnly val="1"/><c:dispBlanksAs val="gap"/></c:chart></c:chartSpace>`;
+  // Sheet names are single-quoted in formulas; an apostrophe inside is doubled.
+  const sheetRef = `'${spec.sheetName.replace(/'/g, "''")}'!`;
+  const xRef = xmlEscape(`${sheetRef}${absoluteRange(spec.xRange)}`);
+  const yRef = xmlEscape(`${sheetRef}${absoluteRange(spec.yRange)}`);
+  // Distinct axis ids per chart part keep Excel from associating axes across the
+  // charts it loads from one drawing.
+  const xAxId = 100000000 + chartIndex * 2;
+  const yAxId = 100000001 + chartIndex * 2;
+
+  // One scatter series: markers only (the series line is switched off so the
+  // dashed red trendline is the only line on the plot), plus a linear trendline
+  // whose label carries the equation and R².
+  const ser =
+    `<c:ser><c:idx val="0"/><c:order val="0"/>` +
+    `<c:tx><c:v>Neutral mass vs n</c:v></c:tx>` +
+    `<c:spPr><a:ln w="19050"><a:noFill/></a:ln></c:spPr>` +
+    `<c:marker><c:symbol val="circle"/><c:size val="5"/><c:spPr><a:solidFill><a:srgbClr val="1F77B4"/></a:solidFill><a:ln w="9525"><a:solidFill><a:srgbClr val="1F77B4"/></a:solidFill></a:ln></c:spPr></c:marker>` +
+    `<c:trendline><c:spPr><a:ln w="19050"><a:solidFill><a:srgbClr val="D62728"/></a:solidFill><a:prstDash val="dash"/></a:ln></c:spPr>` +
+    `<c:trendlineType val="linear"/><c:dispRSqr val="1"/><c:dispEq val="1"/>` +
+    `<c:trendlineLbl><c:layout/><c:numFmt formatCode="General" sourceLinked="0"/></c:trendlineLbl></c:trendline>` +
+    `<c:xVal><c:numRef><c:f>${xRef}</c:f></c:numRef></c:xVal>` +
+    `<c:yVal><c:numRef><c:f>${yRef}</c:f></c:numRef></c:yVal>` +
+    `<c:smooth val="0"/></c:ser>`;
+
+  return (
+    `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n` +
+    `<c:chartSpace xmlns:c="${NS.c}" xmlns:a="${NS.a}" xmlns:r="${NS.r}">` +
+    `<c:lang val="en-US"/><c:roundedCorners val="0"/>` +
+    `<c:chart>` +
+    titleXml(spec.title, 1200, true) +
+    `<c:autoTitleDeleted val="0"/>` +
+    `<c:plotArea><c:layout/>` +
+    `<c:scatterChart><c:scatterStyle val="lineMarker"/><c:varyColors val="0"/>` +
+    ser +
+    `<c:axId val="${xAxId}"/><c:axId val="${yAxId}"/></c:scatterChart>` +
+    valAxXml(xAxId, yAxId, "b", "n (oligomer number)", "General", true, false) +
+    valAxXml(yAxId, xAxId, "l", "Neutral mass (Da)", "0.0000", false, true) +
+    `</c:plotArea>` +
+    `<c:plotVisOnly val="1"/><c:dispBlanksAs val="gap"/>` +
+    `</c:chart></c:chartSpace>`
+  );
 }
 
 /**
- * Build the drawing XML that anchors all charts for one worksheet. Uses
- * oneCellAnchor per chart (top-left cell + fixed extent in EMUs).
+ * Build the `<xdr:twoCellAnchor>` frames that place one chart each on a worksheet
+ * (top-left cell → bottom-right cell). Returns just the anchors so they can either
+ * open a fresh drawing part or be appended to one the workbook already has.
+ * `rIds[i]` is the drawing relationship pointing at spec `i`'s chart part, and
+ * `shapeIdBase` offsets the shape ids so they stay unique alongside existing shapes.
  * 1 column ≈ 642000 EMU at default width; 1 row ≈ 195000 EMU at 14.4pt.
  */
-function buildDrawingXml(specs: ChartSpec[]): string {
+function buildDrawingXml(specs: ChartSpec[], rIds: string[], shapeIdBase = 0): string {
   const COL_EMU = 642000;
   const ROW_EMU = 195000;
-  const WIDTH_EMU = 4 * COL_EMU; // ~4 columns wide
-  const HEIGHT_EMU = 12 * ROW_EMU; // ~12 rows tall
-  const parts: string[] = [];
-  specs.forEach((spec, i) => {
-    const cx = spec.anchorCol * COL_EMU;
-    const cy = spec.anchorRow * ROW_EMU;
-    const rid = `rId${i + 1}`;
-    parts.push(
-      `<xdr:twoCellAnchor><xdr:from><xdr:col>${spec.anchorCol}</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>${spec.anchorRow}</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from><xdr:to><xdr:col>${spec.anchorCol + 8}</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>${spec.anchorRow + 16}</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to><xdr:graphicFrame macro=""><xdr:nvGraphicFramePr><xdr:cNvPr id="${10 + i}" name="Chart ${i + 1}"/><xdr:cNvGraphicFramePr/></xdr:nvGraphicFramePr><xdr:xfrm><a:off x="${cx}" y="${cy}"/><a:ext cx="${WIDTH_EMU}" cy="${HEIGHT_EMU}"/></xdr:xfrm><a:graphic><a:graphicData uri="${NS.c}"><c:chart xmlns:c="${NS.c}" xmlns:r="${NS.r}" r:id="${rid}"/></a:graphicData></a:graphic></xdr:graphicFrame><xdr:clientData/></xdr:twoCellAnchor>`,
-    );
-  });
-  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<xdr:wsDr xmlns:xdr="${NS.xdr}" xmlns:a="${NS.a}">${parts.join("")}</xdr:wsDr>`;
+  const WIDTH_EMU = 8 * COL_EMU;
+  const HEIGHT_EMU = 16 * ROW_EMU;
+  return specs
+    .map((spec, i) => {
+      const cx = spec.anchorCol * COL_EMU;
+      const cy = spec.anchorRow * ROW_EMU;
+      const id = shapeIdBase + 10 + i;
+      return (
+        `<xdr:twoCellAnchor>` +
+        `<xdr:from><xdr:col>${spec.anchorCol}</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>${spec.anchorRow}</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from>` +
+        `<xdr:to><xdr:col>${spec.anchorCol + 8}</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>${spec.anchorRow + 16}</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to>` +
+        `<xdr:graphicFrame macro="">` +
+        `<xdr:nvGraphicFramePr><xdr:cNvPr id="${id}" name="Chart ${id}"/><xdr:cNvGraphicFramePr/></xdr:nvGraphicFramePr>` +
+        `<xdr:xfrm><a:off x="${cx}" y="${cy}"/><a:ext cx="${WIDTH_EMU}" cy="${HEIGHT_EMU}"/></xdr:xfrm>` +
+        `<a:graphic><a:graphicData uri="${NS.c}"><c:chart xmlns:c="${NS.c}" xmlns:r="${NS.r}" r:id="${rIds[i]}"/></a:graphicData></a:graphic>` +
+        `</xdr:graphicFrame><xdr:clientData/></xdr:twoCellAnchor>`
+      );
+    })
+    .join("");
 }
 
-function buildDrawingRelsXml(chartCount: number): string {
-  const rels: string[] = [];
-  for (let i = 0; i < chartCount; i += 1) {
-    rels.push(
-      `<Relationship Id="rId${i + 1}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart" Target="../charts/chart${i + 1}.xml"/>`,
-    );
-  }
-  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Relationships xmlns="${NS.rels}">${rels.join("")}</Relationships>`;
+/** Highest `rIdN` in a relationships part (0 when there are none). */
+function maxRelId(relsXml: string | undefined): number {
+  if (!relsXml) return 0;
+  let max = 0;
+  const re = /Id="rId(\d+)"/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(relsXml)) !== null) max = Math.max(max, parseInt(m[1], 10));
+  return max;
+}
+
+/** The file name of the drawing a worksheet already references, if any. */
+function resolveExistingDrawing(sheetXml: string, sheetRelsXml: string | undefined): string | null {
+  const ref = sheetXml.match(/<drawing\s+r:id="([^"]+)"\s*\/>/);
+  if (!ref || !sheetRelsXml) return null;
+  const rel = sheetRelsXml.match(new RegExp(`<Relationship[^>]*Id="${ref[1]}"[^>]*>`));
+  if (!rel) return null;
+  const target = rel[0].match(/Target="([^"]+)"/);
+  return target ? target[1].split("/").pop() ?? null : null;
+}
+
+/** Highest `<xdr:cNvPr id="N">` in a drawing part (0 when there are none). */
+function maxShapeId(drawingXml: string): number {
+  let max = 0;
+  const re = /<xdr:cNvPr\s+id="(\d+)"/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(drawingXml)) !== null) max = Math.max(max, parseInt(m[1], 10));
+  return max;
 }
 
 /** Extract `<sheet name="X" sheetId="N" r:id="rIdK"/>` → name → sheetPath.
@@ -126,26 +231,18 @@ function parseSheets(workbookXml: string, relsXml: string): SheetInfo {
   return { byName };
 }
 
-/** Add Override entries for chart + drawing parts if not already present. */
-function ensureContentTypes(ctXml: string, chartCount: number, drawingName: string): string {
-  let out = ctXml;
-  const drawingPart = `/xl/drawings/${drawingName}`;
-  if (!out.includes(`PartName="${drawingPart}"`)) {
-    out = out.replace(
-      "</Types>",
-      `<Override PartName="${drawingPart}" ContentType="application/vnd.openxmlformats-officedocument.drawing+xml"/>`,
-    );
-  }
-  for (let i = 1; i <= chartCount; i += 1) {
-    const chartPart = `/xl/charts/chart${i}.xml`;
-    if (!out.includes(`PartName="${chartPart}"`)) {
-      out = out.replace(
-        "</Types>",
-        `<Override PartName="${chartPart}" ContentType="application/vnd.openxmlformats-officedocument.drawingml.chart+xml"/>`,
-      );
-    }
-  }
-  return out;
+/**
+ * Strip the `editAs` attribute ExcelJS writes onto `<xdr:oneCellAnchor>` — the
+ * anchor it uses for every embedded image.
+ *
+ * `CT_OneCellAnchor` has no attributes in the OOXML schema (only `CT_TwoCellAnchor`
+ * carries `editAs`), so Excel flags the part and reports "Repaired Records: Drawing
+ * from /xl/drawings/drawing1.xml part (Drawing shape)" on open. The attribute
+ * carries no information Excel needs — a one-cell anchor already means "move but
+ * don't size with cells" — so dropping it is lossless.
+ */
+export function sanitizeDrawingXml(xml: string): string {
+  return xml.replace(/(<xdr:oneCellAnchor)\s+editAs="[^"]*"/g, "$1");
 }
 
 /** Inject `<drawing r:id="rIdN"/>` into the worksheet XML (before </worksheet>). */
@@ -176,17 +273,28 @@ function addWorksheetRel(relsXml: string | undefined, drawingName: string): { re
 }
 
 /**
- * Post-process an ExcelJS xlsx buffer: inject one scatter chart per spec,
- * anchored on the named worksheet. Charts are grouped by sheetName — one
- * drawing per sheet holds all that sheet's charts.
+ * Post-process an ExcelJS xlsx buffer: repair the drawings ExcelJS wrote (see
+ * {@link sanitizeDrawingXml}) and inject one scatter chart per spec, anchored on
+ * the named worksheet. Charts are grouped by sheetName — one drawing per sheet
+ * holds all that sheet's charts.
+ *
+ * Always worth running even with no specs: a workbook that embeds the spectrum
+ * image still needs the drawing fix, or Excel reports a repair on open.
  */
 export async function injectCharts(
   buffer: Uint8Array | ArrayBuffer,
   specs: ChartSpec[],
 ): Promise<Uint8Array> {
-  if (specs.length === 0) return buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer);
   const { default: JSZip } = await import("jszip");
   const zip = await JSZip.loadAsync(buffer);
+
+  // Repair every drawing ExcelJS produced before adding ours.
+  for (const name of Object.keys(zip.files)) {
+    if (!/^xl\/drawings\/drawing\d+\.xml$/.test(name)) continue;
+    const xml = await zip.file(name)!.async("string");
+    const fixed = sanitizeDrawingXml(xml);
+    if (fixed !== xml) zip.file(name, fixed);
+  }
 
   const workbookXml = await zip.file("xl/workbook.xml")!.async("string");
   const relsXml = await zip.file("xl/_rels/workbook.xml.rels")!.async("string");
@@ -216,49 +324,70 @@ export async function injectCharts(
     const sheetFile = zip.file(info.sheetPath);
     if (!sheetFile) continue;
     let sheetXml = await sheetFile.async("string");
+    const relsFile = zip.file(info.relsPath);
+    const sheetRelsXml = relsFile ? await relsFile.async("string") : undefined;
 
-    const drawingName = `drawing${drawingCounter}.xml`;
+    // A worksheet can reference exactly one drawing. If it already has one (an
+    // embedded image, say) our chart frames are appended to that part; adding a
+    // second drawing would leave an orphan the charts never render from.
+    const existing = resolveExistingDrawing(sheetXml, sheetRelsXml);
+    const drawingName = existing ?? `drawing${drawingCounter}.xml`;
     const drawingPath = `xl/drawings/${drawingName}`;
     const drawingRelsPath = `xl/drawings/_rels/${drawingName}.rels`;
 
-    // Build chart parts + drawing + rels.
+    // Build the chart parts, and one drawing relationship per chart. Relationship
+    // ids continue past whatever the existing drawing already uses.
+    const existingDrawingRelsFile = zip.file(drawingRelsPath);
+    const existingDrawingRels = existingDrawingRelsFile
+      ? await existingDrawingRelsFile.async("string")
+      : undefined;
+    let nextRelId = maxRelId(existingDrawingRels) + 1;
     const chartRels: string[] = [];
+    const rIds: string[] = [];
     for (const spec of sheetSpecs) {
       chartCounter += 1;
-      const chartPath = `xl/charts/chart${chartCounter}.xml`;
-      zip.file(chartPath, buildChartXml(spec, chartCounter));
+      zip.file(`xl/charts/chart${chartCounter}.xml`, buildChartXml(spec, chartCounter));
+      const rId = `rId${nextRelId}`;
+      nextRelId += 1;
+      rIds.push(rId);
       chartRels.push(
-        `<Relationship Id="rId${chartRels.length + 1}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart" Target="../charts/chart${chartCounter}.xml"/>`,
+        `<Relationship Id="${rId}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart" Target="../charts/chart${chartCounter}.xml"/>`,
       );
     }
-    zip.file(drawingPath, buildDrawingXml(sheetSpecs));
-    zip.file(
-      drawingRelsPath,
-      `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<Relationships xmlns="${NS.rels}">${chartRels.join("")}</Relationships>`,
-    );
 
-    // Link the worksheet to the drawing.
-    const relsFile = zip.file(info.relsPath);
-    const existingRels = relsFile ? await relsFile.async("string") : undefined;
-    const { relsXml: newRels, rId } = addWorksheetRel(existingRels, drawingName);
-    zip.file(info.relsPath, newRels);
-
-    sheetXml = injectDrawingRef(sheetXml, rId);
-    zip.file(info.sheetPath, sheetXml);
-
-    drawingCounter += 1;
+    const existingXml = existing ? await zip.file(drawingPath)?.async("string") : undefined;
+    const anchors = buildDrawingXml(sheetSpecs, rIds, existingXml ? maxShapeId(existingXml) : 0);
+    if (existingXml != null) {
+      zip.file(drawingPath, existingXml.replace(/<\/xdr:wsDr>\s*$/, `${anchors}</xdr:wsDr>`));
+      zip.file(
+        drawingRelsPath,
+        existingDrawingRels
+          ? existingDrawingRels.replace(/(<Relationships[^>]*>)/, `$1${chartRels.join("")}`)
+          : `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<Relationships xmlns="${NS.rels}">${chartRels.join("")}</Relationships>`,
+      );
+    } else {
+      zip.file(
+        drawingPath,
+        `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<xdr:wsDr xmlns:xdr="${NS.xdr}" xmlns:a="${NS.a}">${anchors}</xdr:wsDr>`,
+      );
+      zip.file(
+        drawingRelsPath,
+        `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<Relationships xmlns="${NS.rels}">${chartRels.join("")}</Relationships>`,
+      );
+      // Link the worksheet to the new drawing.
+      const { relsXml: newRels, rId } = addWorksheetRel(sheetRelsXml, drawingName);
+      zip.file(info.relsPath, newRels);
+      sheetXml = injectDrawingRef(sheetXml, rId);
+      zip.file(info.sheetPath, sheetXml);
+      drawingCounter += 1;
+    }
   }
 
-  // Update [Content_Types].xml — add overrides for every new chart + drawing.
+  // Update [Content_Types].xml — scan the zip for every chartN.xml and drawingN.xml
+  // it now holds and ensure each has an Override. The Spectrum image's drawing is
+  // already declared by ExcelJS, so names already present are skipped.
   const ctFile = zip.file("[Content_Types].xml")!;
   let ctXml = await ctFile.async("string");
-  for (const sheetName of bySheet.keys()) {
-    // Each sheet got one drawing; recompute its name is awkward here — just
-    // add overrides for every chartN.xml and every drawing we created.
-  }
-  // Simpler: scan the zip for all chartN.xml and drawing*.xml we now hold and
-  // ensure each has an Override. The Spectrum image's drawing1 is already
-  // declared by ExcelJS, so skip names already present.
   const allCharts = Object.keys(zip.files).filter((n) => /^xl\/charts\/chart\d+\.xml$/.test(n));
   const allDrawings = Object.keys(zip.files).filter((n) => /^xl\/drawings\/drawing\d+\.xml$/.test(n));
   for (const p of allDrawings) {

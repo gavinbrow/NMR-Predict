@@ -1,7 +1,22 @@
 import { describe, it, expect } from "vitest";
 import ExcelJS from "exceljs";
-import { injectCharts, type ChartSpec } from "../excelChartInject";
+import { injectCharts, sanitizeDrawingXml, type ChartSpec } from "../excelChartInject";
 import JSZip from "jszip";
+
+/** Parse as XML and fail loudly on a malformed part. Excel does not report an
+ *  error for these — it silently drops the drawing — so the parser is our
+ *  stand-in for the validation Excel performs on open. */
+function parseXml(xml: string, what: string): Document {
+  const doc = new DOMParser().parseFromString(xml, "application/xml");
+  const err = doc.querySelector("parsererror");
+  if (err) throw new Error(`${what} is not well-formed XML: ${err.textContent}`);
+  return doc;
+}
+
+/** Index of each named child inside a parent, for schema-sequence assertions. */
+function childOrder(parent: Element): string[] {
+  return [...parent.children].map((c) => c.nodeName);
+}
 
 /**
  * End-to-end: ExcelJS builds a workbook, we inject scatter charts into the
@@ -80,8 +95,9 @@ describe("excelChartInject", () => {
     expect(chart).toContain("c:trendlineType val=\"linear\"");
     expect(chart).toContain("c:dispEq val=\"1\"");
     expect(chart).toContain("c:dispRSqr val=\"1\"");
-    expect(chart).toContain("'Series'!A6:A9");
-    expect(chart).toContain("'Series'!D6:D9");
+    // Ranges are written absolute, the form Excel itself emits.
+    expect(chart).toContain("'Series'!$A$6:$A$9");
+    expect(chart).toContain("'Series'!$D$6:$D$9");
     expect(chart).toContain("<c:valAx");
     expect(chart).not.toContain("<c:catAx");
 
@@ -92,9 +108,89 @@ describe("excelChartInject", () => {
     expect(reopened.getWorksheet("Series")).toBeDefined();
   });
 
-  it("is a no-op when no specs are passed", async () => {
+  // Every part we hand-write must be well-formed. An unclosed <c:spPr> inside
+  // <c:marker> is exactly what made Excel report "Removed Part:
+  // /xl/drawings/drawing2.xml" and render no charts at all.
+  it("emits well-formed chart and drawing parts", async () => {
+    const after = await injectCharts(await buildSampleWorkbook(), [
+      { sheetName: "Series", title: "S1 — [M+Na]+", xRange: "A6:A9", yRange: "D6:D9", anchorCol: 8, anchorRow: 0 },
+      { sheetName: "Series", title: "S2 — [M+K]+", xRange: "A6:A9", yRange: "D6:D9", anchorCol: 8, anchorRow: 20 },
+    ]);
+    const zip = await JSZip.loadAsync(after);
+    for (const name of Object.keys(zip.files)) {
+      if (!name.endsWith(".xml") && !name.endsWith(".rels")) continue;
+      parseXml(await zip.file(name)!.async("string"), name);
+    }
+    // Two specs on one sheet → two chart parts anchored by one drawing.
+    expect(Object.keys(zip.files).filter((n) => /^xl\/charts\/chart\d+\.xml$/.test(n))).toHaveLength(2);
+    expect(Object.keys(zip.files).filter((n) => /^xl\/drawings\/drawing\d+\.xml$/.test(n))).toHaveLength(1);
+    const drawing = await zip.file(
+      Object.keys(zip.files).find((n) => /^xl\/drawings\/drawing\d+\.xml$/.test(n))!,
+    )!.async("string");
+    // Distinct relationship ids and distinct shape ids, or Excel merges the frames.
+    expect(drawing.match(/r:id="rId1"/g)).toHaveLength(1);
+    expect(drawing.match(/r:id="rId2"/g)).toHaveLength(1);
+  });
+
+  // Excel validates the CT_ValAx / CT_Ser / CT_Trendline child sequences strictly:
+  // out-of-order children make it discard the whole drawing on open.
+  it("orders chart children per the OOXML schema sequences", async () => {
+    const after = await injectCharts(await buildSampleWorkbook(), [
+      { sheetName: "Series", title: "S1", xRange: "A6:A9", yRange: "D6:D9", anchorCol: 8, anchorRow: 0 },
+    ]);
+    const zip = await JSZip.loadAsync(after);
+    const doc = parseXml(await zip.file("xl/charts/chart1.xml")!.async("string"), "chart1.xml");
+
+    // scatterChart: scatterStyle is an ELEMENT (it was written as an attribute).
+    const scatter = doc.getElementsByTagName("c:scatterChart")[0];
+    expect(scatter).toBeTruthy();
+    expect(scatter.getAttribute("c:scatterStyle")).toBeNull();
+    expect(childOrder(scatter)[0]).toBe("c:scatterStyle");
+
+    // ser: … marker, trendline, xVal, yVal, smooth — trendline BEFORE the values.
+    const ser = doc.getElementsByTagName("c:ser")[0];
+    const serOrder = childOrder(ser);
+    expect(serOrder.indexOf("c:trendline")).toBeLessThan(serOrder.indexOf("c:xVal"));
+    expect(serOrder.indexOf("c:xVal")).toBeLessThan(serOrder.indexOf("c:yVal"));
+
+    // trendline: dispRSqr BEFORE dispEq.
+    const trend = doc.getElementsByTagName("c:trendline")[0];
+    const trendOrder = childOrder(trend);
+    expect(trendOrder.indexOf("c:trendlineType")).toBeLessThan(trendOrder.indexOf("c:dispRSqr"));
+    expect(trendOrder.indexOf("c:dispRSqr")).toBeLessThan(trendOrder.indexOf("c:dispEq"));
+
+    // valAx: title BEFORE numFmt, crossAx last of the three.
+    for (const ax of [...doc.getElementsByTagName("c:valAx")]) {
+      const order = childOrder(ax);
+      expect(order.indexOf("c:title")).toBeLessThan(order.indexOf("c:numFmt"));
+      expect(order.indexOf("c:numFmt")).toBeLessThan(order.indexOf("c:crossAx"));
+      expect(order.indexOf("c:tickLblPos")).toBeLessThan(order.indexOf("c:crossAx"));
+    }
+
+    // The two axes must not share an id, and each must cross the other.
+    const ids = [...doc.getElementsByTagName("c:valAx")].map(
+      (ax) => ax.getElementsByTagName("c:axId")[0].getAttribute("val"),
+    );
+    expect(new Set(ids).size).toBe(2);
+  });
+
+  it("strips the editAs attribute ExcelJS puts on oneCellAnchor", () => {
+    const before =
+      '<xdr:wsDr><xdr:oneCellAnchor editAs="oneCell"><xdr:from/></xdr:oneCellAnchor>' +
+      '<xdr:twoCellAnchor editAs="twoCell"><xdr:from/></xdr:twoCellAnchor></xdr:wsDr>';
+    const after = sanitizeDrawingXml(before);
+    expect(after).toContain("<xdr:oneCellAnchor>");
+    // twoCellAnchor legitimately carries editAs — it must survive.
+    expect(after).toContain('<xdr:twoCellAnchor editAs="twoCell">');
+  });
+
+  it("keeps the workbook intact when no specs are passed", async () => {
     const before = await buildSampleWorkbook();
     const after = await injectCharts(before, []);
-    expect(after.length).toBe(before.length);
+    const zip = await JSZip.loadAsync(after);
+    expect(Object.keys(zip.files)).toContain("xl/worksheets/sheet1.xml");
+    expect(Object.keys(zip.files).some((n) => /^xl\/charts\//.test(n))).toBe(false);
+    const reopened = new ExcelJS.Workbook();
+    await expect(reopened.xlsx.load(after)).resolves.toBeDefined();
   });
 });

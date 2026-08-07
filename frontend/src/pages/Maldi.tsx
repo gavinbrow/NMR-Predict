@@ -24,7 +24,7 @@ import { MaldiSpectrumPlot, type MaldiSpectrumPlotHandle } from "@/components/ma
 import { DocumentsPanel } from "@/components/maldi/DocumentsPanel";
 import { MolWeightPanel } from "@/components/maldi/MolWeightPanel";
 import { PeakPickingPanel } from "@/components/maldi/PeakPickingPanel";
-import { PeakTable } from "@/components/maldi/PeakTable";
+import { PeakTable, type AssignableSeries } from "@/components/maldi/PeakTable";
 import { ProcessingPanel } from "@/components/maldi/ProcessingPanel";
 import { SeriesPanel, type RepeatGroupItem } from "@/components/maldi/SeriesPanel";
 import { SeriesTable } from "@/components/maldi/SeriesTable";
@@ -80,7 +80,14 @@ import { interpretSpectrum, type Finding } from "@/lib/maldi/interpret";
 import { summarizeMolWeight } from "@/lib/maldi/molweight";
 import type { ParseMeta } from "@/lib/maldi/parse";
 import { manualPeak, PEAK_PRESETS, type PeakPickParams } from "@/lib/maldi/peaks";
-import { fitLadder, peaksForRepeat, seriesAdductLabel, seriesForRepeat } from "@/lib/maldi/polymers";
+import {
+  fitLadder,
+  mergeSeriesGroup,
+  peaksForRepeat,
+  seriesAdductLabel,
+  seriesForRepeat,
+  splitMergedSeries,
+} from "@/lib/maldi/polymers";
 import { explainedPeakIds as explainedPeakIdsHelper, sameLadderSiblings, unexplainedPeaks } from "@/lib/maldi/seriesMatch";
 import { buildLadderColorMap, SERIES_COLORS } from "@/lib/maldi/seriesColor";
 import type { CopolymerSeries, RepeatCandidate, RepeatSeriesGroup } from "@/lib/maldi/polymers";
@@ -178,6 +185,12 @@ function defaultBaselineStep(): ProcessingStep {
 /** Sidebar cards that default open; every other card id defaults collapsed. */
 const DEFAULT_CARD_OPEN: Record<string, boolean> = { import: true, "peak-picking": true };
 
+/** Two repeat units are the same entry when they agree to 4 dp — the precision the
+ *  detector rounds candidates to and the panel's input step. */
+function sameRepeat(a: number, b: number): boolean {
+  return Math.abs(a - b) < 5e-5;
+}
+
 const Maldi = () => {
   const [workerStatus, setWorkerStatus] = useState<WorkerStatus>("checking");
 
@@ -196,6 +209,11 @@ const Maldi = () => {
   const [customAdducts, setCustomAdducts] = useState<Adduct[]>([]);
   const [repeatCandidates, setRepeatCandidates] = useState<RepeatCandidate[]>([]);
   const [repeatMass, setRepeatMass] = useState(0);
+  // Every repeat unit kept for this spectrum — a sample with two polymers in it
+  // carries one entry per polymer. `repeatMass` above is whichever of these is
+  // currently active (previewed / assigned next); each assigned series records its
+  // own repeat mass, so series built from different repeat units coexist.
+  const [repeatMasses, setRepeatMasses] = useState<number[]>([]);
   const [endGroupMass, setEndGroupMass] = useState(0);
   const [series, setSeries] = useState<Series[]>([]);
   const [selectedSeriesId, setSelectedSeriesId] = useState<string | null>(null);
@@ -327,6 +345,29 @@ const Maldi = () => {
   // Peak ids explained by any assigned series (drives the PeakTable "unexplained
   // only" filter and the plot's unexplained-only mode).
   const explainedPeakIds = useMemo(() => explainedPeakIdsHelper(series), [series]);
+
+  // The Series column of the Peak table: which ladders a peak can be hand-assigned
+  // to, and which one currently owns it. Confirmed series come first (they are the
+  // ones an analyst is filing leftover peaks into); superseded adduct alternatives
+  // are excluded, matching every other view. A peak in several ladders shows the
+  // first — assignment from the table moves the peak, so this stays single-owner.
+  const { assignableSeries, seriesByPeakId } = useMemo(() => {
+    const ordered = series
+      .filter((s) => !s.supersededBy)
+      .slice()
+      .sort((a, b) => Number(!!b.endGroupLocked) - Number(!!a.endGroupLocked));
+    const list: AssignableSeries[] = ordered.map((s) => ({
+      id: s.id,
+      label: s.label || `${seriesAdductLabel(s, allAdducts)} · ${s.repeatMass.toFixed(1)} Da`,
+      color: colorForSeries(s),
+      confirmed: !!s.endGroupLocked,
+    }));
+    const byPeak = new Map<string, AssignableSeries>();
+    ordered.forEach((s, i) => {
+      for (const m of s.members) if (!byPeak.has(m.peakId)) byPeak.set(m.peakId, list[i]);
+    });
+    return { assignableSeries: list, seriesByPeakId: byPeak };
+  }, [series, allAdducts, colorForSeries]);
 
 
   // Every open document's display spectrum, for the overlay / stacked view modes.
@@ -723,6 +764,7 @@ const Maldi = () => {
     setRepeatCandidates([]);
     setCopolymerSeries([]);
     setRepeatMass(0);
+    setRepeatMasses([]);
     setEndGroupMass(0);
     setOverlay(null);
     setHighlightedPeakIds(undefined);
@@ -747,13 +789,14 @@ const Maldi = () => {
     state.selectedAdductIds = selectedAdductIds;
     state.pickParams = pickParams;
     state.repeatMass = repeatMass;
+    state.repeatMasses = repeatMasses;
     state.endGroupMass = endGroupMass;
     state.repeatIsotopeAware = repeatIsotopeAware;
     state.copolymerA = copolymerA;
     state.copolymerB = copolymerB;
     state.exportHistory = exportHistory;
     return state;
-  }, [sourceName, raw, processed, steps, peaks, customAdducts, series, selectedAdductIds, pickParams, repeatMass, endGroupMass, repeatIsotopeAware, copolymerA, copolymerB, exportHistory]);
+  }, [sourceName, raw, processed, steps, peaks, customAdducts, series, selectedAdductIds, pickParams, repeatMass, repeatMasses, endGroupMass, repeatIsotopeAware, copolymerA, copolymerB, exportHistory]);
 
   const loadState = useCallback((s: ProjectState) => {
     setSourceName(s.sourceName);
@@ -766,6 +809,9 @@ const Maldi = () => {
     setSelectedAdductIds(s.selectedAdductIds ?? ["H", "Na", "K"]);
     setPickParams(s.pickParams ?? { ...PEAK_PRESETS.conservative });
     setRepeatMass(s.repeatMass ?? 0);
+    // Projects saved before multi-repeat support have no list — the single active
+    // repeat unit is then the whole list.
+    setRepeatMasses(s.repeatMasses ?? (s.repeatMass && s.repeatMass > 0 ? [s.repeatMass] : []));
     setEndGroupMass(s.endGroupMass ?? 0);
     setRepeatIsotopeAware(s.repeatIsotopeAware ?? true);
     setCopolymerA(s.copolymerA ?? 0);
@@ -1115,19 +1161,71 @@ const Maldi = () => {
     setSelectedGroupKey((cur) => (cur === key ? null : key));
   }, []);
 
+  // Fold a freshly-assigned batch into the existing series list. Assigning one
+  // repeat unit must not wipe the work done on the others — a sample with two
+  // polymers is assigned one repeat unit at a time — so only the *pending* series
+  // built from the SAME repeat unit are replaced. Confirmed series survive, as do
+  // the superseded adduct alternatives that belong to a confirmed series (deleting
+  // the confirmed one is what restores those).
+  const mergeAssigned = useCallback((prev: Series[], mass: number, assigned: Series[]): Series[] => {
+    const confirmedIds = new Set(prev.filter((s) => s.endGroupLocked).map((s) => s.id));
+    const kept = prev.filter(
+      (s) =>
+        s.endGroupLocked ||
+        (s.supersededBy != null && confirmedIds.has(s.supersededBy)) ||
+        !sameRepeat(s.repeatMass, mass),
+    );
+    return [...kept, ...assigned];
+  }, []);
+
   const handleAssignSeries = useCallback(async () => {
     setAssigning(true);
     try {
       const result = await assignSeries(peaks, repeatMass, selectedAdducts);
-      setSeries(result.series);
-      toast.success(`Assigned ${result.series.length} series`);
+      setSeries((prev) => mergeAssigned(prev, repeatMass, result.series));
+      setRepeatMasses((prev) => (prev.some((m) => sameRepeat(m, repeatMass)) ? prev : [...prev, repeatMass]));
+      toast.success(`Assigned ${result.series.length} series at ${repeatMass.toFixed(3)} Da`);
     } catch (error) {
       console.error(error);
       toast.error("Series assignment failed");
     } finally {
       setAssigning(false);
     }
-  }, [peaks, repeatMass, selectedAdducts]);
+  }, [peaks, repeatMass, selectedAdducts, mergeAssigned]);
+
+  // Assign every kept repeat unit in one pass — the one-click path for a sample
+  // with two polymers once both repeat units are in the list.
+  const handleAssignAllRepeats = useCallback(async () => {
+    const masses = repeatMasses.filter((m) => m > 0);
+    if (masses.length === 0) return;
+    setAssigning(true);
+    try {
+      let total = 0;
+      for (const mass of masses) {
+        const result = await assignSeries(peaks, mass, selectedAdducts);
+        total += result.series.length;
+        setSeries((prev) => mergeAssigned(prev, mass, result.series));
+      }
+      toast.success(`Assigned ${total} series across ${masses.length} repeat units`);
+    } catch (error) {
+      console.error(error);
+      toast.error("Series assignment failed");
+    } finally {
+      setAssigning(false);
+    }
+  }, [peaks, repeatMasses, selectedAdducts, mergeAssigned]);
+
+  const handleAddRepeatMass = useCallback((mass: number) => {
+    if (!(mass > 0)) return;
+    setRepeatMasses((prev) => (prev.some((m) => sameRepeat(m, mass)) ? prev : [...prev, mass]));
+  }, []);
+
+  // Drop a repeat unit from the list. Series already built from it are deliberately
+  // left alone — the list is the set of repeat units in play, not an owner of the
+  // assignments (delete a series from the Series table to remove it).
+  const handleRemoveRepeatMass = useCallback((mass: number) => {
+    setRepeatMasses((prev) => prev.filter((m) => !sameRepeat(m, mass)));
+  }, []);
 
 
 
@@ -1204,6 +1302,138 @@ const Maldi = () => {
       // group refreshes from the updated series state — no flat-pink override needed.
     },
     [selectedSeriesId, series, peaks, allAdducts],
+  );
+
+  // Re-fit one series around an explicit member set, preserving a locked end group.
+  // Shared by every membership edit (hand-assignment from the Peak table, combine,
+  // split) so n, end group, error, R² and score always describe the current ladder.
+  const refitSeries = useCallback(
+    (s: Series, peakIds: string[]): Series => {
+      const fit = fitLadder(peaks, peakIds, s.repeatMass, adductById(allAdducts, s.adductId));
+      return {
+        ...s,
+        members: fit?.members ?? [],
+        endGroupMass: s.endGroupLocked ? s.endGroupMass : fit?.endGroupMass ?? s.endGroupMass,
+        meanErrorDa: fit?.meanErrorDa ?? s.meanErrorDa,
+        score: fit?.score ?? 0,
+        r2: fit?.r2 ?? s.r2,
+      };
+    },
+    [peaks, allAdducts],
+  );
+
+  // Hand-assign peaks to a ladder from the Peak table. The automatic assignment
+  // links peaks by spacing, so a lone oligomer at the high-mass end with no
+  // neighbour a repeat away is left unexplained however obviously it belongs — this
+  // is the manual override. The peak MOVES: it is dropped from any other visible
+  // series first, so the table's Series column stays a single-owner picker.
+  // Superseded series (the hidden adduct alternatives of a confirmed one) are left
+  // untouched, so deleting the confirmed series still restores them intact.
+  const handleAddPeaksToSeries = useCallback(
+    (seriesId: string, peakIds: string[]) => {
+      const add = new Set(peakIds);
+      if (add.size === 0) return;
+      setSeries((prev) =>
+        prev.map((s) => {
+          if (s.supersededBy) return s;
+          if (s.id === seriesId) {
+            const ids = new Set(s.members.map((m) => m.peakId));
+            const before = ids.size;
+            for (const id of add) ids.add(id);
+            return ids.size === before ? s : refitSeries(s, [...ids]);
+          }
+          if (!s.members.some((m) => add.has(m.peakId))) return s;
+          return refitSeries(s, s.members.filter((m) => !add.has(m.peakId)).map((m) => m.peakId));
+        }),
+      );
+      const target = series.find((s) => s.id === seriesId);
+      toast.success(
+        `Added ${add.size} ${add.size === 1 ? "peak" : "peaks"} to ${target?.label || (target ? seriesAdductLabel(target, allAdducts) : "series")}`,
+      );
+    },
+    [refitSeries, series, allAdducts],
+  );
+
+  const handleRemovePeaksFromSeries = useCallback(
+    (peakIds: string[]) => {
+      const drop = new Set(peakIds);
+      if (drop.size === 0) return;
+      setSeries((prev) =>
+        prev.map((s) => {
+          if (s.supersededBy) return s;
+          if (!s.members.some((m) => drop.has(m.peakId))) return s;
+          return refitSeries(s, s.members.filter((m) => !drop.has(m.peakId)).map((m) => m.peakId));
+        }),
+      );
+      toast.success(`Removed ${drop.size} ${drop.size === 1 ? "peak" : "peaks"} from its series`);
+    },
+    [refitSeries],
+  );
+
+  // Force several series into one ladder. Instrument calibration can drift the
+  // spacing enough that the automatic assignment splits one polymer in two; this
+  // says "these are the same series". The pre-merge series are kept on the result's
+  // `mergedFrom` so `handleSplitSeries` can undo it.
+  const handleCombineSeries = useCallback(
+    (ids: string[]) => {
+      const wanted = new Set(ids);
+      const group = series.filter((s) => wanted.has(s.id));
+      if (group.length < 2) return;
+      const merged = mergeSeriesGroup(group, peaks, allAdducts);
+      if (!merged) {
+        toast.error("Could not combine those series");
+        return;
+      }
+      const absorbed = new Set(group.map((s) => s.id).filter((id) => id !== merged.id));
+      setSeries((prev) =>
+        prev
+          .filter((s) => !absorbed.has(s.id))
+          .map((s) => {
+            if (s.id === merged.id) return merged;
+            // Re-point any hidden alternative whose superseding series was absorbed.
+            if (s.supersededBy && absorbed.has(s.supersededBy)) return { ...s, supersededBy: merged.id };
+            return s;
+          }),
+      );
+      setSelectedSeriesId(null);
+      setHighlightedSeriesIds(undefined);
+      setHighlightedPeakIds(undefined);
+      setIsolateSelection(false);
+      toast.success(`Combined ${group.length} series into one ladder`);
+    },
+    [series, peaks, allAdducts],
+  );
+
+  // Undo a forced combine. The series that led the merge keeps the row (and the
+  // naming / confirmed state the user gave it); the absorbed ones go back to the
+  // pending list exactly as they were before the merge.
+  const handleSplitSeries = useCallback(
+    (id: string) => {
+      const target = series.find((s) => s.id === id);
+      if (!target) return;
+      const restored = splitMergedSeries(target);
+      if (!restored) return;
+      const parts = restored.map((p) =>
+        p.id === target.id
+          ? {
+              ...p,
+              label: target.label,
+              description: target.description,
+              color: target.color,
+              endGroupLabel: target.endGroupLabel,
+              endGroupLocked: target.endGroupLocked,
+              endGroupMass: target.endGroupLocked ? target.endGroupMass : p.endGroupMass,
+            }
+          : p,
+      );
+      setSeries((prev) => prev.flatMap((s) => (s.id === id ? parts : [s])));
+      setSelectedSeriesId((cur) => (cur === id ? null : cur));
+      setHighlightedSeriesIds(undefined);
+      setHighlightedPeakIds(undefined);
+      setIsolateSelection(false);
+      toast.success(`Split back into ${parts.length} series`);
+    },
+    [series],
   );
 
   const handleHighlightAllSeries = useCallback(
@@ -1307,13 +1537,15 @@ const Maldi = () => {
 
   const handleApplyTemplate = useCallback(
     (t: ChemistryTemplate) => {
-      setRepeatMass(Number(t.repeatMass.toFixed(4)));
+      const mass = Number(t.repeatMass.toFixed(4));
+      setRepeatMass(mass);
+      handleAddRepeatMass(mass);
       if (t.endGroupMass != null) setEndGroupMass(t.endGroupMass);
       const valid = t.adductIds.filter((id) => allAdducts.some((a) => a.id === id));
       if (valid.length) setSelectedAdductIds(valid);
       toast.success(`Applied template: ${t.name}`);
     },
-    [allAdducts],
+    [allAdducts, handleAddRepeatMass],
   );
 
   // --- Document trace styling (colour / visibility / offset) -------------------
@@ -1443,7 +1675,7 @@ const Maldi = () => {
     activeDocId,
     deps: [
       projectName, sourceName, peaks, series, steps, customAdducts, selectedAdductIds,
-      pickParams, repeatMass, endGroupMass, repeatIsotopeAware,
+      pickParams, repeatMass, repeatMasses, endGroupMass, repeatIsotopeAware,
       copolymerA, copolymerB, raw,
     ],
     getSnapshot: getUndoSnapshot,
@@ -1659,6 +1891,8 @@ const Maldi = () => {
     series,
     adducts: allAdducts,
     repeatMass,
+    // Every repeat unit in play, so a two-polymer sample's report names both.
+    repeatMasses: repeatMasses.length ? repeatMasses : repeatMass > 0 ? [repeatMass] : [],
     molWeight: summarizeMolWeight(peaks, series, series.length ? "series" : "all", {}),
     findings,
     selectedSeriesIds: highlightedSeriesIds ? [...highlightedSeriesIds] : [],
@@ -1666,7 +1900,7 @@ const Maldi = () => {
     // silently embed the other open documents' traces now that overlays share
     // the canvas. (WP3 §9.)
     spectrumPng: plotHandleRef.current?.getPng({ primaryOnly: true }) ?? null,
-  }), [projectName, sourceName, raw, peaks, series, allAdducts, repeatMass, findings, highlightedSeriesIds]);
+  }), [projectName, sourceName, raw, peaks, series, allAdducts, repeatMass, repeatMasses, findings, highlightedSeriesIds]);
 
 
   const handleExport = useCallback(
@@ -1923,6 +2157,10 @@ const Maldi = () => {
                   repeatMass={repeatMass}
                   onRepeatMassChange={handleRepeatMassChange}
                   onSelectRepeatCandidate={handleSelectRepeatCandidate}
+                  repeatMasses={repeatMasses}
+                  onAddRepeatMass={handleAddRepeatMass}
+                  onRemoveRepeatMass={handleRemoveRepeatMass}
+                  onAssignAllRepeats={handleAssignAllRepeats}
                   repeatGroups={repeatGroupItems}
                   selectedGroupKey={selectedGroupKey}
                   onSelectGroup={handleSelectGroup}
@@ -1937,6 +2175,7 @@ const Maldi = () => {
                   onHighlightAll={handleHighlightAllSeries}
                   colorForSeries={colorForSeries}
                   onAssignSeriesToTable={handleAssignSeriesToTable}
+                  onCombineSeries={handleCombineSeries}
                   unexplainedCount={unexplainedPeaks(peaks, series).length}
                 />
               </SidebarCard>
@@ -2042,6 +2281,14 @@ const Maldi = () => {
                           onSelectPeak={(id) => highlightPeaks(new Set([id]))}
                           explainedPeakIds={explainedPeakIds}
                           peakOwner={combineDocuments ? peakOwnerMap : undefined}
+                          {...(combineDocuments
+                            ? {}
+                            : {
+                                assignableSeries,
+                                seriesByPeakId,
+                                onAddPeaksToSeries: handleAddPeaksToSeries,
+                                onRemovePeaksFromSeries: handleRemovePeaksFromSeries,
+                              })}
                         />
                       </div>
                     </TabsContent>
@@ -2112,6 +2359,8 @@ const Maldi = () => {
                             onSetSeriesEndGroupLabel={handleSetSeriesEndGroupLabel}
                             onSetSeriesEndGroupMass={handleSetSeriesEndGroupMass}
                             onDeleteSeries={handleDeleteSeries}
+                            onCombineSeries={handleCombineSeries}
+                            onSplitSeries={handleSplitSeries}
                             colorFor={colorForSeries}
                           />
                         </div>

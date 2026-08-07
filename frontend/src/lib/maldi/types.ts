@@ -119,6 +119,13 @@ export interface Series {
    *  that confirmed series' id. Superseded series are hidden from the pending list
    *  but kept in state so a delete can restore them. */
   supersededBy?: string;
+  /**
+   * Pre-merge snapshots of the series this one was forced together from (see
+   * `mergeSeriesGroup` in polymers.ts). Present only on merged series; the Series
+   * table uses it to split the merge back apart. Nested merges are flattened at
+   * merge time, so this is always one level deep.
+   */
+  mergedFrom?: Series[];
 }
 
 // ---------------------------------------------------------------------------
@@ -148,6 +155,15 @@ export interface ProjectState {
   pickParams?: PeakPickParams;
   /** Active repeat unit for series / end-group analysis. */
   repeatMass?: number;
+  /**
+   * Every repeat unit in play for this spectrum — a sample with two polymers in it
+   * carries one entry per polymer. `repeatMass` is whichever of these is currently
+   * selected in the Series panel (the one previewed / assigned next); each assigned
+   * {@link Series} still records its own `repeatMass`, so series from different
+   * repeat units coexist. Absent on projects saved before multi-repeat support, in
+   * which case the single `repeatMass` is the whole list.
+   */
+  repeatMasses?: number[];
   /** @deprecated — no longer used; kept so already-saved IndexedDB projects still deserialize. */
   baseRepeat?: number;
   /** Active end-group mass for the current repeat unit. */

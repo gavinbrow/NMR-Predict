@@ -101,7 +101,7 @@ export function exportSpectrumCsv(spectrum: SpectrumData, baseName: string, labe
 
 /** Export the assigned series (one row per member peak) as CSV. */
 export function exportSeriesCsv(series: Series[], adducts: Adduct[], baseName: string): void {
-  const header = ["seriesId", "adduct", "label", "description", "endGroupLabel", "repeatMass", "endGroupMass", "score", "meanErrorDa", "n", "peakId"];
+  const header = ["seriesId", "adduct", "label", "description", "endGroupLabel", "repeatMass", "endGroupMass", "score", "meanErrorDa", "mergedFrom", "n", "peakId"];
   const rows: (string | number | undefined)[][] = [header];
   for (const s of series) {
     const adduct = adductById(adducts, s.adductId).label;
@@ -109,7 +109,7 @@ export function exportSeriesCsv(series: Series[], adducts: Adduct[], baseName: s
       rows.push([
         s.id, adduct, s.label ?? "", s.description ?? "", s.endGroupLabel ?? "",
         s.repeatMass.toFixed(4), s.endGroupMass.toFixed(4),
-        s.score, s.meanErrorDa?.toFixed(4) ?? "", m.n, m.peakId,
+        s.score, s.meanErrorDa?.toFixed(4) ?? "", s.mergedFrom?.length ?? "", m.n, m.peakId,
       ]);
     }
   }
@@ -202,7 +202,11 @@ export interface ReportPayload {
   peaks: Peak[];
   series: Series[];
   adducts: Adduct[];
+  /** The active repeat unit (kept for callers that only track one). */
   repeatMass?: number;
+  /** Every repeat unit in play — one per polymer in a multi-polymer sample. Falls
+   *  back to {@link ReportPayload.repeatMass} when omitted. */
+  repeatMasses?: number[];
   molWeight?: MolWeightStats | null;
   endGroupCandidates?: EndGroupCandidate[];
   findings?: Finding[];
@@ -210,6 +214,25 @@ export interface ReportPayload {
   spectrumPng?: string | null;
   /** Ids of series currently selected/highlighted in the UI. Empty = export all. */
   selectedSeriesIds?: string[];
+}
+
+/**
+ * Every repeat unit the report should name, ascending. Prefers the explicit list
+ * (a two-polymer sample has one entry per polymer), falls back to the single
+ * active repeat unit, and finally to the distinct repeats the assigned series
+ * themselves carry — so a report built from an older payload still shows them all.
+ */
+export function reportRepeatMasses(payload: ReportPayload): number[] {
+  const out: number[] = [];
+  const push = (m: number | undefined) => {
+    if (!(m != null && m > 0)) return;
+    if (out.some((x) => Math.abs(x - m) < 5e-5)) return;
+    out.push(m);
+  };
+  for (const m of payload.repeatMasses ?? []) push(m);
+  push(payload.repeatMass);
+  for (const s of payload.series) push(s.repeatMass);
+  return out.sort((a, b) => a - b);
 }
 
 function topPeaks(peaks: Peak[], limit: number): Peak[] {
@@ -409,7 +432,20 @@ export function exportReportPdf(payload: ReportPayload): void {
     y,
   );
   doc.setTextColor(0);
-  y += 22;
+  y += 14;
+
+  // Repeat units in play — plural for a sample carrying more than one polymer.
+  const pdfRepeats = reportRepeatMasses(payload);
+  if (pdfRepeats.length) {
+    doc.setTextColor(110);
+    doc.text(
+      `${pdfRepeats.length > 1 ? "Repeat units" : "Repeat unit"}: ${pdfRepeats.map((m) => `${m.toFixed(3)} Da`).join("   •   ")}`,
+      margin,
+      y,
+    );
+    doc.setTextColor(0);
+  }
+  y += 16;
 
   // Spectrum image.
   if (payload.spectrumPng) {
@@ -473,8 +509,9 @@ export function exportReportPdf(payload: ReportPayload): void {
     for (const s of [...payload.series].sort((a, b) => b.score - a.score).slice(0, 10)) {
       ensureSpace(12);
       const nameTag = s.label ? `${s.label}  \u00b7  ` : "";
+      const mergeTag = s.mergedFrom?.length ? `  [merged from ${s.mergedFrom.length}]` : "";
       doc.text(
-        `${nameTag}${adductById(payload.adducts, s.adductId).label}  repeat ${s.repeatMass.toFixed(2)} Da  end ${s.endGroupMass.toFixed(2)} Da${s.endGroupLabel ? ` (${s.endGroupLabel})` : ""}  ${s.members.length} peaks  err ${(s.meanErrorDa ?? 0).toFixed(3)}  score ${Math.round(s.score * 100)}%`,
+        `${nameTag}${adductById(payload.adducts, s.adductId).label}  repeat ${s.repeatMass.toFixed(2)} Da  end ${s.endGroupMass.toFixed(2)} Da${s.endGroupLabel ? ` (${s.endGroupLabel})` : ""}  ${s.members.length} peaks  err ${(s.meanErrorDa ?? 0).toFixed(3)}  score ${Math.round(s.score * 100)}%${mergeTag}`,
         margin + 8,
         y,
       );
@@ -560,7 +597,11 @@ export async function exportReportExcel(payload: ReportPayload): Promise<void> {
   summary.addRow(["Source", payload.sourceName]);
   summary.addRow(["Points", payload.pointCount]);
   summary.addRow(["Peaks", payload.peaks.length]);
-  summary.addRow(["Repeat unit (Da)", payload.repeatMass ?? ""]);
+  const repeatMasses = reportRepeatMasses(payload);
+  summary.addRow([
+    repeatMasses.length > 1 ? "Repeat units (Da)" : "Repeat unit (Da)",
+    repeatMasses.length ? repeatMasses.map((m) => m.toFixed(4)).join(", ") : "",
+  ]);
   summary.addRow([]);
   if (payload.molWeight && payload.molWeight.count > 0) {
     const mw = payload.molWeight;
@@ -620,6 +661,11 @@ export async function exportReportExcel(payload: ReportPayload): Promise<void> {
   }
   let row = peakHeaderRow + 1 + sortedPeaks.length + 2;
   const chartSpecs: ChartSpec[] = [];
+  // Charts are 16 rows tall (see buildDrawingXml). A short series block is
+  // shorter than that, so the next chart is pushed below the previous one rather
+  // than overlapping it.
+  const CHART_ROWS = 16;
+  let nextFreeChartRow = 0;
 
   if (seriesToExport.length) {
     const peakById = new Map(payload.peaks.map((p) => [p.id, p] as const));
@@ -671,7 +717,7 @@ export async function exportReportExcel(payload: ReportPayload): Promise<void> {
       const slopeCell = `$C$${row + 1}`;
       const interceptCell = `$E$${row + 1}`;
 
-      ws.getCell(`A${row}`).value = `Series ${seriesIndex + 1}`;
+      ws.getCell(`A${row}`).value = `Series ${seriesIndex + 1}${s.label ? ` — ${s.label}` : ""}`;
       ws.getCell(`A${row}`).font = { bold: true };
       ws.mergeCells(`A${row}:G${row}`);
       row += 1;
@@ -690,7 +736,8 @@ export async function exportReportExcel(payload: ReportPayload): Promise<void> {
       row += 1;
 
       ws.getCell(`A${row}`).value = `Repeat: ${s.repeatMass.toFixed(2)} Da`;
-      ws.getCell(`B${row}`).value = `End group: ${s.endGroupMass.toFixed(2)} Da${endGroupLabel}`;
+      const mergeNote = s.mergedFrom?.length ? ` · forced together from ${s.mergedFrom.length} series` : "";
+      ws.getCell(`B${row}`).value = `End group: ${s.endGroupMass.toFixed(2)} Da${endGroupLabel}${mergeNote}`;
       ws.mergeCells(`B${row}:G${row}`);
       row += 1;
 
@@ -737,14 +784,19 @@ export async function exportReportExcel(payload: ReportPayload): Promise<void> {
 
       // Drop the manual "insert a chart" note — a real embedded chart is
       // injected below. Record the spec so we can post-process the xlsx zip.
+      // Anchor in column I (0-based col 8), at the series title row (0-based) —
+      // or lower when the previous chart still occupies that band.
+      const anchorRow = Math.max(headerRow - 6, nextFreeChartRow);
+      nextFreeChartRow = anchorRow + CHART_ROWS + 1;
       chartSpecs.push({
         sheetName: "Series",
-        title: `Series ${seriesIndex + 1} — ${adduct.label}`,
+        // The repeat unit is in the title so a multi-polymer sample's charts are
+        // told apart at a glance.
+        title: `Series ${seriesIndex + 1}${s.label ? ` (${s.label})` : ""} — ${adduct.label} · ${s.repeatMass.toFixed(2)} Da`,
         xRange: nRange,
         yRange: neutralRange,
-        // Anchor in column I (0-based col 8), at the series title row (0-based).
         anchorCol: 8,
-        anchorRow: headerRow - 6,
+        anchorRow,
       });
       row += 1; // blank separator between series blocks
     }

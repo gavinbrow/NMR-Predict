@@ -27,6 +27,15 @@ import { manualPeak } from "@/lib/maldi/peaks";
 import type { Peak } from "@/lib/maldi/types";
 import type { PeakOwner } from "@/pages/Maldi";
 
+/** One series a peak can be dropped into from the table's Series column. */
+export interface AssignableSeries {
+  id: string;
+  label: string;
+  color: string;
+  /** True once the series has been confirmed into the Series table. */
+  confirmed: boolean;
+}
+
 interface PeakTableProps {
   peaks: Peak[];
   onChange: (peaks: Peak[]) => void;
@@ -37,6 +46,15 @@ interface PeakTableProps {
   /** When provided (Combine documents mode), a Source column shows the owning
    *  document's name preceded by a colour dot. Absent = single-document mode. */
   peakOwner?: Map<string, PeakOwner>;
+  /** Series a peak can be hand-assigned to. Omitted (Combine documents mode) hides
+   *  the Series column — membership is a per-document edit. */
+  assignableSeries?: AssignableSeries[];
+  /** Which series currently owns each peak, keyed by peak id. */
+  seriesByPeakId?: Map<string, AssignableSeries>;
+  /** Add peaks to a series' ladder (the ladder is re-fit around them). */
+  onAddPeaksToSeries?: (seriesId: string, peakIds: string[]) => void;
+  /** Drop peaks from whichever series currently owns them. */
+  onRemovePeaksFromSeries?: (peakIds: string[]) => void;
 }
 
 type SortKey = "mz" | "intensity" | "snr" | "width";
@@ -66,7 +84,18 @@ const FLAG_STYLES: Record<string, string> = {
   solvent: "bg-red-100 text-red-700",
 };
 
-export function PeakTable({ peaks, onChange, highlightedPeakIds, onSelectPeak, explainedPeakIds, peakOwner }: PeakTableProps) {
+export function PeakTable({
+  peaks,
+  onChange,
+  highlightedPeakIds,
+  onSelectPeak,
+  explainedPeakIds,
+  peakOwner,
+  assignableSeries,
+  seriesByPeakId,
+  onAddPeaksToSeries,
+  onRemovePeaksFromSeries,
+}: PeakTableProps) {
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [newMz, setNewMz] = useState("");
   const [newIntensity, setNewIntensity] = useState("");
@@ -192,6 +221,18 @@ export function PeakTable({ peaks, onChange, highlightedPeakIds, onSelectPeak, e
     [peaks, explainedPeakIds],
   );
 
+  // Hand-assignment of peaks to a ladder. The automatic assignment drops peaks the
+  // spacing scan can't reach — most often a lone high-m/z oligomer with no
+  // neighbour a repeat away — so the leftover peaks the "unexplained only" filter
+  // surfaces can be dropped into whichever series the analyst says they belong to.
+  // Hidden until at least one series exists — an empty picker is pure noise.
+  const canAssignSeries = (assignableSeries?.length ?? 0) > 0 && onAddPeaksToSeries != null;
+  const assignPeaksTo = (seriesId: string, peakIds: string[]) => {
+    if (peakIds.length === 0) return;
+    if (seriesId) onAddPeaksToSeries?.(seriesId, peakIds);
+    else onRemovePeaksFromSeries?.(peakIds);
+  };
+
   return (
     <div className="flex h-full flex-col">
       {/* Toolbar: manual add + bulk actions */}
@@ -218,6 +259,29 @@ export function PeakTable({ peaks, onChange, highlightedPeakIds, onSelectPeak, e
           <input type="checkbox" checked={unexplainedOnly} onChange={(e) => setUnexplainedOnly(e.target.checked)} />
           Unexplained only{unexplainedCount > 0 && ` (${unexplainedCount})`}
         </label>
+        {canAssignSeries && (
+          <select
+            className="h-7 rounded-md border border-border/60 bg-background px-1.5 text-[11px]"
+            value=""
+            disabled={selected.size === 0}
+            title="Add the selected peaks to a series (the ladder is re-fit around them)"
+            onChange={(e) => {
+              assignPeaksTo(e.target.value === "__none__" ? "" : e.target.value, [...selected]);
+              e.currentTarget.value = "";
+            }}
+          >
+            <option value="" disabled>
+              {selected.size > 0 ? `Add ${selected.size} to series…` : "Add to series…"}
+            </option>
+            {assignableSeries!.map((s) => (
+              <option key={s.id} value={s.id}>
+                {s.confirmed ? "" : "· "}
+                {s.label}
+              </option>
+            ))}
+            <option value="__none__">Remove from series</option>
+          </select>
+        )}
         <div className="ml-auto flex flex-wrap items-center gap-2">
           <input
             type="color"
@@ -276,6 +340,7 @@ export function PeakTable({ peaks, onChange, highlightedPeakIds, onSelectPeak, e
                 <SortHead label="S/N" sortKey="snr" active={sortKey} dir={sortDir} onSort={toggleSort} />
                 <SortHead label="Width" sortKey="width" active={sortKey} dir={sortDir} onSort={toggleSort} />
                 <TableHead className="w-10 text-xs">Color</TableHead>
+                {canAssignSeries && <TableHead className="text-xs">Series</TableHead>}
                 <TableHead className="text-xs">Flag</TableHead>
                 <TableHead className="text-xs">Label</TableHead>
                 <TableHead className="text-xs">Actions</TableHead>
@@ -333,6 +398,35 @@ export function PeakTable({ peaks, onChange, highlightedPeakIds, onSelectPeak, e
                         className="h-6 w-7 cursor-pointer rounded border border-border/60 bg-transparent p-0.5"
                       />
                     </TableCell>
+                    {canAssignSeries && (
+                      <TableCell onClick={(e) => e.stopPropagation()}>
+                        {(() => {
+                          const owner = seriesByPeakId?.get(peak.id);
+                          return (
+                            <span className="inline-flex items-center gap-1.5">
+                              <span
+                                className="h-2.5 w-2.5 shrink-0 rounded-full border border-border/60"
+                                style={owner ? { backgroundColor: owner.color } : undefined}
+                              />
+                              <select
+                                className="h-6 max-w-[9rem] rounded border border-border/60 bg-background px-1 text-[11px]"
+                                value={owner?.id ?? ""}
+                                title="Series this peak belongs to"
+                                onChange={(e) => assignPeaksTo(e.target.value, [peak.id])}
+                              >
+                                <option value="">—</option>
+                                {assignableSeries!.map((s) => (
+                                  <option key={s.id} value={s.id}>
+                                    {s.confirmed ? "" : "· "}
+                                    {s.label}
+                                  </option>
+                                ))}
+                              </select>
+                            </span>
+                          );
+                        })()}
+                      </TableCell>
+                    )}
                     <TableCell>
                       {peak.flag ? (
                         <span className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${FLAG_STYLES[peak.flag] ?? "bg-muted text-muted-foreground"}`}>

@@ -585,6 +585,88 @@ export function seriesAdductLabel(series: Series, adducts: Adduct[]): string {
 }
 
 // ---------------------------------------------------------------------------
+// Forced merge / split of series
+// ---------------------------------------------------------------------------
+
+/**
+ * The series that leads a forced merge: most members first, then best score. Its
+ * repeat unit, adduct, colour and label become the merged series' — so combining a
+ * long, well-fit ladder with a short calibration-drifted fragment keeps the good
+ * ladder's chemistry rather than the fragment's.
+ */
+function mergePrimary(group: Series[]): Series {
+  return [...group].sort((a, b) => b.members.length - a.members.length || b.score - a.score)[0];
+}
+
+/**
+ * Force several series into one. The automatic assignment splits a ladder in two
+ * whenever instrument calibration drifts the spacing enough that `linkByRepeat`
+ * stops bridging the rungs; this is the manual override that says "these are one
+ * polymer". Members are unioned (by peak id) and the ladder is re-fit against the
+ * primary's repeat unit and adduct, so n, end group, error, R² and score all
+ * describe the combined ladder.
+ *
+ * The pre-merge series are snapshotted onto `mergedFrom` so {@link splitMergedSeries}
+ * can put them back. Merging an already-merged series flattens: its own
+ * `mergedFrom` entries are carried up rather than nested, so one split always
+ * returns to genuinely un-merged series.
+ *
+ * Returns null when fewer than two series are given or the fit fails (no member
+ * resolves to a positive neutral mass).
+ */
+export function mergeSeriesGroup(
+  group: Series[],
+  peaks: Peak[],
+  adducts: Adduct[],
+): Series | null {
+  if (group.length < 2) return null;
+  const primary = mergePrimary(group);
+  const adduct = adductById(adducts, primary.adductId);
+
+  // Union of member peak ids, first-seen order (the fit re-sorts by neutral mass).
+  const peakIds: string[] = [];
+  const seen = new Set<string>();
+  for (const s of group) {
+    for (const m of s.members) {
+      if (seen.has(m.peakId)) continue;
+      seen.add(m.peakId);
+      peakIds.push(m.peakId);
+    }
+  }
+
+  const fit = fitLadder(peaks, peakIds, primary.repeatMass, adduct);
+  if (!fit) return null;
+
+  // Flatten: a merged member contributes its own originals, never itself.
+  const originals: Series[] = [];
+  for (const s of group) {
+    if (s.mergedFrom?.length) originals.push(...s.mergedFrom.map((o) => ({ ...o })));
+    else originals.push({ ...s, mergedFrom: undefined });
+  }
+
+  return {
+    ...primary,
+    members: fit.members,
+    endGroupMass: primary.endGroupLocked ? primary.endGroupMass : fit.endGroupMass,
+    meanErrorDa: fit.meanErrorDa,
+    score: fit.score,
+    r2: fit.r2,
+    mergedFrom: originals,
+  };
+}
+
+/**
+ * Undo a forced merge: hand back the pre-merge series recorded on `mergedFrom`.
+ * Edits made to the merged series (renames, manual member changes) are not
+ * replayed onto the originals — the split restores exactly what was combined.
+ * Returns null when the series was never merged.
+ */
+export function splitMergedSeries(series: Series): Series[] | null {
+  if (!series.mergedFrom?.length) return null;
+  return series.mergedFrom.map((s) => ({ ...s, mergedFrom: undefined }));
+}
+
+// ---------------------------------------------------------------------------
 // Copolymer / alternating repeat detection (Phase 4)
 // ---------------------------------------------------------------------------
 

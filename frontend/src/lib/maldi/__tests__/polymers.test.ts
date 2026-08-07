@@ -4,10 +4,12 @@ import {
   assignSeries,
   detectRepeatUnits,
   fitLadder,
+  mergeSeriesGroup,
   peaksForRepeat,
   seriesForRepeat,
+  splitMergedSeries,
 } from "../polymers";
-import type { Peak } from "../types";
+import type { Peak, Series } from "../types";
 import { pickPegPeaks, PEG_REPEAT } from "./fixtures";
 
 const pegPeaks = pickPegPeaks;
@@ -200,5 +202,90 @@ describe("fitLadder", () => {
 
   it("returns null when no member resolves to a positive neutral mass", () => {
     expect(fitLadder([], [], REPEAT, H)).toBeNull();
+  });
+});
+
+describe("mergeSeriesGroup / splitMergedSeries", () => {
+  const H = BUILTIN_ADDUCTS.find((a) => a.id === "H")!;
+  const REPEAT = 224;
+  // One polymer whose ladder the automatic assignment split in two: the upper
+  // half drifted ~0.6 Da off the ideal spacing (instrument calibration), which is
+  // enough for linkByRepeat to stop bridging the two halves.
+  const lowMz = [695, 919, 1143, 1368];
+  const highMz = [2040.6, 2264.6, 2488.6, 2712.6];
+  const peaks: Peak[] = [...lowMz, ...highMz].map((mz) => ({
+    id: `p${mz}`,
+    mz,
+    intensity: 1000,
+    accepted: true,
+  }));
+  const mkSeries = (id: string, mzs: number[]): Series => {
+    const fit = fitLadder(peaks, mzs.map((m) => `p${m}`), REPEAT, H)!;
+    return {
+      id,
+      label: id,
+      repeatMass: REPEAT,
+      endGroupMass: fit.endGroupMass,
+      adductId: H.id,
+      members: fit.members,
+      score: fit.score,
+      meanErrorDa: fit.meanErrorDa,
+      r2: fit.r2,
+    };
+  };
+
+  it("unions the members and re-fits the combined ladder", () => {
+    const a = mkSeries("a", lowMz);
+    const b = mkSeries("b", highMz);
+    const merged = mergeSeriesGroup([a, b], peaks, BUILTIN_ADDUCTS)!;
+    expect(merged).not.toBeNull();
+    expect(merged.members.length).toBe(lowMz.length + highMz.length);
+    // n runs across the whole ladder, including the gap the split created.
+    const ns = merged.members.map((m) => m.n);
+    expect(ns).toEqual([...ns].sort((x, y) => x - y));
+    expect(new Set(ns).size).toBe(ns.length);
+    expect(merged.mergedFrom).toHaveLength(2);
+  });
+
+  it("keeps the larger ladder's identity and rejects a group of one", () => {
+    const big = mkSeries("big", [...lowMz, 1592]);
+    const small = mkSeries("small", highMz.slice(0, 3));
+    const merged = mergeSeriesGroup([small, big], peaks, BUILTIN_ADDUCTS)!;
+    expect(merged.id).toBe("big");
+    expect(mergeSeriesGroup([big], peaks, BUILTIN_ADDUCTS)).toBeNull();
+  });
+
+  it("round-trips: splitting a merge restores the originals", () => {
+    const a = mkSeries("a", lowMz);
+    const b = mkSeries("b", highMz);
+    const merged = mergeSeriesGroup([a, b], peaks, BUILTIN_ADDUCTS)!;
+    const parts = splitMergedSeries(merged)!;
+    expect(parts.map((p) => p.id).sort()).toEqual(["a", "b"]);
+    for (const original of [a, b]) {
+      const restored = parts.find((p) => p.id === original.id)!;
+      expect(restored.members).toEqual(original.members);
+      expect(restored.endGroupMass).toBe(original.endGroupMass);
+      expect(restored.mergedFrom).toBeUndefined();
+    }
+    expect(splitMergedSeries(a)).toBeNull();
+  });
+
+  it("flattens nested merges so one split fully un-merges", () => {
+    const a = mkSeries("a", lowMz.slice(0, 2));
+    const b = mkSeries("b", lowMz.slice(2));
+    const c = mkSeries("c", highMz);
+    const first = mergeSeriesGroup([a, b], peaks, BUILTIN_ADDUCTS)!;
+    const second = mergeSeriesGroup([first, c], peaks, BUILTIN_ADDUCTS)!;
+    expect(second.mergedFrom).toHaveLength(3);
+    expect(splitMergedSeries(second)!.map((p) => p.id).sort()).toEqual(["a", "b", "c"]);
+  });
+
+  it("preserves a locked end group across the merge", () => {
+    // `a` leads the merge (more members), so its confirmed end group must survive.
+    const a = { ...mkSeries("a", lowMz), endGroupLocked: true, endGroupMass: 42 };
+    const b = mkSeries("b", highMz.slice(0, 3));
+    const merged = mergeSeriesGroup([a, b], peaks, BUILTIN_ADDUCTS)!;
+    expect(merged.id).toBe("a");
+    expect(merged.endGroupMass).toBe(42);
   });
 });

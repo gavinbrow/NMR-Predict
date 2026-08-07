@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import ExcelJS from "exceljs";
 import JSZip from "jszip";
-import { exportReportExcel, type ReportPayload } from "../export";
+import { exportReportExcel, reportRepeatMasses, type ReportPayload } from "../export";
 import type { Peak, Series, Adduct } from "../types";
 
 /** Build a minimal but realistic payload with one 4-member series. */
@@ -99,17 +99,50 @@ async function readSeriesSheet(buffer: Uint8Array): Promise<string> {
   return zip.file(sheetPath)!.async("string");
 }
 
-async function buildAndReadSheet(): Promise<string> {
+/** Run the export and hand back the raw xlsx bytes. */
+async function buildWorkbook(payload: ReportPayload = buildPayload()): Promise<Uint8Array> {
   const cap = captureDownload();
   try {
-    await exportReportExcel(buildPayload());
+    await exportReportExcel(payload);
   } finally {
     cap.restore();
   }
   const blob = cap.getBlob();
   expect(blob).toBeTruthy();
-  const buf = await blobToUint8Array(blob!);
-  return readSeriesSheet(buf);
+  return blobToUint8Array(blob!);
+}
+
+async function buildAndReadSheet(): Promise<string> {
+  return readSeriesSheet(await buildWorkbook());
+}
+
+/** A two-polymer sample: a 22.2 Da ladder and a 44.4 Da one, each its own series. */
+function buildTwoPolymerPayload(): ReportPayload {
+  const base = buildPayload();
+  const ns = [3, 4, 5, 6];
+  const peaks2: Peak[] = ns.map((n, i) => {
+    const neutral = 250 + n * 44.4;
+    const mz = neutral + 21.9819;
+    return { id: `q${i}`, mz, intensity: 800 - i * 50, centroid: mz };
+  });
+  const series2: Series = {
+    id: "s2",
+    label: "S2",
+    repeatMass: 44.4,
+    endGroupMass: 250,
+    adductId: "na",
+    members: ns.map((n, i) => ({ peakId: `q${i}`, n })),
+    score: 0.9,
+    r2: 0.998,
+  };
+  return {
+    ...base,
+    peaks: [...base.peaks, ...peaks2],
+    series: [...base.series, series2],
+    repeatMass: 22.2,
+    repeatMasses: [22.2, 44.4],
+    selectedSeriesIds: [],
+  };
 }
 
 /** Pull every formula cell out of the sheet XML: { cell: "E26", formula: "..." }. */
@@ -168,4 +201,58 @@ describe("exportReportExcel — series block formulas", () => {
   });
 });
 
-void ExcelJS;
+describe("exportReportExcel — multiple repeat units", () => {
+  it("collects every repeat unit in play, de-duplicated and ascending", () => {
+    expect(reportRepeatMasses(buildTwoPolymerPayload())).toEqual([22.2, 44.4]);
+    // No explicit list: fall back to the active repeat plus the series' own.
+    const p = buildTwoPolymerPayload();
+    expect(reportRepeatMasses({ ...p, repeatMasses: undefined })).toEqual([22.2, 44.4]);
+    // A payload with neither still reports what the series carry.
+    expect(reportRepeatMasses({ ...p, repeatMasses: undefined, repeatMass: undefined })).toEqual([
+      22.2, 44.4,
+    ]);
+  });
+
+  it("names both repeat units on the Summary sheet", async () => {
+    const buf = await buildWorkbook(buildTwoPolymerPayload());
+    const wb = new ExcelJS.Workbook();
+    await wb.xlsx.load(buf);
+    const summary = wb.getWorksheet("Summary")!;
+    let found = "";
+    summary.eachRow((r) => {
+      if (String(r.getCell(1).value ?? "").startsWith("Repeat unit")) {
+        found = String(r.getCell(2).value ?? "");
+      }
+    });
+    expect(found).toContain("22.2000");
+    expect(found).toContain("44.4000");
+  });
+
+  it("embeds one chart per exported series, each with its repeat in the title", async () => {
+    const buf = await buildWorkbook(buildTwoPolymerPayload());
+    const zip = await JSZip.loadAsync(buf);
+    const charts = Object.keys(zip.files).filter((n) => /^xl\/charts\/chart\d+\.xml$/.test(n));
+    expect(charts).toHaveLength(2);
+    const titles = await Promise.all(
+      charts.map(async (n) => (await zip.file(n)!.async("string")).match(/<a:t>([^<]*)<\/a:t>/)![1]),
+    );
+    expect(titles.some((t) => t.includes("22.20 Da"))).toBe(true);
+    expect(titles.some((t) => t.includes("44.40 Da"))).toBe(true);
+  });
+
+  it("anchors the charts so they do not overlap each other", async () => {
+    const buf = await buildWorkbook(buildTwoPolymerPayload());
+    const zip = await JSZip.loadAsync(buf);
+    const drawing = await zip.file(
+      Object.keys(zip.files).find((n) => /^xl\/drawings\/drawing\d+\.xml$/.test(n))!,
+    )!.async("string");
+    const froms = [...drawing.matchAll(/<xdr:from>.*?<xdr:row>(\d+)<\/xdr:row>/g)].map((m) =>
+      parseInt(m[1], 10),
+    );
+    const tos = [...drawing.matchAll(/<xdr:to>.*?<xdr:row>(\d+)<\/xdr:row>/g)].map((m) =>
+      parseInt(m[1], 10),
+    );
+    expect(froms).toHaveLength(2);
+    expect(froms[1]).toBeGreaterThanOrEqual(tos[0]);
+  });
+});
