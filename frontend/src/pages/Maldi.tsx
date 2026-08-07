@@ -84,9 +84,10 @@ import {
   fitLadder,
   mergeSeriesGroup,
   peaksForRepeat,
-  seriesAdductLabel,
+  seriesDisplayLabel,
   seriesForRepeat,
   splitMergedSeries,
+  stripLegacyAutoLabels,
 } from "@/lib/maldi/polymers";
 import { explainedPeakIds as explainedPeakIdsHelper, sameLadderSiblings, unexplainedPeaks } from "@/lib/maldi/seriesMatch";
 import { buildLadderColorMap, SERIES_COLORS } from "@/lib/maldi/seriesColor";
@@ -358,7 +359,7 @@ const Maldi = () => {
       .sort((a, b) => Number(!!b.endGroupLocked) - Number(!!a.endGroupLocked));
     const list: AssignableSeries[] = ordered.map((s) => ({
       id: s.id,
-      label: s.label || `${seriesAdductLabel(s, allAdducts)} · ${s.repeatMass.toFixed(1)} Da`,
+      label: seriesDisplayLabel(s, allAdducts),
       color: colorForSeries(s),
       confirmed: !!s.endGroupLocked,
     }));
@@ -619,7 +620,7 @@ const Maldi = () => {
       .sort((a, b) => (b.score ?? 0) - (a.score ?? 0))
       .map((s) => ({
         id: s.id,
-        label: s.label || seriesAdductLabel(s, allAdducts),
+        label: seriesDisplayLabel(s, allAdducts),
         color: colorForSeries(s),
         peakIds: new Set(s.members.map((m) => m.peakId)),
       }));
@@ -805,7 +806,10 @@ const Maldi = () => {
     setSteps(s.processing);
     setPeaks(s.peaks);
     setCustomAdducts(s.adducts ?? []);
-    setSeries(s.series ?? []);
+    // Projects saved before the display-label fix carry one frozen name per
+    // series that is identical for every ladder of a repeat unit; drop those so
+    // the derived (end-group-bearing) name takes over.
+    setSeries(stripLegacyAutoLabels(s.series ?? []));
     setSelectedAdductIds(s.selectedAdductIds ?? ["H", "Na", "K"]);
     setPickParams(s.pickParams ?? { ...PEAK_PRESETS.conservative });
     setRepeatMass(s.repeatMass ?? 0);
@@ -1348,7 +1352,7 @@ const Maldi = () => {
       );
       const target = series.find((s) => s.id === seriesId);
       toast.success(
-        `Added ${add.size} ${add.size === 1 ? "peak" : "peaks"} to ${target?.label || (target ? seriesAdductLabel(target, allAdducts) : "series")}`,
+        `Added ${add.size} ${add.size === 1 ? "peak" : "peaks"} to ${target ? seriesDisplayLabel(target, allAdducts) : "series"}`,
       );
     },
     [refitSeries, series, allAdducts],
@@ -2334,7 +2338,7 @@ const Maldi = () => {
                                           <span className="truncate">{owner.name}</span>
                                         </span>
                                       </TableCell>
-                                      <TableCell className="font-mono text-xs">{s.label || seriesAdductLabel(s, allAdducts)}</TableCell>
+                                      <TableCell className="font-mono text-xs">{seriesDisplayLabel(s, allAdducts)}</TableCell>
                                       <TableCell className="font-mono text-xs">{adductById(allAdducts, s.adductId).label}</TableCell>
                                       <TableCell className="font-mono text-xs">{s.repeatMass.toFixed(3)}</TableCell>
                                       <TableCell className="font-mono text-xs">{Number.isFinite(s.endGroupMass) ? s.endGroupMass : 0}</TableCell>

@@ -790,9 +790,10 @@ export async function exportReportExcel(payload: ReportPayload): Promise<void> {
       nextFreeChartRow = anchorRow + CHART_ROWS + 1;
       chartSpecs.push({
         sheetName: "Series",
-        // The repeat unit is in the title so a multi-polymer sample's charts are
-        // told apart at a glance.
-        title: `Series ${seriesIndex + 1}${s.label ? ` (${s.label})` : ""} — ${adduct.label} · ${s.repeatMass.toFixed(2)} Da`,
+        // The repeat unit AND the end group are in the title: a sample can carry
+        // several ladders of one repeat unit (two polymers, or one whose ladder
+        // the assignment split), and only the end group tells those apart.
+        title: `Series ${seriesIndex + 1}${s.label ? ` (${s.label})` : ""} — ${adduct.label} · ${s.repeatMass.toFixed(2)} Da · EG ${s.endGroupMass.toFixed(2)}`,
         xRange: nRange,
         yRange: neutralRange,
         anchorCol: 8,

@@ -409,9 +409,9 @@ export function PeakTable({
                                 style={owner ? { backgroundColor: owner.color } : undefined}
                               />
                               <select
-                                className="h-6 max-w-[9rem] rounded border border-border/60 bg-background px-1 text-[11px]"
+                                className="h-6 max-w-[15rem] rounded border border-border/60 bg-background px-1 text-[11px]"
                                 value={owner?.id ?? ""}
-                                title="Series this peak belongs to"
+                                title={owner ? `Series this peak belongs to: ${owner.label}` : "Series this peak belongs to"}
                                 onChange={(e) => assignPeaksTo(e.target.value, [peak.id])}
                               >
                                 <option value="">—</option>

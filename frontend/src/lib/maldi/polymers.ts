@@ -464,7 +464,9 @@ export function assignSeries(
       const r2 = regressionR2([...byN.keys()], [...byN.values()].map((it) => it.neutral));
       out.push({
         id: seriesId(),
-        label: `${adduct.label} · ${repeatMass.toFixed(2)} Da`,
+        // Deliberately unnamed: one repeat unit routinely yields several disjoint
+        // ladders, and adduct + repeat names them all identically. `label` is the
+        // analyst's field; `seriesDisplayLabel` derives the display name.
         repeatMass,
         endGroupMass: endGroup,
         adductId: adduct.id,
@@ -582,6 +584,46 @@ function scoreSeries(
 /** Resolve the adduct label for a series (for display). */
 export function seriesAdductLabel(series: Series, adducts: Adduct[]): string {
   return adductById(adducts, series.adductId).label;
+}
+
+/**
+ * The name to show for a series. The analyst's own {@link Series.label} wins;
+ * otherwise the name is derived from the chemistry: adduct, repeat unit and end
+ * group.
+ *
+ * The end group is the part that makes the derived name unique. One repeat unit
+ * routinely produces several disjoint ladders — two polymers sharing a backbone
+ * but not their end groups, or one polymer whose ladder `linkByRepeat` split in
+ * two — and adduct + repeat alone names every one of them identically, which
+ * makes a series picker useless (every peak reads as the same series). Deriving
+ * the name rather than freezing one at assignment time also keeps it honest
+ * across re-fits, forced combines and splits, all of which move the end group.
+ */
+export function seriesDisplayLabel(series: Series, adducts: Adduct[]): string {
+  const own = series.label?.trim();
+  if (own) return own;
+  const endGroup = series.endGroupLabel?.trim() || `EG ${series.endGroupMass.toFixed(3)}`;
+  return `${seriesAdductLabel(series, adducts)} · ${series.repeatMass.toFixed(2)} Da · ${endGroup}`;
+}
+
+/** Shape of the label `assignSeries` used to freeze: "<adduct> · <repeat> Da". */
+const LEGACY_AUTO_LABEL = /^.+\s·\s(\d+\.\d{2})\sDa$/;
+
+/**
+ * Drop the labels older projects carry from when `assignSeries` named every series
+ * "<adduct> · <repeat> Da" — a name that is identical for every ladder of a repeat
+ * unit, which is exactly what {@link seriesDisplayLabel} exists to fix. Only a
+ * label whose repeat unit matches the series' own is stripped, so an analyst's own
+ * name always survives; a stripped series falls back to the derived name, which
+ * says strictly more.
+ */
+export function stripLegacyAutoLabels(series: Series[]): Series[] {
+  return series.map((s) => {
+    const m = s.label?.trim().match(LEGACY_AUTO_LABEL);
+    if (!m || m[1] !== s.repeatMass.toFixed(2)) return s;
+    const { label: _dropped, ...rest } = s;
+    return rest;
+  });
 }
 
 // ---------------------------------------------------------------------------

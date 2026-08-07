@@ -96,7 +96,13 @@ export interface Adduct {
 /** An assigned oligomer series: m/z ≈ endGroupMass + n·repeatMass + adduct. */
 export interface Series {
   id: string;
-  label: string;
+  /**
+   * The analyst's own name for this series. Absent until they type one — the
+   * assignment does NOT invent one, because adduct + repeat unit names every
+   * ladder of a repeat identically. Use `seriesDisplayLabel` (polymers.ts) for
+   * display; it falls back to a name derived from the current chemistry.
+   */
+  label?: string;
   repeatMass: number;
   endGroupMass: number;
   adductId: string;

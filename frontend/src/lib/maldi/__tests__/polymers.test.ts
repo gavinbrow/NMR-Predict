@@ -6,8 +6,10 @@ import {
   fitLadder,
   mergeSeriesGroup,
   peaksForRepeat,
+  seriesDisplayLabel,
   seriesForRepeat,
   splitMergedSeries,
+  stripLegacyAutoLabels,
 } from "../polymers";
 import type { Peak, Series } from "../types";
 import { pickPegPeaks, PEG_REPEAT } from "./fixtures";
@@ -287,5 +289,74 @@ describe("mergeSeriesGroup / splitMergedSeries", () => {
     const merged = mergeSeriesGroup([a, b], peaks, BUILTIN_ADDUCTS)!;
     expect(merged.id).toBe("a");
     expect(merged.endGroupMass).toBe(42);
+  });
+});
+
+describe("seriesDisplayLabel", () => {
+  /** Two ladders of ONE repeat unit: same backbone, end groups 20 Da apart (not a
+   *  multiple of the repeat, so `linkByRepeat` keeps them as separate components).
+   *  This is the two-polymer sample that made every peak read as one series. */
+  function twoLadderPeaks(): Peak[] {
+    const repeat = 44.0262;
+    const na = 21.98922;
+    const peaks: Peak[] = [];
+    let id = 0;
+    for (const end of [18.0106, 38.0106]) {
+      for (let n = 8; n <= 16; n += 1) {
+        peaks.push({ id: `p${id++}`, mz: end + n * repeat + na, intensity: 1000, accepted: true });
+      }
+    }
+    return peaks.sort((a, b) => a.mz - b.mz);
+  }
+
+  const na = BUILTIN_ADDUCTS.filter((a) => a.id === "Na");
+
+  it("names the ladders of one repeat unit distinctly", () => {
+    const series = assignSeries(twoLadderPeaks(), 44.0262, na);
+    expect(series.length).toBe(2);
+    const labels = series.map((s) => seriesDisplayLabel(s, BUILTIN_ADDUCTS));
+    // Both carry the adduct and the repeat unit; the end group tells them apart.
+    for (const l of labels) expect(l).toContain("[M+Na]+ · 44.03 Da");
+    expect(new Set(labels).size).toBe(2);
+  });
+
+  it("prefers the analyst's own name, then the end-group name, then its mass", () => {
+    const [s] = assignSeries(twoLadderPeaks(), 44.0262, na);
+    expect(seriesDisplayLabel(s, BUILTIN_ADDUCTS)).toContain(`EG ${s.endGroupMass.toFixed(3)}`);
+    expect(seriesDisplayLabel({ ...s, endGroupLabel: "H/OH" }, BUILTIN_ADDUCTS)).toBe(
+      `[M+Na]+ · 44.03 Da · H/OH`,
+    );
+    expect(seriesDisplayLabel({ ...s, endGroupLabel: "H/OH", label: "PEG" }, BUILTIN_ADDUCTS)).toBe("PEG");
+    // Whitespace is not a name.
+    expect(seriesDisplayLabel({ ...s, label: "  " }, BUILTIN_ADDUCTS)).toContain("[M+Na]+");
+  });
+
+  it("assignSeries leaves the name to the analyst", () => {
+    for (const s of assignSeries(twoLadderPeaks(), 44.0262, na)) expect(s.label).toBeUndefined();
+  });
+});
+
+describe("stripLegacyAutoLabels", () => {
+  const base: Series = {
+    id: "s1",
+    repeatMass: 44.0262,
+    endGroupMass: 18.0106,
+    adductId: "Na",
+    members: [],
+    score: 1,
+  };
+
+  it("drops the frozen '<adduct> · <repeat> Da' name older projects carry", () => {
+    const [out] = stripLegacyAutoLabels([{ ...base, label: "[M+Na]+ · 44.03 Da" }]);
+    expect(out.label).toBeUndefined();
+  });
+
+  it("keeps a name the analyst typed, including one that only looks similar", () => {
+    const kept = stripLegacyAutoLabels([
+      { ...base, label: "PEG-OH" },
+      // Right shape, wrong repeat unit — not something this app generated.
+      { ...base, label: "[M+Na]+ · 74.04 Da" },
+    ]);
+    expect(kept.map((s) => s.label)).toEqual(["PEG-OH", "[M+Na]+ · 74.04 Da"]);
   });
 });

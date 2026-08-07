@@ -11,7 +11,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { adductById } from "@/lib/maldi/adducts";
-import { seriesAdductLabel } from "@/lib/maldi/polymers";
+import { seriesDisplayLabel } from "@/lib/maldi/polymers";
 import { SERIES_COLORS } from "@/lib/maldi/seriesColor";
 import type { Adduct, Series } from "@/lib/maldi/types";
 
@@ -184,9 +184,10 @@ export function SeriesTable({
                   <TableCell onClick={(e) => e.stopPropagation()}>
                     <div className="flex items-center gap-1">
                       <Input
-                        className="h-7 w-28 text-xs"
+                        className="h-7 w-36 text-xs"
                         value={s.label ?? ""}
-                        placeholder={seriesAdductLabel(s, adducts)}
+                        placeholder={seriesDisplayLabel(s, adducts)}
+                        title={seriesDisplayLabel(s, adducts)}
                         onChange={(e) => onRenameSeries(s.id, e.target.value)}
                       />
                       {mergedCount > 0 && (

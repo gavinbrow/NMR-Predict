@@ -4,7 +4,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
-import { seriesAdductLabel, type RepeatCandidate } from "@/lib/maldi/polymers";
+import { seriesDisplayLabel, type RepeatCandidate } from "@/lib/maldi/polymers";
 import { unexplainedPeaks } from "@/lib/maldi/seriesMatch";
 import { SERIES_COLORS } from "@/lib/maldi/seriesColor";
 import type { Adduct, Peak, Series } from "@/lib/maldi/types";
@@ -362,7 +362,7 @@ export function SeriesPanel({
                       <div className="flex items-center justify-between gap-2">
                         <span className="flex items-center gap-1.5 text-xs font-semibold text-foreground">
                           <span className="h-2.5 w-2.5 shrink-0 rounded-full" style={{ backgroundColor: swatch(s) }} />
-                          {s.label || seriesAdductLabel(s, adducts)}
+                          <span className="truncate">{seriesDisplayLabel(s, adducts)}</span>
                         </span>
                         <span className="flex items-center gap-1 font-mono text-[10px] text-muted-foreground">
                           score

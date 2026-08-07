@@ -4,7 +4,7 @@ import { Switch } from "@/components/ui/switch";
 import type { FigureData, FigureOptions } from "@/lib/ir/figure";
 import type { Adduct, Peak, Series, SpectrumData } from "@/lib/maldi/types";
 import type { MaldiFigureSpectrum } from "@/lib/maldi/figure";
-import { seriesAdductLabel } from "@/lib/maldi/polymers";
+import { seriesDisplayLabel } from "@/lib/maldi/polymers";
 
 interface MaldiFigurePanelProps {
   /** The spectrum currently displayed (processed when available, else raw). */
@@ -49,7 +49,7 @@ interface MaldiFigurePanelProps {
   /** The confirmed ladders offered in the picker (`series.filter(endGroupLocked)`
    *  — superseded duplicate readings the rest of the UI hides never reach here). */
   confirmedSeries: Series[];
-  /** Adducts, for resolving a ladder's fallback label (`seriesAdductLabel`). */
+  /** Adducts, for resolving a ladder's fallback label (`seriesDisplayLabel`). */
   adducts: Adduct[];
   /** The ladder colour of a series — reused verbatim from the page so the figure
    *  agrees with the plot stems and the sidebar swatches. */
@@ -250,7 +250,7 @@ export function MaldiFigurePanel({
                   className="h-3 w-3 shrink-0 rounded-full border border-border/60"
                   style={{ backgroundColor: colorForSeries(s) }}
                 />
-                <span className="truncate">{s.label || seriesAdductLabel(s, adducts)}</span>
+                <span className="truncate">{seriesDisplayLabel(s, adducts)}</span>
               </label>
             ))}
           </div>
