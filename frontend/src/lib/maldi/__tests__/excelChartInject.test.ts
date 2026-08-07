@@ -10,7 +10,7 @@ import JSZip from "jszip";
  * [Content_Types].xml. This is the cheapest way to catch a malformed OOXML
  * package without opening Excel.
  */
-async function buildSampleWorkbook(): Promise<Buffer> {
+async function buildSampleWorkbook(): Promise<Uint8Array> {
   const wb = new ExcelJS.Workbook();
   const ws = wb.addWorksheet("Series");
   ws.getColumn(1).width = 8;
@@ -26,7 +26,7 @@ async function buildSampleWorkbook(): Promise<Buffer> {
     ws.getCell(`B${r}`).value = 100 + i * 22.2;
     ws.getCell(`D${r}`).value = 80 + i * 22.2;
   }
-  return Buffer.from(await wb.xlsx.writeBuffer());
+  return new Uint8Array(await wb.xlsx.writeBuffer());
 }
 
 describe("excelChartInject", () => {

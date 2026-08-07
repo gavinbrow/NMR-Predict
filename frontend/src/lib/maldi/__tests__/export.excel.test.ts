@@ -41,11 +41,11 @@ function buildPayload(): ReportPayload {
   };
 }
 
-/** Read a Blob into a Buffer via FileReader (jsdom's Blob lacks arrayBuffer). */
-function blobToBuffer(blob: Blob): Promise<Buffer> {
+/** Read a Blob into a Uint8Array via FileReader (jsdom's Blob lacks arrayBuffer). */
+function blobToUint8Array(blob: Blob): Promise<Uint8Array> {
   return new Promise((resolve, reject) => {
     const fr = new FileReader();
-    fr.onload = () => resolve(Buffer.from(fr.result as ArrayBuffer));
+    fr.onload = () => resolve(new Uint8Array(fr.result as ArrayBuffer));
     fr.onerror = () => reject(fr.error);
     fr.readAsArrayBuffer(blob);
   });
@@ -74,7 +74,7 @@ function captureDownload(): { restore: () => void; getBlob: () => Blob | undefin
 }
 
 /** Read the Series sheet XML out of the generated xlsx (raw, unmodified). */
-async function readSeriesSheet(buffer: Buffer): Promise<string> {
+async function readSeriesSheet(buffer: Uint8Array): Promise<string> {
   const zip = await JSZip.loadAsync(buffer);
   const wb = await zip.file("xl/workbook.xml")!.async("string");
   const rels = await zip.file("xl/_rels/workbook.xml.rels")!.async("string");
@@ -108,7 +108,7 @@ async function buildAndReadSheet(): Promise<string> {
   }
   const blob = cap.getBlob();
   expect(blob).toBeTruthy();
-  const buf = await blobToBuffer(blob!);
+  const buf = await blobToUint8Array(blob!);
   return readSeriesSheet(buf);
 }
 

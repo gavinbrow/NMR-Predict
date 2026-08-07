@@ -13,7 +13,7 @@ function base64Floats(pairs: number[], precision: 32 | 64, littleEndian: boolean
     if (precision === 64) view.setFloat64(i * size, v, littleEndian);
     else view.setFloat32(i * size, v, littleEndian);
   });
-  return Buffer.from(new Uint8Array(buf)).toString("base64");
+  return btoa(String.fromCharCode(...new Uint8Array(buf)));
 }
 
 describe("parseMsFile — MGF", () => {

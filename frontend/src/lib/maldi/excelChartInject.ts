@@ -180,8 +180,11 @@ function addWorksheetRel(relsXml: string | undefined, drawingName: string): { re
  * anchored on the named worksheet. Charts are grouped by sheetName — one
  * drawing per sheet holds all that sheet's charts.
  */
-export async function injectCharts(buffer: Buffer, specs: ChartSpec[]): Promise<Buffer> {
-  if (specs.length === 0) return buffer;
+export async function injectCharts(
+  buffer: Uint8Array | ArrayBuffer,
+  specs: ChartSpec[],
+): Promise<Uint8Array> {
+  if (specs.length === 0) return buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer);
   const { default: JSZip } = await import("jszip");
   const zip = await JSZip.loadAsync(buffer);
 
@@ -282,9 +285,9 @@ export async function injectCharts(buffer: Buffer, specs: ChartSpec[]): Promise<
   // extra (not strictly required). Excel is happy without chartN.xml.rels
   // when the chart has no embedded images.
   const out = await zip.generateAsync({
-    type: "nodebuffer",
+    type: "uint8array",
     mimeType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     compression: "DEFLATE",
   });
-  return out as unknown as Buffer;
+  return out;
 }

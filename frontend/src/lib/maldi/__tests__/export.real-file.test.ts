@@ -60,7 +60,7 @@ describe.skipIf(!process.env.GEN_SAMPLE)("real-file generation (manual verificat
       HTMLAnchorElement.prototype.click = origClick;
     }
     const blob = blobs[0];
-    const buf = Buffer.from(await new Promise<ArrayBuffer>((res, rej) => {
+    const buf = new Uint8Array(await new Promise<ArrayBuffer>((res, rej) => {
       const fr = new FileReader();
       fr.onload = () => res(fr.result as ArrayBuffer);
       fr.onerror = () => rej(fr.error);

@@ -6,6 +6,7 @@ import {
   Loader2,
   RotateCw,
   Save,
+  Trash2,
   Upload,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -31,6 +32,22 @@ import { TemplatePanel } from "@/components/maldi/TemplatePanel";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { CollapsibleSection } from "@/components/ui/CollapsibleSection";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import {
   Select,
@@ -240,6 +257,8 @@ const Maldi = () => {
   const [saving, setSaving] = useState(false);
 
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
+  const [manageProjectsOpen, setManageProjectsOpen] = useState(false);
+  const [deleteTarget, setDeleteTarget] = useState<ProjectSummary | null>(null);
 
   const allAdducts = useMemo(() => [...ALL_BUILTIN_ADDUCTS, ...customAdducts], [customAdducts]);
   const selectedAdducts = useMemo(
@@ -1600,13 +1619,21 @@ const Maldi = () => {
 
   const handleDelete = useCallback(
     async (id: string) => {
+      const target = projects.find((p) => p.id === id);
       await deleteProject(id);
       setDocuments((prev) => prev.map((d) => (d.projectId === id ? { ...d, projectId: null } : d)));
       if (id === projectId) setProjectId(null);
       refreshProjects();
+      toast.success(`Deleted "${target?.name ?? "project"}"`);
     },
-    [projectId, refreshProjects],
+    [projectId, refreshProjects, projects],
   );
+
+  const confirmDelete = useCallback(() => {
+    if (!deleteTarget) return;
+    void handleDelete(deleteTarget.id);
+    setDeleteTarget(null);
+  }, [deleteTarget, handleDelete]);
 
   // --- Interpretation + export ------------------------------------------------
   const findings = useMemo<Finding[]>(() => {
@@ -1784,23 +1811,33 @@ const Maldi = () => {
                 <Upload className="mr-1.5 h-4 w-4" /> Open JSON
               </Button>
               {projects.length > 0 && (
-                <div className="grid gap-1">
-                  <label className="text-[11px] text-muted-foreground">Open project</label>
-                  <Select value={projectId ?? ""} onValueChange={handleLoad}>
-                    <SelectTrigger className="h-9 w-56">
-                      <SelectValue placeholder="Saved projects…" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {projects.map((p) => (
-                        <SelectItem key={p.id} value={p.id}>
-                          <span className="flex items-center gap-2">
-                            <FolderOpen className="h-3.5 w-3.5" />
-                            {p.name} · {p.peakCount} peaks
-                          </span>
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
+                <div className="flex items-end gap-2">
+                  <div className="grid gap-1">
+                    <label className="text-[11px] text-muted-foreground">Open project</label>
+                    <Select value={projectId ?? ""} onValueChange={handleLoad}>
+                      <SelectTrigger className="h-9 w-56">
+                        <SelectValue placeholder="Saved projects…" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {projects.map((p) => (
+                          <SelectItem key={p.id} value={p.id}>
+                            <span className="flex items-center gap-2">
+                              <FolderOpen className="h-3.5 w-3.5" />
+                              {p.name} · {p.peakCount} peaks
+                            </span>
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="h-9"
+                    onClick={() => setManageProjectsOpen(true)}
+                  >
+                    <Trash2 className="mr-1.5 h-4 w-4" /> Manage
+                  </Button>
                 </div>
               )}
             </div>
@@ -1834,8 +1871,13 @@ const Maldi = () => {
                             {p.sourceName || "—"} · {p.peakCount} peaks
                           </span>
                         </button>
-                        <button type="button" className="text-[11px] text-muted-foreground hover:text-destructive" onClick={() => handleDelete(p.id)}>
-                          Delete
+                        <button
+                          type="button"
+                          className="text-muted-foreground hover:text-destructive"
+                          title="Delete project"
+                          onClick={() => setDeleteTarget(p)}
+                        >
+                          <Trash2 className="h-3.5 w-3.5" />
                         </button>
                       </li>
                     ))}
@@ -2119,6 +2161,70 @@ const Maldi = () => {
           </section>
         )}
       </div>
+
+      {/* Manage projects dialog — list all saved projects with delete buttons. */}
+      <Dialog open={manageProjectsOpen} onOpenChange={setManageProjectsOpen}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>Manage saved projects</DialogTitle>
+          </DialogHeader>
+          {projects.length === 0 ? (
+            <p className="text-sm text-muted-foreground">No saved projects yet.</p>
+          ) : (
+            <ul className="flex max-h-[60vh] flex-col gap-1.5 overflow-y-auto">
+              {projects.map((p) => (
+                <li
+                  key={p.id}
+                  className="flex items-center justify-between gap-2 rounded-lg border border-border/60 bg-background/60 px-2.5 py-1.5"
+                >
+                  <button
+                    type="button"
+                    className="min-w-0 flex-1 text-left"
+                    onClick={() => {
+                      void handleLoad(p.id);
+                      setManageProjectsOpen(false);
+                    }}
+                  >
+                    <span className="block truncate text-xs font-medium text-foreground">{p.name}</span>
+                    <span className="block text-[10px] text-muted-foreground">
+                      {p.sourceName || "—"} · {p.peakCount} peaks
+                    </span>
+                  </button>
+                  <button
+                    type="button"
+                    className="text-muted-foreground hover:text-destructive"
+                    title="Delete project"
+                    onClick={() => setDeleteTarget(p)}
+                  >
+                    <Trash2 className="h-3.5 w-3.5" />
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </DialogContent>
+      </Dialog>
+
+      {/* Delete confirmation — shared by Manage dialog and Recent projects card. */}
+      <AlertDialog open={deleteTarget !== null} onOpenChange={(open) => { if (!open) setDeleteTarget(null); }}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete project?</AlertDialogTitle>
+            <AlertDialogDescription>
+              Permanently delete "{deleteTarget?.name}"? This cannot be undone.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+              onClick={confirmDelete}
+            >
+              Delete
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </AppShell>
   );
 };

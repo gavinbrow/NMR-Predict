@@ -757,7 +757,7 @@ export async function exportReportExcel(payload: ReportPayload): Promise<void> {
     chart.addImage(imageId, { tl: { col: 0, row: 0 }, ext: { width: 900, height: 380 } });
   }
 
-  let buffer = Buffer.from(await wb.xlsx.writeBuffer());
+  let buffer = new Uint8Array(await wb.xlsx.writeBuffer());
   if (chartSpecs.length) {
     buffer = await injectCharts(buffer, chartSpecs);
   }
