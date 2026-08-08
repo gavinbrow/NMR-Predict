@@ -11,6 +11,7 @@ import {
   type FigureData,
   type FigureOptions,
   type FigureSeriesData,
+  type PeakLabelDatum,
   type SeriesStyle,
 } from "@/lib/ir/figure";
 
@@ -26,6 +27,14 @@ const DRAG_MIN = 6;
 const TEXT_COLOR = "#0f172a";
 
 const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, v));
+
+/** Thinning rank for a peak label: the host's own priority when it supplied one
+ *  (see {@link PeakLabelDatum.priority}), else the drawn height. A non-finite
+ *  value sorts last rather than poisoning the comparison. */
+function rankOf(p: PeakLabelDatum): number {
+  const v = p.priority ?? p.y;
+  return Number.isFinite(v) ? v : -Infinity;
+}
 
 /** Scroll-up / scroll-down y-axis scale factors (smaller max → taller peaks),
  *  matching the live MALDI viewer's wheel behaviour. */
@@ -401,7 +410,10 @@ export function FigureSvg({
           apexY: fig.sy(p.y),
           dx: ov?.dx ?? 0,
           dy: ov?.dy ?? 0,
-          weight: Number.isFinite(p.y) ? p.y : -Infinity,
+          // Rank by the host's priority when it supplied one (a stacked
+          // multi-file figure ranks by the peak's own intensity, not by how
+          // high its offset trace happens to sit), else by the drawn height.
+          weight: rankOf(p),
           text,
           color,
           pinned,

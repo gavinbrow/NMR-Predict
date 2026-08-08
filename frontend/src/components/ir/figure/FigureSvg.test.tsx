@@ -361,3 +361,63 @@ describe("FigureSvg — legend, rendering splits", () => {
     expect(legendRows(container)).toBe(2);
   });
 });
+
+describe("FigureSvg — label thinning priority", () => {
+  /** Two files stacked: the second sits 1000 above the first, so its drawn
+   *  heights dwarf the first's even though its peaks are tiny. */
+  function stackedData(withPriority: boolean): FigureData {
+    const label = (id: string, x: number, y: number, priority: number) => ({
+      id,
+      x,
+      y,
+      text: id,
+      ...(withPriority ? { priority } : {}),
+    });
+    return {
+      x: [100, 900],
+      series: [
+        {
+          id: "sticks:a",
+          label: "file A",
+          x: [100],
+          y: [500],
+          styleHints: { kind: "sticks" as const },
+        },
+        {
+          id: "sticks:b",
+          label: "file B",
+          x: [900],
+          y: [1001],
+          baseline: 1000,
+          styleHints: { kind: "sticks" as const },
+        },
+      ],
+      xLabel: "m/z",
+      yLabel: "Intensity",
+      // A tall peak in file A (500) and a tiny one in file B (1), drawn at 1001
+      // because of B's stacking offset.
+      peakLabels: [label("tall", 100, 500, 500), label("tiny", 900, 1001, 1)],
+    };
+  }
+
+  const drawn = (container: HTMLElement) =>
+    Array.from(container.querySelectorAll("text")).map((t) => t.textContent);
+
+  it("ranks by the host's priority, so a stacked file cannot outrank a taller peak", () => {
+    const data = stackedData(true);
+    const base = defaultFigureOptions(data);
+    const options = { ...base, peakLabels: { ...base.peakLabels, decimals: -1, maxLabels: 1 } };
+    const { container } = render(<FigureSvg data={data} options={options} decimate={false} />);
+    expect(drawn(container)).toContain("tall");
+    expect(drawn(container)).not.toContain("tiny");
+  });
+
+  it("falls back to the drawn height when no priority is supplied", () => {
+    const data = stackedData(false);
+    const base = defaultFigureOptions(data);
+    const options = { ...base, peakLabels: { ...base.peakLabels, decimals: -1, maxLabels: 1 } };
+    const { container } = render(<FigureSvg data={data} options={options} decimate={false} />);
+    expect(drawn(container)).toContain("tiny");
+    expect(drawn(container)).not.toContain("tall");
+  });
+});

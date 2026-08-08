@@ -28,6 +28,15 @@ export interface FigureSeriesData {
    * would just repeat the ladder it came from under a one-off colour.
    */
   legendHidden?: boolean;
+  /**
+   * Optional heading this series belongs under in the controls panel. Purely an
+   * organising device for the Series list: when any series carries one, the
+   * panel sections the list by group and offers per-group bulk styling. Hosts
+   * that plot one thing (IR, kinetics) leave it undefined and get the flat list
+   * unchanged; the MALDI adapter sets it to the source file's name, which is
+   * what makes a cross-file figure editable file by file.
+   */
+  group?: string;
   /** Host-suggested initial styling (e.g. scatter vs dashed fit line, sticks). */
   styleHints?: Partial<
     Pick<SeriesStyle, "color" | "lineWidth" | "lineStyle" | "markers" | "markerSize" | "kind">
@@ -57,8 +66,16 @@ export interface PeakLabelDatum {
   /** Anchor in data coordinates (e.g. the peak's m/z). */
   x: number;
   /** Anchor height in data coordinates (e.g. the peak's intensity) — also the
-   *  priority used when thinning a crowded set (taller wins). */
+   *  default priority used when thinning a crowded set (taller wins). */
   y: number;
+  /**
+   * Thinning priority, when the drawn height is the wrong way to rank. Stacked
+   * multi-file figures shift each file's trace up by a constant, so `y` would
+   * rank every label on the top trace above every label on the bottom one and
+   * the lower files would lose all their labels. Hosts pass the peak's own
+   * untransformed intensity here instead. Defaults to {@link y}.
+   */
+  priority?: number;
   /** Pre-formatted fallback text, used when label decimals are set to "raw". */
   text: string;
   /**

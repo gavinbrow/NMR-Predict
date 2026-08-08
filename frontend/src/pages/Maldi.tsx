@@ -15,7 +15,10 @@ import { AppShell } from "@/components/AppShell";
 import { AdductPanel } from "@/components/maldi/AdductPanel";
 import { BatchPanel } from "@/components/maldi/BatchPanel";
 import { CopolymerPanel } from "@/components/maldi/CopolymerPanel";
-import { MaldiFigurePanel } from "@/components/maldi/figure/MaldiFigurePanel";
+import {
+  MaldiFigurePanel,
+  type MaldiFigureFileInfo,
+} from "@/components/maldi/figure/MaldiFigurePanel";
 import { useFigureOptions } from "@/components/ir/figure/useFigureOptions";
 import { FormulaTools, type IsotopeOverlay } from "@/components/maldi/FormulaTools";
 import { ImportPanel } from "@/components/maldi/ImportPanel";
@@ -76,7 +79,7 @@ import {
   type FigureOptions,
 } from "@/lib/ir/figure";
 import { adductById, ALL_BUILTIN_ADDUCTS } from "@/lib/maldi/adducts";
-import { buildMaldiFigureData, type MaldiFigureSeriesGroup, type MaldiFigureSpectrum } from "@/lib/maldi/figure";
+import { buildMaldiFigureData, type MaldiFigureFile } from "@/lib/maldi/figure";
 import {
   exportProjectJson,
   exportReportExcel,
@@ -177,6 +180,16 @@ function nextDocColor(count: number): string {
 }
 
 /**
+ * Palette entries reserved per document for the figure's ladder colours. Each
+ * document's ladders walk the shared palette from `slot * this`, so several
+ * files' ladders stay distinguishable in one figure. Three is the point where
+ * the ten-colour palette stops being able to keep three files apart, which is
+ * about as busy as a publication figure gets; past that it wraps, and the
+ * figure's own per-series colour pickers are the answer.
+ */
+const LADDER_COLORS_PER_FILE = 3;
+
+/**
  * A fresh SNIP baseline step, auto-applied on every import so the spectrum's
  * baseline sits at zero — peaks then grow up from the axis when the user scrolls
  * to scale the y-axis, instead of a noise band floating mid-plot. It is a normal
@@ -224,6 +237,44 @@ const MALDI_FIGURE_SEED: FigureOptionSeed = {
   // polymers is exactly the case that needs a legend.
   legend: { show: true },
 };
+
+/**
+ * Persistence-only alias for the active document's profile trace.
+ *
+ * In-session every file's series are keyed by document id, so a file's styling
+ * belongs to that file and never transfers when another document is made
+ * active. Document ids are minted afresh on load, though, so a saved
+ * `profile:<docId>` would never match anything again. `buildState` therefore
+ * rewrites the ACTIVE document's profile id to this constant on the way out,
+ * and the load path rewrites it back to whichever document the project opened
+ * into — which is always that same project. Other documents' traces are not
+ * translated: their styling is session-scoped, which is all a per-project save
+ * can honestly promise.
+ */
+const ACTIVE_PROFILE_ID = "profile:active";
+
+/**
+ * Rewrite one profile series id throughout a saved/loaded options object —
+ * `series` and the legend's per-series `entries`, the only two places series ids
+ * are keys. Returns the input untouched when there is nothing to rename.
+ */
+function renameFigureSeriesId(
+  options: FigureOptions,
+  from: string,
+  to: string,
+): FigureOptions {
+  if (from === to || !options.series.some((s) => s.id === from)) return options;
+  const entries = { ...(options.legend.entries ?? {}) };
+  if (entries[from]) {
+    entries[to] = entries[from];
+    delete entries[from];
+  }
+  return {
+    ...options,
+    series: options.series.map((s) => (s.id === from ? { ...s, id: to } : s)),
+    legend: { ...options.legend, entries },
+  };
+}
 
 const Maldi = () => {
   const [workerStatus, setWorkerStatus] = useState<WorkerStatus>("checking");
@@ -614,63 +665,175 @@ const Maldi = () => {
 
   const figHasSelection = (highlightedPeakIds?.size ?? 0) > 0;
 
-  // The confirmed ladders the figure picker offers — the same set the Series tab
-  // shows (superseded duplicate readings are hidden). Ticked ones both filter the
-  // peaks and drive the per-series stick grouping.
+  // The confirmed ladders of the ACTIVE document — still what the report's peak
+  // colouring keys off (the report is a document-scoped artefact).
   const figConfirmedSeries = useMemo(() => series.filter((s) => s.endGroupLocked), [series]);
-  // Intersect the ticked ids with the still-existing confirmed ladders, so a
-  // ladder deleted after being picked can't strand the figure in an empty state.
-  const figSelectedSeries = useMemo(
-    () => figConfirmedSeries.filter((s) => figSeriesIds.has(s.id)),
-    [figConfirmedSeries, figSeriesIds],
+
+  // --- Cross-file figure sources ----------------------------------------------
+  // The figure draws every VISIBLE document, active first: its trace, its peaks
+  // AND its ladders. Visibility stays the single source of truth (WP4), so the
+  // Documents panel decides what is in the figure and the screen and the export
+  // can't disagree. Deliberately independent of the analysis-wide "Combine
+  // documents" toggle — that one pools the TABLES, whereas a figure is a picture
+  // of what is on screen either way. The active document reads its spectrum,
+  // peaks and series from the LIVE hooks (newer than its snapshot); the others
+  // from their snapshotted state, exactly as `docSpectra` does.
+  const figSources = useMemo(() => {
+    const ordered = [
+      ...documents.filter((d) => d.id === activeDocId),
+      ...documents.filter((d) => d.id !== activeDocId),
+    ].filter((d) => d.visible !== false);
+    return ordered
+      .map((d) => {
+        const isActive = d.id === activeDocId;
+        const spectrum = isActive
+          ? processed ?? raw
+          : d.state.processedSpectrum ?? d.state.rawSpectrum;
+        return spectrum
+          ? {
+              id: d.id,
+              name: d.name,
+              color: d.color,
+              offset: d.offset ?? 0,
+              spectrum,
+              peaks: isActive ? peaks : d.state.peaks ?? [],
+              series: isActive ? series : d.state.series ?? [],
+            }
+          : null;
+      })
+      .filter((e): e is NonNullable<typeof e> => e !== null);
+  }, [documents, activeDocId, processed, raw, peaks, series]);
+
+  // Ladder colours for the figure: each document gets its own slice of the shared
+  // palette, so two files' ladders never come up the same colour.
+  //
+  // The slice is keyed to the document's OWN palette slot (the colour the
+  // Documents panel already gave it), never to its position in this list. That
+  // matters because `reconcileFigureOptions` freezes a series' colour the first
+  // time it is seen: a colour derived from "which document is active" would be
+  // seeded before the other file had any ladders and then never corrected, which
+  // is exactly how both files ended up magenta. Keyed to the document, a ladder's
+  // colour is decided the same way whoever is active and whenever it appears.
+  //
+  // Slot 0 — a single-document project, always — reduces to `colorForSeries`
+  // exactly, so the plot, the sidebar and the figure still agree there. A manual
+  // `series.color` wins over all of it.
+  const figColorForSeries = useMemo(() => {
+    const byId = new Map<string, string>();
+    figSources.forEach((e, i) => {
+      const slot = SERIES_COLORS.indexOf(e.color);
+      const base = (slot >= 0 ? slot : i) * LADDER_COLORS_PER_FILE;
+      // Per-document grouping keeps a ladder's adduct readings on one colour.
+      const local = buildLadderColorMap(e.series);
+      for (const s of e.series) {
+        const g = SERIES_COLORS.indexOf(local.get(s.id) ?? "");
+        byId.set(s.id, SERIES_COLORS[(base + Math.max(0, g)) % SERIES_COLORS.length]);
+      }
+    });
+    return (s: Series) => s.color ?? byId.get(s.id) ?? SERIES_COLORS[0];
+  }, [figSources]);
+
+  // Confirmed ladders per file, in precedence order (score desc) so a peak shared
+  // by several ladders is claimed by the strongest. Doubles as the picker's
+  // options and the adapter's stick grouping, which is what keeps the two lists
+  // showing identical names and colours.
+  const figFileLadders = useMemo(
+    () =>
+      figSources.map((e) =>
+        e.series
+          .filter((s) => s.endGroupLocked)
+          .slice()
+          .sort((a, b) => (b.score ?? 0) - (a.score ?? 0))
+          .map((s) => ({
+            id: s.id,
+            label: seriesDisplayLabel(s, allAdducts),
+            color: figColorForSeries(s),
+            peakIds: new Set(s.members.map((m) => m.peakId)),
+          })),
+      ),
+    [figSources, allAdducts, figColorForSeries],
   );
 
-  // Peaks that drive the sticks + labels: accepted, not ignored, optionally
-  // narrowed to the current selection and/or the picked ladders, with library-
-  // flagged peaks excluded by default, and finally minus the figure-only deletes.
-  // `figHiddenCount` counts only deletes that would otherwise be visible here, so
-  // "N hidden" reflects the current view (and drops stale ids from past re-picks).
-  const { figShownPeaks, figHiddenCount } = useMemo(() => {
-    const accepted = analysisPeaks.filter((p) => p.accepted !== false && !p.ignored);
-    const unflagged = figIncludeFlagged ? accepted : accepted.filter((p) => !p.flag);
-    let base = unflagged;
-    if (figSelectedOnly && figHasSelection) {
-      base = base.filter((p) => highlightedPeakIds!.has(p.id));
-    }
-    if (figSelectedSeries.length > 0) {
-      const inSelected = new Set<string>();
-      for (const s of figSelectedSeries) for (const m of s.members) inSelected.add(m.peakId);
-      base = base.filter((p) => inSelected.has(p.id));
-    }
-    const shown =
-      figExcludedPeakIds.size > 0 ? base.filter((p) => !figExcludedPeakIds.has(p.id)) : base;
-    return { figShownPeaks: shown, figHiddenCount: base.length - shown.length };
-  }, [analysisPeaks, figIncludeFlagged, figSelectedOnly, figHasSelection, highlightedPeakIds, figSelectedSeries, figExcludedPeakIds]);
-
-  // Per-series stick groups for the adapter: one per CONFIRMED ladder, ordered by
-  // precedence so a peak shared by several ladders is claimed by the right one —
-  // confirmed first (all are, here) then higher score. Colour comes straight from
-  // `colorForSeries` so the figure agrees with the plot stems. Undefined only when
-  // nothing is confirmed → the adapter emits the single legacy "sticks" series.
+  // Peaks that drive each file's sticks + labels: accepted, not ignored,
+  // optionally narrowed to the current selection and/or the picked ladders, with
+  // library-flagged peaks excluded by default, and finally minus the figure-only
+  // deletes. `figHiddenCount` counts only deletes that would otherwise be visible,
+  // so "N hidden" reflects the current view (and drops stale ids from past
+  // re-picks). The ladder picker spans files: ticking any ladder anywhere is the
+  // statement "draw only these ladders", so unticked files contribute nothing.
   //
-  // Grouping deliberately follows the confirmed ladders, NOT the figure's series
-  // picker: the picker is a filter ("draw only these"), and keying the grouping
-  // off it collapsed an untouched two-polymer figure into one "Peaks" series, so
-  // both ladders drew in one colour with no way to tell or style them apart.
-  // Groups with no shown peaks emit nothing (see `pushStickSeries`), so filtering
-  // still leaves exactly the ticked ladders in the figure and its legend.
-  const figSeriesGroups = useMemo<MaldiFigureSeriesGroup[] | undefined>(() => {
-    if (figConfirmedSeries.length === 0) return undefined;
-    return figConfirmedSeries
-      .slice()
-      .sort((a, b) => (b.score ?? 0) - (a.score ?? 0))
-      .map((s) => ({
-        id: s.id,
-        label: seriesDisplayLabel(s, allAdducts),
-        color: colorForSeries(s),
-        peakIds: new Set(s.members.map((m) => m.peakId)),
-      }));
-  }, [figConfirmedSeries, allAdducts, colorForSeries]);
+  // Each file also carries the y-transform the plot applies to it — Normalize
+  // scales a trace to 0–100% of its own maximum and the Documents panel's per-row
+  // offset stacks them. Without that a weak spectrum drawn beside a strong one is
+  // a flat line, which would make a cross-file figure useless.
+  const { figFiles, figFileInfos, figShownPeaks, figHiddenCount, figPeakDocId } = useMemo(() => {
+    const ticked = new Set<string>();
+    let anyTicked = false;
+    for (const ladders of figFileLadders) {
+      for (const l of ladders) {
+        if (!figSeriesIds.has(l.id)) continue;
+        anyTicked = true;
+        for (const id of l.peakIds) ticked.add(id);
+      }
+    }
+    const files: MaldiFigureFile[] = [];
+    const infos: MaldiFigureFileInfo[] = [];
+    const shown: Peak[] = [];
+    const docOf = new Map<string, string>();
+    let hidden = 0;
+    figSources.forEach((e, i) => {
+      let max = 0;
+      const arr = e.spectrum.intensity;
+      for (let k = 0; k < arr.length; k += 1) if (arr[k] > max) max = arr[k];
+      const accepted = e.peaks.filter((p) => p.accepted !== false && !p.ignored);
+      let base = figIncludeFlagged ? accepted : accepted.filter((p) => !p.flag);
+      if (figSelectedOnly && figHasSelection) {
+        base = base.filter((p) => highlightedPeakIds!.has(p.id));
+      }
+      if (anyTicked) base = base.filter((p) => ticked.has(p.id));
+      const visible =
+        figExcludedPeakIds.size > 0 ? base.filter((p) => !figExcludedPeakIds.has(p.id)) : base;
+      hidden += base.length - visible.length;
+      for (const p of visible) {
+        shown.push(p);
+        docOf.set(p.id, e.id);
+      }
+      const ladders = figFileLadders[i];
+      files.push({
+        // Keyed by DOCUMENT, so a file's trace styling belongs to that file and
+        // doesn't transfer to whoever happens to be active next. Document ids are
+        // minted afresh on load, so they would not survive a save on their own —
+        // `ACTIVE_PROFILE_ID` handles that at the persistence boundary instead.
+        id: e.id,
+        name: e.name,
+        spectrum: e.spectrum,
+        peaks: visible,
+        seriesGroups: ladders,
+        color: e.color,
+        scale: normalize && max > 0 ? 100 / max : 1,
+        offset: e.offset,
+      });
+      // The picker keys by DOCUMENT id (it drives per-document actions), and
+      // reads the same names, colours and ladder wording the figure draws.
+      infos.push({
+        id: e.id,
+        name: e.name,
+        color: e.color,
+        peakCount: visible.length,
+        ladders: ladders.map((g) => ({ id: g.id, label: g.label, color: g.color })),
+      });
+    });
+    return {
+      figFiles: files,
+      figFileInfos: infos,
+      figShownPeaks: shown,
+      figHiddenCount: hidden,
+      figPeakDocId: docOf,
+    };
+  }, [figSources, figFileLadders, figSeriesIds, figIncludeFlagged, figSelectedOnly, figHasSelection, highlightedPeakIds, figExcludedPeakIds, normalize]);
+
+  // Every open file's peaks, for the panel's "any flagged peaks?" check.
+  const figAllPeaks = useMemo(() => figSources.flatMap((e) => e.peaks), [figSources]);
 
   const reportSeriesColors = useMemo(() => {
     const m = new Map<string, string>();
@@ -681,30 +844,22 @@ const Maldi = () => {
     return m;
   }, [figConfirmedSeries, colorForSeries]);
 
-  // The figure-engine data: profile traces + optional stick series + m/z labels.
-  // Recomputed when the inputs change; the options hook below carries the user's
-  // styling across these updates (reconcileFigureOptions). The overlay set is
-  // driven by document **visibility** (WP4) — every visible non-active document
-  // becomes an extra profile trace, so the screen and the exported figure can't
-  // disagree. The Documents panel's per-row checkbox is the single source of
-  // truth; the old `includeOthers` switch is gone.
-  const figureData = useMemo(() => {
-    const activeSpectrum = processed ?? raw;
-    const spectra: MaldiFigureSpectrum[] = [];
-    if (activeSpectrum) {
-      spectra.push({ id: "active", name: sourceName || projectName || "spectrum", spectrum: activeSpectrum });
-    }
-    spectra.push(...otherFigureSpectra.filter((d) => d.visible !== false).map((d) => ({ id: d.id, name: d.name, spectrum: d.spectrum })));
-    return buildMaldiFigureData({
-      spectra,
-      peaks: figShownPeaks,
-      showProfile: figShowProfile,
-      showSticks: figShowSticks,
-      labelPeaks: true, // label DATA is always supplied; the maker toggles display.
-      sourceName: sourceName || projectName,
-      seriesGroups: figSeriesGroups,
-    });
-  }, [processed, raw, sourceName, projectName, otherFigureSpectra, figShownPeaks, figShowProfile, figShowSticks, figSeriesGroups]);
+  // The figure-engine data: one profile trace + stick series + m/z labels per
+  // file. Recomputed when the inputs change; the options hook below carries the
+  // user's styling across these updates (reconcileFigureOptions), keyed by stable
+  // per-file / per-ladder ids so restyling survives switching the active document.
+  const figureData = useMemo(
+    () =>
+      buildMaldiFigureData({
+        files: figFiles,
+        showProfile: figShowProfile,
+        showSticks: figShowSticks,
+        labelPeaks: true, // label DATA is always supplied; the maker toggles display.
+        sourceName: sourceName || projectName,
+        yLabel: normalize ? "Rel. intensity (%)" : "Intensity",
+      }),
+    [figFiles, figShowProfile, figShowSticks, sourceName, projectName, normalize],
+  );
 
   const [figureOptions, setFigureOptions] = useFigureOptions(figureData, MALDI_FIGURE_SEED);
 
@@ -718,6 +873,23 @@ const Maldi = () => {
       return next;
     });
   }, []);
+  // Tick or untick a whole file's ladders at once — with several files open the
+  // picker is long, and "just this file" is the common move.
+  const handleToggleFigureFileSeries = useCallback(
+    (fileId: string, on: boolean) => {
+      const file = figFileInfos.find((f) => f.id === fileId);
+      if (!file) return;
+      setFigSeriesIds((prev) => {
+        const next = new Set(prev);
+        for (const l of file.ladders) {
+          if (on) next.add(l.id);
+          else next.delete(l.id);
+        }
+        return next;
+      });
+    },
+    [figFileInfos],
+  );
   const handleFigureDeletePeak = useCallback((id: string) => {
     setFigExcludedPeakIds((prev) => (prev.has(id) ? prev : new Set(prev).add(id)));
   }, []);
@@ -845,7 +1017,11 @@ const Maldi = () => {
     // The composed figure travels with the project: styling AND what it includes,
     // so reopening never means rebuilding it from scratch.
     state.figure = {
-      options: figureOptions,
+      // The active document's trace is stored under the stable alias so it can be
+      // found again after a reload mints new document ids (see ACTIVE_PROFILE_ID).
+      options: activeDocId
+        ? renameFigureSeriesId(figureOptions, `profile:${activeDocId}`, ACTIVE_PROFILE_ID)
+        : figureOptions,
       showProfile: figShowProfile,
       showSticks: figShowSticks,
       selectedOnly: figSelectedOnly,
@@ -854,7 +1030,7 @@ const Maldi = () => {
       excludedPeakIds: [...figExcludedPeakIds],
     };
     return state;
-  }, [sourceName, raw, processed, steps, peaks, customAdducts, series, selectedAdductIds, pickParams, repeatMass, repeatMasses, endGroupMass, repeatIsotopeAware, copolymerA, copolymerB, exportHistory, figureOptions, figShowProfile, figShowSticks, figSelectedOnly, figIncludeFlagged, figSeriesIds, figExcludedPeakIds]);
+  }, [sourceName, raw, processed, steps, peaks, customAdducts, series, selectedAdductIds, pickParams, repeatMass, repeatMasses, endGroupMass, repeatIsotopeAware, copolymerA, copolymerB, exportHistory, figureOptions, figShowProfile, figShowSticks, figSelectedOnly, figIncludeFlagged, figSeriesIds, figExcludedPeakIds, activeDocId]);
 
   const loadState = useCallback((s: ProjectState) => {
     setSourceName(s.sourceName);
@@ -911,11 +1087,13 @@ const Maldi = () => {
   useEffect(() => {
     if (!pendingFigureOptions) return;
     setPendingFigureOptions(null);
+    // Point the saved trace styling back at the document the project loaded into
+    // — the reverse of what `buildState` wrote (see ACTIVE_PROFILE_ID).
+    const saved = activeDocId
+      ? renameFigureSeriesId(pendingFigureOptions, ACTIVE_PROFILE_ID, `profile:${activeDocId}`)
+      : pendingFigureOptions;
     const merged = reconcileFigureOptions(
-      mergeSavedFigureOptions(
-        defaultFigureOptions(figureData, MALDI_FIGURE_SEED),
-        pendingFigureOptions,
-      ),
+      mergeSavedFigureOptions(defaultFigureOptions(figureData, MALDI_FIGURE_SEED), saved),
       figureData,
     );
     // Reconcile against the loaded data too: a saved series/label id that no
@@ -928,7 +1106,7 @@ const Maldi = () => {
         overrides: reconcilePeakLabelOverrides(merged.peakLabels.overrides, figureData),
       },
     });
-  }, [pendingFigureOptions, figureData, setFigureOptions]);
+  }, [pendingFigureOptions, figureData, setFigureOptions, activeDocId]);
 
   const snapshotActiveDoc = useCallback((): MaldiDocument | null => {
     if (!activeDocId) return null;
@@ -1175,22 +1353,6 @@ const Maldi = () => {
 
   const handleRemovePeak = useCallback((id: string) => {
     setPeaks((prev) => prev.filter((p) => p.id !== id));
-  }, []);
-
-  // One peak's own colour, set from the figure's label list (`null` clears it and
-  // hands the peak back to its series colour). It writes the same `Peak.color`
-  // the Peak table edits, so the plot, the table and the figure never disagree.
-  const handleSetPeakColor = useCallback((id: string, color: string | null) => {
-    setPeaks((prev) =>
-      prev.map((p) => {
-        if (p.id !== id) return p;
-        if (color === null) {
-          const { color: _cleared, ...rest } = p;
-          return rest;
-        }
-        return { ...p, color };
-      }),
-    );
   }, []);
 
   // --- Repeat / series / end-groups ------------------------------------------
@@ -1625,7 +1787,14 @@ const Maldi = () => {
     (id: string) => {
       const target = series.find((s) => s.id === id);
       if (!target) return;
-      const pinnedColor = target.color ?? colorForSeries(target);
+      // Pin the colour the ladder is about to be drawn in, so it can't drift as
+      // siblings are superseded. `figColorForSeries` — not `colorForSeries` — is
+      // what decides it: the latter numbers ladders from the top of the palette
+      // for whichever document is active, so confirming the first ladder of a
+      // second file pinned it to the SAME colour as the first file's. The pin is
+      // read back by the plot, the sidebar and the figure alike, so all three
+      // agree on the cross-file colour.
+      const pinnedColor = target.color ?? figColorForSeries(target);
       const siblingIds = new Set(sameLadderSiblings(series, target).map((s) => s.id));
       setSeries((prev) =>
         prev.map((s) => {
@@ -1640,7 +1809,7 @@ const Maldi = () => {
       setIsolateSelection(false);
       toast.success("Series moved to the Series table");
     },
-    [series, colorForSeries],
+    [series, figColorForSeries],
   );
 
   const handleSelectCopolymer = useCallback((s: CopolymerSeries | null) => {
@@ -1718,6 +1887,38 @@ const Maldi = () => {
       }
     },
     [combineDocuments, peakOwnerMap, activeDocId, documents, handleUpdateDocument],
+  );
+
+  // One peak's own colour, set from the figure's label list (`null` clears it and
+  // hands the peak back to its series colour). It writes the same `Peak.color`
+  // the Peak table edits, so the plot, the table and the figure never disagree.
+  // In a cross-file figure the peak may belong to another document, so the write
+  // is routed to its owner the same way `handlePeakTableChange` routes edits —
+  // otherwise recolouring a second file's peak would silently do nothing.
+  const handleSetPeakColor = useCallback(
+    (id: string, color: string | null) => {
+      const recolor = (p: Peak): Peak => {
+        if (color === null) {
+          const { color: _cleared, ...rest } = p;
+          return rest;
+        }
+        return { ...p, color };
+      };
+      const docId = figPeakDocId.get(id);
+      if (!docId || docId === activeDocId) {
+        setPeaks((prev) => prev.map((p) => (p.id === id ? recolor(p) : p)));
+        return;
+      }
+      const doc = documents.find((d) => d.id === docId);
+      if (!doc) return;
+      handleUpdateDocument(docId, {
+        state: {
+          ...doc.state,
+          peaks: (doc.state.peaks ?? []).map((p) => (p.id === id ? recolor(p) : p)),
+        },
+      });
+    },
+    [figPeakDocId, activeDocId, documents, handleUpdateDocument],
   );
 
   // Stack toggle. ON: save every document's current offset, then assign
@@ -2492,9 +2693,8 @@ const Maldi = () => {
                     <TabsContent value="figure" className="mt-3">
                       <MaldiFigurePanel
                         active={processed ?? raw}
-                        peaks={analysisPeaks}
+                        peaks={figAllPeaks}
                         highlightedPeakIds={highlightedPeakIds}
-                        otherSpectra={otherFigureSpectra.filter((d) => d.visible !== false).map((d) => ({ id: d.id, name: d.name, spectrum: d.spectrum }))}
                         showProfile={figShowProfile}
                         onShowProfileChange={setFigShowProfile}
                         showSticks={figShowSticks}
@@ -2504,11 +2704,10 @@ const Maldi = () => {
                         includeFlagged={figIncludeFlagged}
                         onIncludeFlaggedChange={setFigIncludeFlagged}
                         shownPeaks={figShownPeaks}
-                        confirmedSeries={figConfirmedSeries}
-                        adducts={allAdducts}
-                        colorForSeries={colorForSeries}
+                        files={figFileInfos}
                         selectedSeriesIds={figSeriesIds}
                         onToggleSeries={handleToggleFigureSeries}
+                        onToggleFileSeries={handleToggleFigureFileSeries}
                         hiddenPeakCount={figHiddenCount}
                         onRestorePeaks={handleFigureRestorePeaks}
                         onDeletePeak={handleFigureDeletePeak}

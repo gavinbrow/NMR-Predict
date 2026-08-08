@@ -2,9 +2,31 @@ import { FigureMaker } from "@/components/ir/figure/FigureMaker";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
 import type { FigureData, FigureOptions } from "@/lib/ir/figure";
-import type { Adduct, Peak, Series, SpectrumData } from "@/lib/maldi/types";
-import type { MaldiFigureSpectrum } from "@/lib/maldi/figure";
-import { seriesDisplayLabel } from "@/lib/maldi/polymers";
+import type { Peak, SpectrumData } from "@/lib/maldi/types";
+
+/** One assigned ladder offered in the figure's picker, pre-resolved by the host
+ *  (label and colour are the same ones the adapter hands the figure engine). */
+export interface MaldiFigureLadderInfo {
+  id: string;
+  label: string;
+  color: string;
+}
+
+/**
+ * One file the figure draws. A cross-file figure lists these as sections so the
+ * ladders of each file can be picked — and, in the maker's Series controls,
+ * styled — file by file rather than out of one undifferentiated list.
+ */
+export interface MaldiFigureFileInfo {
+  id: string;
+  name: string;
+  /** The document's trace colour (the Documents panel swatch). */
+  color: string;
+  /** Peaks of this file the figure currently draws. */
+  peakCount: number;
+  /** This file's confirmed ladders. */
+  ladders: MaldiFigureLadderInfo[];
+}
 
 interface MaldiFigurePanelProps {
   /** The spectrum currently displayed (processed when available, else raw). */
@@ -13,8 +35,6 @@ interface MaldiFigurePanelProps {
   peaks: Peak[];
   /** Currently emphasised peaks (a selected series / cluster), if any. */
   highlightedPeakIds?: Set<string>;
-  /** Other open spectra, available to overlay as extra traces. */
-  otherSpectra: MaldiFigureSpectrum[];
 
   // --- Hoisted figure state (owned by the always-mounted host so it survives
   //     tab switches — the same pattern FigureDialog.tsx:16-18 documents).
@@ -48,17 +68,19 @@ interface MaldiFigurePanelProps {
   //     and independent of the plot's highlight, so composing a figure never
   //     disturbs the analysis view and vice versa.
 
-  /** The confirmed ladders offered in the picker (`series.filter(endGroupLocked)`
-   *  — superseded duplicate readings the rest of the UI hides never reach here). */
-  confirmedSeries: Series[];
-  /** Adducts, for resolving a ladder's fallback label (`seriesDisplayLabel`). */
-  adducts: Adduct[];
-  /** The ladder colour of a series — reused verbatim from the page so the figure
-   *  agrees with the plot stems and the sidebar swatches. */
-  colorForSeries: (s: Series) => string;
-  /** Ids of the ladders ticked in the picker (empty = show every peak). */
+  /**
+   * Every file in the figure (the visible documents, active first), each with its
+   * confirmed ladders — superseded duplicate readings the rest of the UI hides
+   * never reach here. One entry is the ordinary single-file case; more than one
+   * is a cross-file figure and the picker sections itself by file.
+   */
+  files: MaldiFigureFileInfo[];
+  /** Ids of the ladders ticked in the picker (empty = show every peak). Spans
+   *  files: ladder ids are globally unique. */
   selectedSeriesIds: Set<string>;
   onToggleSeries: (id: string) => void;
+  /** Tick (`true`) or untick (`false`) every ladder of one file at once. */
+  onToggleFileSeries: (fileId: string, on: boolean) => void;
   /** How many peaks are currently hidden by figure-only deletes (in this view). */
   hiddenPeakCount: number;
   /** Restore every figure-only-deleted peak (never a one-way door). */
@@ -126,7 +148,6 @@ export function MaldiFigurePanel({
   active,
   peaks,
   highlightedPeakIds,
-  otherSpectra,
   showProfile,
   onShowProfileChange,
   showSticks,
@@ -136,11 +157,10 @@ export function MaldiFigurePanel({
   includeFlagged,
   onIncludeFlaggedChange,
   shownPeaks,
-  confirmedSeries,
-  adducts,
-  colorForSeries,
+  files,
   selectedSeriesIds,
   onToggleSeries,
+  onToggleFileSeries,
   hiddenPeakCount,
   onRestorePeaks,
   onDeletePeak,
@@ -150,12 +170,13 @@ export function MaldiFigurePanel({
   onFigureOptionsChange,
 }: MaldiFigurePanelProps) {
   const hasSelection = (highlightedPeakIds?.size ?? 0) > 0;
-  // The overlay set is driven by the Documents panel's per-row visibility
-  // checkbox — `otherSpectra` already contains only the VISIBLE non-active
-  // documents (filtered by the host). The old `includeOthers` switch is gone:
-  // two unsynchronised visibility models would let the screen and the exported
-  // figure disagree (maldi-overhaul-plan.md → WP4).
-  const hasOthers = otherSpectra.length > 0;
+  // Which files the figure draws is driven by the Documents panel's per-row
+  // visibility checkbox — `files` already contains only the VISIBLE documents
+  // (filtered by the host), active first. The old `includeOthers` switch is
+  // gone: two unsynchronised visibility models would let the screen and the
+  // exported figure disagree (maldi-overhaul-plan.md → WP4).
+  const crossFile = files.length > 1;
+  const allLadders = files.flatMap((f) => f.ladders);
   // A flagged peak is one the library/background detector has tagged. Whether
   // to draw them is a figure-only choice; the underlying peak list is unchanged.
   const hasFlagged = peaks.some((p) => p.flag);
@@ -184,14 +205,16 @@ export function MaldiFigurePanel({
           disabled={!hasSelection}
           title={!hasSelection ? "Select a series or cluster in the plot/table to enable" : undefined}
         />
-        {/* The "Overlay open spectra" toggle was deleted in WP4 — the overlay
-            set is now driven by the Documents panel's per-row visibility
-            checkbox, so the screen and the exported figure can't disagree. The
-            count of overlaid spectra is still surfaced here as a read-only
-            hint so the user knows how many traces will appear in the figure. */}
-        {hasOthers && (
-          <span className="text-[11px] text-muted-foreground" title="Visible non-active documents are overlaid as profile traces">
-            {`+${otherSpectra.length} overlaid`}
+        {/* The "Overlay open spectra" toggle was deleted in WP4 — which files
+            the figure draws is driven by the Documents panel's per-row
+            visibility checkbox, so the screen and the exported figure can't
+            disagree. The count is surfaced here as a read-only hint. */}
+        {crossFile && (
+          <span
+            className="text-[11px] text-muted-foreground"
+            title="Every visible document is drawn: its trace, its peaks and its ladders. Hide one in the Documents panel to leave it out."
+          >
+            {`${files.length} files`}
           </span>
         )}
         <ToggleLine
@@ -225,33 +248,70 @@ export function MaldiFigurePanel({
       {/* Series picker: choose which assigned ladders the figure draws. With none
           ticked every shown peak is drawn; tick one or more and only those
           ladders' peaks appear, each stick in its ladder colour. Independent of
-          the plot's highlight (WP6b). */}
-      {confirmedSeries.length > 0 && (
+          the plot's highlight (WP6b). Across files it sections by file, so a
+          two-polymer sample in one file and a reference in another stay legible;
+          the colours and wording match what the figure's Series controls show. */}
+      {allLadders.length > 0 && (
         <div className="rounded-2xl border border-border/60 bg-card px-4 py-3 shadow-card">
           <div className="mb-2 flex items-center justify-between gap-2">
             <span className="text-xs font-semibold text-foreground">Series</span>
             <span className="text-[11px] text-muted-foreground">
               {selectedSeriesIds.size === 0
                 ? "All peaks — tick ladders to show only those"
-                : `${selectedSeriesIds.size} of ${confirmedSeries.length} shown`}
+                : `${selectedSeriesIds.size} of ${allLadders.length} shown`}
             </span>
           </div>
-          <div className="flex flex-wrap gap-x-4 gap-y-1.5">
-            {confirmedSeries.map((s) => (
-              <label key={s.id} className="flex items-center gap-1.5 text-xs text-foreground">
-                <input
-                  type="checkbox"
-                  checked={selectedSeriesIds.has(s.id)}
-                  onChange={() => onToggleSeries(s.id)}
-                  className="h-3.5 w-3.5"
-                />
-                <span
-                  className="h-3 w-3 shrink-0 rounded-full border border-border/60"
-                  style={{ backgroundColor: colorForSeries(s) }}
-                />
-                <span className="truncate">{seriesDisplayLabel(s, adducts)}</span>
-              </label>
-            ))}
+          <div className="grid gap-2.5">
+            {files
+              .filter((f) => f.ladders.length > 0)
+              .map((f) => {
+                const on = f.ladders.filter((l) => selectedSeriesIds.has(l.id)).length;
+                return (
+                  <div key={f.id} className="grid gap-1.5">
+                    {crossFile && (
+                      <div className="flex items-center gap-1.5">
+                        <span
+                          className="h-2.5 w-2.5 shrink-0 rounded-full border border-border/60"
+                          style={{ backgroundColor: f.color }}
+                        />
+                        <span className="truncate text-[11px] font-semibold text-foreground">
+                          {f.name}
+                        </span>
+                        <span className="text-[11px] text-muted-foreground">
+                          {f.peakCount} peak{f.peakCount === 1 ? "" : "s"}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => onToggleFileSeries(f.id, on < f.ladders.length)}
+                          className="text-[11px] underline underline-offset-2 text-muted-foreground hover:text-foreground"
+                        >
+                          {on < f.ladders.length ? "All" : "None"}
+                        </button>
+                      </div>
+                    )}
+                    <div className={`flex flex-wrap gap-x-4 gap-y-1.5${crossFile ? " pl-4" : ""}`}>
+                      {f.ladders.map((l) => (
+                        <label
+                          key={l.id}
+                          className="flex items-center gap-1.5 text-xs text-foreground"
+                        >
+                          <input
+                            type="checkbox"
+                            checked={selectedSeriesIds.has(l.id)}
+                            onChange={() => onToggleSeries(l.id)}
+                            className="h-3.5 w-3.5"
+                          />
+                          <span
+                            className="h-3 w-3 shrink-0 rounded-full border border-border/60"
+                            style={{ backgroundColor: l.color }}
+                          />
+                          <span className="truncate">{l.label}</span>
+                        </label>
+                      ))}
+                    </div>
+                  </div>
+                );
+              })}
           </div>
         </div>
       )}

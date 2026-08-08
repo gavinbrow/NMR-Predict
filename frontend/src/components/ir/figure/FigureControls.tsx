@@ -342,19 +342,75 @@ function AxisControls({
   );
 }
 
+/**
+ * Heading for one group of series (the MALDI adapter groups by source file),
+ * with the bulk actions that only make sense for a whole file: recolour every
+ * series it contributed, and show or hide them together. Editing eight series
+ * one at a time to change one file's colour is the thing this exists to avoid.
+ *
+ * The colour input has no meaningful single value (the group's series differ by
+ * design — that is how its ladders stay apart), so it seeds from the first
+ * series and acts purely as a setter.
+ */
+function SeriesGroupHeader({
+  label,
+  items,
+  onPatchAll,
+}: {
+  label: string;
+  items: SeriesStyle[];
+  onPatchAll: (p: Partial<SeriesStyle>) => void;
+}) {
+  const shown = items.filter((s) => s.visible).length;
+  return (
+    <div className="flex items-center gap-2 pt-1">
+      <input
+        type="checkbox"
+        checked={shown > 0}
+        ref={(el) => {
+          if (el) el.indeterminate = shown > 0 && shown < items.length;
+        }}
+        onChange={(e) => onPatchAll({ visible: e.target.checked })}
+        className="h-3.5 w-3.5"
+        title={`Show or hide all ${items.length} series from ${label}`}
+      />
+      <input
+        type="color"
+        value={items[0]?.color ?? "#000000"}
+        onChange={(e) => onPatchAll({ color: e.target.value })}
+        className="h-5 w-5 shrink-0 cursor-pointer rounded border border-border/60 bg-transparent p-0"
+        title={`Colour every series from ${label} at once`}
+      />
+      <span className="min-w-0 flex-1 truncate text-xs font-semibold text-foreground" title={label}>
+        {label}
+      </span>
+      <span className="shrink-0 text-[11px] text-muted-foreground">
+        {items.length} series
+      </span>
+    </div>
+  );
+}
+
 /** One series' style editor row. */
 function SeriesRow({
   style,
   onPatch,
   showKind,
+  indent,
 }: {
   style: SeriesStyle;
   onPatch: (p: Partial<SeriesStyle>) => void;
   /** Expose the line/sticks toggle (spectrum-style figures only). */
   showKind?: boolean;
+  /** Nudge the row right so it reads as belonging to the heading above it. */
+  indent?: boolean;
 }) {
   return (
-    <div className="grid gap-2 rounded-lg border border-border/50 bg-background/40 p-2">
+    <div
+      className={`grid gap-2 rounded-lg border border-border/50 bg-background/40 p-2${
+        indent ? " ml-4" : ""
+      }`}
+    >
       <div className="flex items-center gap-2">
         <input
           type="checkbox"
@@ -559,6 +615,13 @@ export function FigureControls({
     });
   const patchAllSeries = (p: Partial<SeriesStyle>) =>
     onChange({ ...options, series: options.series.map((s) => ({ ...s, ...p })) });
+  /** Apply one patch to a whole group of series at once (the per-file bulk
+   *  controls: recolour or hide everything that came from one source file). */
+  const patchSeriesIn = (ids: Set<string>, p: Partial<SeriesStyle>) =>
+    onChange({
+      ...options,
+      series: options.series.map((s) => (ids.has(s.id) ? { ...s, ...p } : s)),
+    });
   const patchLegend = (p: Partial<LegendOptions>) =>
     onChange({ ...options, legend: { ...options.legend, ...p } });
   const patchPeakLabels = (p: Partial<PeakLabelOptions>) =>
@@ -675,6 +738,22 @@ export function FigureControls({
   // series matches, otherwise the first series' width (still applies to all).
   const widths = options.series.map((s) => s.lineWidth);
   const allLineWidth = widths.length ? widths[0] : 1.5;
+
+  // Section the Series list by the host's `FigureSeriesData.group` (the MALDI
+  // adapter sets it to the source file's name). One unnamed section is the
+  // ordinary case and renders exactly the flat list it always did; a cross-file
+  // figure gets a heading per file with bulk colour / show / hide for that file,
+  // which is the only practical way to restyle one file out of a dozen series.
+  const groupById = new Map(data.series.map((s) => [s.id, s.group]));
+  const seriesSections: { key: string; label?: string; items: SeriesStyle[] }[] = [];
+  for (const s of options.series) {
+    const label = groupById.get(s.id);
+    const key = label ?? "";
+    const last = seriesSections[seriesSections.length - 1];
+    if (last && last.key === key) last.items.push(s);
+    else seriesSections.push({ key, ...(label ? { label } : {}), items: [s] });
+  }
+  const grouped = seriesSections.some((g) => g.label !== undefined);
 
   return (
     <div className="flex flex-col gap-4">
@@ -862,21 +941,44 @@ export function FigureControls({
             </p>
           </div>
 
-          {options.series.length > 4 ? (
-            <ScrollArea className="h-80 pr-3">
+          {(() => {
+            const list = (
               <div className="grid gap-2">
-                {options.series.map((s) => (
-                  <SeriesRow key={s.id} style={s} showKind={msMode} onPatch={(p) => patchSeries(s.id, p)} />
+                {/* Keyed by position, not by group name: a host is free to emit
+                    the same heading twice, and two runs sharing a key would make
+                    React reuse the wrong section. */}
+                {seriesSections.map((g, gi) => (
+                  <div key={`${gi}:${g.key}`} className="grid gap-2">
+                    {g.label !== undefined && (
+                      <SeriesGroupHeader
+                        label={g.label}
+                        items={g.items}
+                        onPatchAll={(p) =>
+                          patchSeriesIn(new Set(g.items.map((s) => s.id)), p)
+                        }
+                      />
+                    )}
+                    {g.items.map((s) => (
+                      <SeriesRow
+                        key={s.id}
+                        style={s}
+                        showKind={msMode}
+                        indent={g.label !== undefined}
+                        onPatch={(p) => patchSeries(s.id, p)}
+                      />
+                    ))}
+                  </div>
                 ))}
               </div>
-            </ScrollArea>
-          ) : (
-            <div className="grid gap-2">
-              {options.series.map((s) => (
-                <SeriesRow key={s.id} style={s} showKind={msMode} onPatch={(p) => patchSeries(s.id, p)} />
-              ))}
-            </div>
-          )}
+            );
+            // A grouped list is taller per entry (a heading per file), so it gets
+            // the scroller sooner than the flat one.
+            return options.series.length > (grouped ? 3 : 4) ? (
+              <ScrollArea className="h-80 pr-3">{list}</ScrollArea>
+            ) : (
+              list
+            );
+          })()}
         </div>
       </Section>
 
