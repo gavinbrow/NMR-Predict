@@ -33,6 +33,16 @@ interface FigureMakerProps {
    * for IR/Kinetics, so no delete control appears there. (WP6b)
    */
   onDeletePeak?: (id: string) => void;
+  /**
+   * MS-only: whether the host is drawing the picked peaks as sticks. Passed down
+   * so the toggle can live in the controls panel's "Peaks & labels" section
+   * alongside everything else about the peaks, even though the host owns it.
+   */
+  showSticks?: boolean;
+  onShowSticksChange?: (v: boolean) => void;
+  /** MS-only: set (`color`) or clear (`null`) one peak's own colour in the host's
+   *  peak model. Enables the per-peak swatches in the label list. */
+  onSetPeakColor?: (id: string, color: string | null) => void;
 }
 
 /** Checkerboard backdrop so a transparent figure background is visible. */
@@ -51,7 +61,15 @@ const CHECKER: React.CSSProperties = {
  * styling panel on the right. The preview SVG is the same component the
  * exporters render, so the saved file matches the screen exactly.
  */
-export function FigureMaker({ data, options, onChange, onDeletePeak }: FigureMakerProps) {
+export function FigureMaker({
+  data,
+  options,
+  onChange,
+  onDeletePeak,
+  showSticks,
+  onShowSticksChange,
+  onSetPeakColor,
+}: FigureMakerProps) {
   const scale = options.pngScale ?? 2;
   const setScale = (next: number) => onChange({ ...options, pngScale: next });
   const [busy, setBusy] = useState(false);
@@ -234,6 +252,9 @@ export function FigureMaker({ data, options, onChange, onDeletePeak }: FigureMak
           onSelectLabel={setSelectedLabelId}
           hiddenByThinning={labelStats.hiddenByThinning}
           onDeleteLabelPeak={onDeletePeak}
+          showSticks={showSticks}
+          onShowSticksChange={onShowSticksChange}
+          onSetPeakColor={onSetPeakColor}
         />
       </div>
     </div>

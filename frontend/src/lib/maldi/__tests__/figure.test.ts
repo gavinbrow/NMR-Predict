@@ -207,4 +207,23 @@ describe("buildMaldiFigureData", () => {
     expect(red?.x).toEqual([150]);
     expect(data.series.find((s) => s.id === "sticks")?.x).toEqual([250]);
   });
+
+  it("emits the base colour first and keeps the colour split out of the legend", () => {
+    // The recoloured peak comes FIRST in the list, so only an explicit ordering
+    // puts the ladder's own series ahead of its one-off colour split.
+    const peaks = [peak("p1", 150, 5, { color: "#ff0000" }), peak("p2", 250, 8)];
+    const data = buildMaldiFigureData({
+      spectra: [primary()],
+      peaks,
+      showProfile: false,
+      showSticks: true,
+      labelPeaks: false,
+      sourceName: "x",
+      seriesGroups: [{ id: "sA", label: "ladder A", color: "#111111", peakIds: new Set(["p1", "p2"]) }],
+    });
+    expect(data.series.map((s) => s.id)).toEqual(["sticks:sA", "sticks:sA:c:#ff0000"]);
+    // Only the ladder keys the legend; the split would just repeat its name.
+    expect(data.series[0].legendHidden).toBeUndefined();
+    expect(data.series[1].legendHidden).toBe(true);
+  });
 });

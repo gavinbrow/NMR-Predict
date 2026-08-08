@@ -4,6 +4,7 @@ import {
   decimateMinMax,
   defaultFigureOptions,
   formatTick,
+  mergeSavedFigureOptions,
   niceTicks,
   pickVisibleLabels,
   reconcileFigureOptions,
@@ -416,5 +417,77 @@ describe("default & reconcile options", () => {
     const prev = { ...defaultFigureOptions(makeData(["a"])), title: "My figure" };
     const next = reconcileFigureOptions(prev, makeData(["a", "b"]));
     expect(next.title).toBe("My figure");
+  });
+});
+
+describe("defaultFigureOptions — host seed", () => {
+  it("layers a host's own defaults over the shared ones", () => {
+    const seed = {
+      fontFamily: "Times New Roman",
+      width: 800,
+      height: 600,
+      pngScale: 10,
+      showGrid: false,
+      peakLabels: { rotation: -45, maxLabels: 40, minGap: 6 },
+    };
+    const o = defaultFigureOptions(makeData(["a"]), seed);
+    expect(o.fontFamily).toBe("Times New Roman");
+    expect([o.width, o.height]).toEqual([800, 600]);
+    expect(o.pngScale).toBe(10);
+    // `showGrid` is one seed key that reaches both axes.
+    expect(o.x.showGrid).toBe(false);
+    expect(o.y.showGrid).toBe(false);
+    expect(o.peakLabels.rotation).toBe(-45);
+    expect(o.peakLabels.maxLabels).toBe(40);
+    expect(o.peakLabels.minGap).toBe(6);
+    // Everything the seed is silent about keeps the shared default.
+    expect(o.titleFontSize).toBe(18);
+    expect(o.peakLabels.decimals).toBe(2);
+    expect(o.x.gridColor).toBe("#e2e8f0");
+  });
+
+  it("keeps the shared defaults when no seed is given", () => {
+    const o = defaultFigureOptions(makeData(["a"]));
+    expect(o.fontFamily).toBe("Arial");
+    expect([o.width, o.height]).toEqual([900, 560]);
+    expect(o.x.showGrid).toBe(true);
+    expect(o.stickColor).toBeNull();
+    expect(o.legend.marker).toBe("line");
+    expect(o.legend.entries).toEqual({});
+  });
+});
+
+describe("mergeSavedFigureOptions", () => {
+  const base = () => defaultFigureOptions(makeData(["a", "b"]));
+
+  it("keeps every saved value", () => {
+    const saved = { ...base(), title: "Saved", stickColor: "#111111" };
+    saved.legend = { ...saved.legend, marker: "dot" as const, entries: { a: { text: "PEG" } } };
+    const merged = mergeSavedFigureOptions(base(), saved);
+    expect(merged.title).toBe("Saved");
+    expect(merged.stickColor).toBe("#111111");
+    expect(merged.legend.marker).toBe("dot");
+    expect(merged.legend.entries).toEqual({ a: { text: "PEG" } });
+  });
+
+  it("fills fields a record written by an older build never had", () => {
+    // A record from before `stickColor` / `legend.marker` / `legend.entries`.
+    const saved = base() as unknown as Record<string, unknown>;
+    delete saved.stickColor;
+    delete (saved.legend as Record<string, unknown>).marker;
+    delete (saved.legend as Record<string, unknown>).entries;
+    delete (saved.peakLabels as Record<string, unknown>).overrides;
+    delete saved.y;
+    const merged = mergeSavedFigureOptions(base(), saved);
+    expect(merged.stickColor).toBeNull();
+    expect(merged.legend.marker).toBe("line");
+    expect(merged.legend.entries).toEqual({});
+    expect(merged.peakLabels.overrides).toEqual({});
+    expect(merged.y.label).toBe("y");
+  });
+
+  it("returns the base untouched when there is nothing saved", () => {
+    const b = base();
+    expect(mergeSavedFigureOptions(b, null)).toBe(b);
   });
 });

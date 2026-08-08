@@ -80,6 +80,11 @@ const peakMz = (p: Peak): number => p.centroid ?? p.mz;
  * any explicit override colour gets its own `${id}:c:${color}` series. Those ids
  * are stable (derived from the colour, not a position), so the user's per-series
  * styling survives selection changes. No members → nothing is appended.
+ *
+ * The base-colour bucket is emitted first (it is the ladder), and the override
+ * buckets are marked `legendHidden`: they exist only because one peak was
+ * recoloured, and a legend row repeating the ladder's name under a one-off
+ * colour is noise. Adding one back is a tick in the legend's entry list.
  */
 function pushStickSeries(
   out: FigureSeriesData[],
@@ -97,13 +102,18 @@ function pushStickSeries(
     if (bucket) bucket.push(p);
     else byColor.set(color, [p]);
   }
-  for (const [color, bucket] of byColor) {
+  const ordered = [...byColor].sort(
+    (a, b) => Number(b[0] === baseColor) - Number(a[0] === baseColor),
+  );
+  for (const [color, bucket] of ordered) {
+    const isBase = color === baseColor;
     out.push({
-      id: color === baseColor ? id : `${id}:c:${color}`,
+      id: isBase ? id : `${id}:c:${color}`,
       label,
       x: bucket.map(peakMz),
       y: bucket.map((p) => p.intensity),
       styleHints: { kind: "sticks", lineWidth: 1, color },
+      ...(isBase ? {} : { legendHidden: true }),
     });
   }
 }

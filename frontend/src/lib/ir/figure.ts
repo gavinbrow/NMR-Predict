@@ -20,6 +20,14 @@ export interface FigureSeriesData {
   /** Data-space baseline for stick series. Defaults to zero (or the visible
    * y-axis floor). Hosts use this for vertically stacked mass spectra. */
   baseline?: number;
+  /**
+   * Keep this series out of the legend unless the user explicitly adds it (a
+   * `show: true` {@link LegendEntryOverride}). For series that exist only
+   * because the renderer cannot draw them as part of another — the MALDI
+   * adapter splits a ladder's sticks by per-peak colour — where a legend row
+   * would just repeat the ladder it came from under a one-off colour.
+   */
+  legendHidden?: boolean;
   /** Host-suggested initial styling (e.g. scatter vs dashed fit line, sticks). */
   styleHints?: Partial<
     Pick<SeriesStyle, "color" | "lineWidth" | "lineStyle" | "markers" | "markerSize" | "kind">
@@ -180,6 +188,27 @@ export interface PeakLabelOptions {
   overrides: Record<string, PeakLabelOverride>;
 }
 
+/** How a legend row's colour key is drawn: a line sample or a filled dot. */
+export type LegendMarker = "line" | "dot";
+
+/**
+ * Per-series legend overrides, keyed by {@link SeriesStyle.id}. Both fields are
+ * absent by default, which is what makes the legend derive itself from the
+ * series (an entry per visible series, named by the series).
+ */
+export interface LegendEntryOverride {
+  /**
+   * Force this series into (`true`) or out of (`false`) the legend, overriding
+   * the default rule "a series is in the legend when it is visible". Lets the
+   * legend name a subset — e.g. one entry per polymer in a MALDI figure whose
+   * stick series also include per-peak colour splits.
+   */
+  show?: boolean;
+  /** Legend wording for this series, replacing {@link SeriesStyle.label}. Empty
+   *  or absent falls back to the series' own label. */
+  text?: string;
+}
+
 export interface LegendOptions {
   show: boolean;
   position: LegendPosition;
@@ -191,6 +220,12 @@ export interface LegendOptions {
   custom: { x: number; y: number } | null;
   fontSize: number;
   frame: boolean;
+  /** Colour key glyph: a line sample (default) or a filled dot. */
+  marker: LegendMarker;
+  /** Per-series show/rename overrides — see {@link LegendEntryOverride}. The
+   *  colour is deliberately NOT overridable: the legend is a key to the data, so
+   *  it always shows the series' own colour. Default `{}`. */
+  entries: Record<string, LegendEntryOverride>;
 }
 
 export interface FigureOptions {
@@ -214,6 +249,16 @@ export interface FigureOptions {
   pngScale?: number;
   background: "white" | "transparent";
   reversedX: boolean;
+  /**
+   * Draw every `kind: "sticks"` series in this one colour instead of its own.
+   * `null` (the default) leaves each stick series in its series colour.
+   *
+   * This is what separates "colour the labels by series" from "colour the
+   * spectrum by series": with a uniform stick colour the peaks stay a single
+   * neutral colour while the labels and the legend still carry each ladder's
+   * colour. Line series are never affected.
+   */
+  stickColor: string | null;
   /** Plot frame: the border box around the plot area, plus the tick marks. */
   frameShow: boolean;
   frameColor: string;
@@ -241,7 +286,7 @@ export const PALETTE = [
 
 export const FONT_FAMILIES = ["Arial", "Times New Roman", "Georgia", "Courier New"];
 
-function defaultAxisOptions(label: string): AxisOptions {
+function defaultAxisOptions(label: string, showGrid: boolean): AxisOptions {
   return {
     label,
     min: null,
@@ -249,7 +294,7 @@ function defaultAxisOptions(label: string): AxisOptions {
     tickCount: null,
     decimals: null,
     showTickLabels: true,
-    showGrid: true,
+    showGrid,
     gridColor: "#e2e8f0",
     gridWidth: 1,
     gridStyle: "solid",
@@ -271,8 +316,27 @@ function defaultSeriesStyle(s: FigureSeriesData, index: number): SeriesStyle {
   };
 }
 
-/** Initial options seeded from the data (labels, palette colours, style hints). */
-export function defaultFigureOptions(data: FigureData): FigureOptions {
+/**
+ * A host's own starting values for {@link defaultFigureOptions}. Hosts differ in
+ * what a *sensible* figure looks like — a MALDI stick spectrum wants diagonal
+ * m/z labels packed tightly and no gridlines, an IR overlay does not — so each
+ * host states its preferences here instead of them becoming everyone's defaults.
+ * Everything omitted keeps the shared default below.
+ */
+export interface FigureOptionSeed {
+  fontFamily?: string;
+  width?: number;
+  height?: number;
+  pngScale?: number;
+  /** Initial gridline visibility, applied to BOTH axes. */
+  showGrid?: boolean;
+  legend?: Partial<LegendOptions>;
+  peakLabels?: Partial<PeakLabelOptions>;
+}
+
+/** Initial options seeded from the data (labels, palette colours, style hints),
+ *  with any host preferences from `seed` layered on top. */
+export function defaultFigureOptions(data: FigureData, seed: FigureOptionSeed = {}): FigureOptions {
   // Auto-show the legend for a modest multi-series figure. A MALDI stick figure
   // can emit one series per assigned ladder (see the MALDI adapter's
   // `seriesGroups`), so a flat cap of 12 would silently default the legend off
@@ -282,24 +346,26 @@ export function defaultFigureOptions(data: FigureData): FigureOptions {
   // unchanged). (WP6d)
   const hasSticks = data.series.some((s) => s.styleHints?.kind === "sticks");
   const legendCap = hasSticks ? 40 : 12;
+  const showGrid = seed.showGrid ?? true;
   return {
     title: "",
     titleFontSize: 18,
-    fontFamily: "Arial",
+    fontFamily: seed.fontFamily ?? "Arial",
     axisFontSize: 14,
     tickFontSize: 12,
-    width: 900,
-    height: 560,
-    pngScale: 2,
+    width: seed.width ?? 900,
+    height: seed.height ?? 560,
+    pngScale: seed.pngScale ?? 2,
     background: "white",
     reversedX: data.reversedX ?? false,
+    stickColor: null,
     frameShow: true,
     frameColor: "#334155",
     frameWidth: 1,
     axisColor: "#0f172a",
     axisBold: false,
-    x: defaultAxisOptions(data.xLabel),
-    y: defaultAxisOptions(data.yLabel),
+    x: defaultAxisOptions(data.xLabel, showGrid),
+    y: defaultAxisOptions(data.yLabel, showGrid),
     series: data.series.map(defaultSeriesStyle),
     legend: {
       show: data.series.length > 1 && data.series.length <= legendCap,
@@ -307,6 +373,9 @@ export function defaultFigureOptions(data: FigureData): FigureOptions {
       custom: null,
       fontSize: 12,
       frame: true,
+      marker: "line",
+      entries: {},
+      ...seed.legend,
     },
     peakLabels: {
       show: (data.peakLabels?.length ?? 0) > 0,
@@ -320,6 +389,39 @@ export function defaultFigureOptions(data: FigureData): FigureOptions {
       minGap: 26,
       colorBySeries: false,
       overrides: {},
+      ...seed.peakLabels,
+    },
+  };
+}
+
+/**
+ * Layer a persisted `saved` options object over a freshly-built `base`, so
+ * options that were written to storage before a field existed (or by a newer
+ * build that has since dropped one) still deserialize into a complete
+ * {@link FigureOptions}. The nested groups are merged one level deep — a whole
+ * missing `legend`/`peakLabels`/axis block falls back to `base` wholesale, and a
+ * present one keeps `base`'s value for each key it lacks.
+ *
+ * `series` is taken from `saved` verbatim when present: the caller reconciles it
+ * against the live data (see {@link reconcileFigureOptions}), which is the only
+ * thing that can tell a stale series id from a real one.
+ */
+export function mergeSavedFigureOptions(
+  base: FigureOptions,
+  saved: Partial<FigureOptions> | null | undefined,
+): FigureOptions {
+  if (!saved) return base;
+  return {
+    ...base,
+    ...saved,
+    x: { ...base.x, ...saved.x },
+    y: { ...base.y, ...saved.y },
+    series: saved.series ?? base.series,
+    legend: { ...base.legend, ...saved.legend, entries: saved.legend?.entries ?? {} },
+    peakLabels: {
+      ...base.peakLabels,
+      ...saved.peakLabels,
+      overrides: saved.peakLabels?.overrides ?? {},
     },
   };
 }

@@ -6,6 +6,8 @@
 // worker dispatcher and the client are typed off that map. Adding an op in a
 // later phase means adding one entry here — the client/worker signatures follow.
 
+import type { FigureOptions } from "@/lib/ir/figure";
+
 // ---------------------------------------------------------------------------
 // Core data model
 // ---------------------------------------------------------------------------
@@ -184,6 +186,36 @@ export interface ProjectState {
   copolymerB?: number;
   /** Log of exports performed from this project. */
   exportHistory?: ExportRecord[];
+  /** Publication-figure state — see {@link MaldiFigureState}. Absent on projects
+   *  saved before the figure became part of the project. */
+  figure?: MaldiFigureState;
+}
+
+/**
+ * The Figure tab, saved with the project: how the figure is styled AND what it
+ * includes. Composing a publication figure is real work — colours per ladder,
+ * label placement, legend wording, zoom, export scale — and it used to live only
+ * in component state, so reopening a project meant redoing all of it.
+ *
+ * `options` is the shared figure engine's full option set (`lib/ir/figure`),
+ * restored through `mergeSavedFigureOptions` so a record written by an older or
+ * newer build still deserializes. The rest is the MALDI-side composition state
+ * the maker itself knows nothing about.
+ */
+export interface MaldiFigureState {
+  options: FigureOptions;
+  /** Draw the continuous profile trace(s). */
+  showProfile: boolean;
+  /** Draw the picked peaks as vertical sticks. */
+  showSticks: boolean;
+  /** Narrow the figure to the plot's current selection. */
+  selectedOnly: boolean;
+  /** Include library-flagged peaks (isotopes, matrix, salt…). */
+  includeFlagged: boolean;
+  /** Ids of the ladders ticked in the figure's series picker (empty = all). */
+  seriesIds: string[];
+  /** Peak ids removed from the figure only (they stay in the table + exports). */
+  excludedPeakIds: string[];
 }
 
 /** One entry in a project's export history. */

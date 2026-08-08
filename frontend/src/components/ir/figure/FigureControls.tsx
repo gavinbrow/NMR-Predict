@@ -1,4 +1,4 @@
-import { Eye, EyeOff, RotateCcw } from "lucide-react";
+import { Eye, EyeOff, RotateCcw, X } from "lucide-react";
 import { useMemo } from "react";
 import { Section } from "@/components/ir/Section";
 import { Button } from "@/components/ui/button";
@@ -20,6 +20,8 @@ import {
   type FigureData,
   type FigureOptions,
   type GridStyle,
+  type LegendEntryOverride,
+  type LegendMarker,
   type LegendOptions,
   type LegendPosition,
   type LineStyle,
@@ -48,6 +50,20 @@ interface FigureControlsProps {
    * IR/Kinetics, so the control never appears there. (WP6b)
    */
   onDeleteLabelPeak?: (id: string) => void;
+  /**
+   * MS-only: draw the picked peaks as vertical sticks. Owned by the host (it is
+   * a composition choice, not styling) but surfaced here, next to everything
+   * else about the peaks, because that is where users look for it.
+   */
+  showSticks?: boolean;
+  onShowSticksChange?: (v: boolean) => void;
+  /**
+   * MS-only: set (or clear, with `null`) one peak's own colour in the host's
+   * peak model — the same `Peak.color` the Peak table edits. It wins over both
+   * the series colour and the single label colour, which is what makes "colour
+   * this one peak" possible without leaving the figure.
+   */
+  onSetPeakColor?: (id: string, color: string | null) => void;
 }
 
 const SIZE_PRESETS = [
@@ -74,6 +90,13 @@ const LEGEND_POSITIONS: { value: LegendPosition; label: string }[] = [
   { value: "bottom-left", label: "Bottom left" },
   { value: "bottom-right", label: "Bottom right" },
 ];
+const LEGEND_MARKERS: { value: LegendMarker; label: string }[] = [
+  { value: "line", label: "Line" },
+  { value: "dot", label: "Dot" },
+];
+/** Fallback swatch for a peak with no colour of its own (the sky the MALDI
+ *  adapter stems unassigned peaks in). */
+const NO_PEAK_COLOR = "#0ea5e9";
 
 /** A small labelled numeric input. */
 function NumField({
@@ -409,25 +432,36 @@ function SeriesRow({
 
 /** One peak label's row in the label list: eye toggle, colour swatch, the label
  *  text (click to select for the placement editor), and a reset-placement button
- *  once it has been dragged. Mirrors {@link SeriesRow}'s bordered-row idiom. */
+ *  once it has been dragged. Mirrors {@link SeriesRow}'s bordered-row idiom.
+ *
+ *  The swatch is a live colour input when the host wired `onSetColor`: it writes
+ *  the peak's own colour, which beats the series colour for both the stick and
+ *  the label. Without a host it stays a read-only dot showing the resolved
+ *  colour. */
 function PeakLabelRow({
   text,
   color,
+  ownColor,
   hidden,
   moved,
   selected,
   onSelect,
   onToggleHidden,
   onReset,
+  onSetColor,
 }: {
   text: string;
+  /** The colour the label actually renders in (own → series → single colour). */
   color: string;
+  /** True when the peak carries a colour of its own (i.e. one to clear). */
+  ownColor: boolean;
   hidden: boolean;
   moved: boolean;
   selected: boolean;
   onSelect: () => void;
   onToggleHidden: () => void;
   onReset: () => void;
+  onSetColor?: (color: string | null) => void;
 }) {
   return (
     <div
@@ -443,11 +477,31 @@ function PeakLabelRow({
       >
         {hidden ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
       </button>
-      <span
-        className="h-3 w-3 shrink-0 rounded-full border border-border/60"
-        style={{ backgroundColor: color }}
-        title="Label colour (set per-peak in the Peak table)"
-      />
+      {onSetColor ? (
+        <input
+          type="color"
+          value={color}
+          onChange={(e) => onSetColor(e.target.value)}
+          title="This peak's own colour — wins over the series colour for its stick and its label"
+          className="h-5 w-6 shrink-0 cursor-pointer rounded border border-border/60 bg-transparent p-0.5"
+        />
+      ) : (
+        <span
+          className="h-3 w-3 shrink-0 rounded-full border border-border/60"
+          style={{ backgroundColor: color }}
+          title="Label colour (set per-peak in the Peak table)"
+        />
+      )}
+      {onSetColor && ownColor && (
+        <button
+          type="button"
+          onClick={() => onSetColor(null)}
+          title="Clear this peak's colour (back to its series colour)"
+          className="shrink-0 text-muted-foreground hover:text-foreground"
+        >
+          <X className="h-3 w-3" />
+        </button>
+      )}
       <button
         type="button"
         onClick={onSelect}
@@ -472,6 +526,13 @@ function PeakLabelRow({
   );
 }
 
+/** Legend entry rows, scrolling once there are more than a handful — the same
+ *  threshold the Series and label lists use. */
+function LegendEntryList({ children }: { children: React.ReactNode[] }) {
+  const rows = <div className="grid gap-1.5">{children}</div>;
+  return children.length > 5 ? <ScrollArea className="h-56 pr-3">{rows}</ScrollArea> : rows;
+}
+
 /**
  * The full styling panel: title & size, fonts, both axes, per-series styles,
  * and the legend — every visual aspect of the exported figure.
@@ -484,6 +545,9 @@ export function FigureControls({
   onSelectLabel,
   hiddenByThinning,
   onDeleteLabelPeak,
+  showSticks,
+  onShowSticksChange,
+  onSetPeakColor,
 }: FigureControlsProps) {
   const patch = (p: Partial<FigureOptions>) => onChange({ ...options, ...p });
   const patchAxis = (key: "x" | "y", p: Partial<AxisOptions>) =>
@@ -499,6 +563,23 @@ export function FigureControls({
     onChange({ ...options, legend: { ...options.legend, ...p } });
   const patchPeakLabels = (p: Partial<PeakLabelOptions>) =>
     onChange({ ...options, peakLabels: { ...options.peakLabels, ...p } });
+
+  const legendEntries = options.legend.entries ?? {};
+  const legendShownCount = options.series.filter(
+    (s) => legendEntries[s.id]?.show ?? s.visible,
+  ).length;
+  /** Patch one series' legend entry, dropping keys that are back at their
+   *  default so the override map never grows entries that say nothing. */
+  const patchLegendEntry = (id: string, p: Partial<LegendEntryOverride>, defaultShow: boolean) => {
+    const merged = { ...(legendEntries[id] ?? {}), ...p };
+    const cleaned: LegendEntryOverride = {};
+    if (merged.show !== undefined && merged.show !== defaultShow) cleaned.show = merged.show;
+    if (merged.text?.trim()) cleaned.text = merged.text;
+    const entries = { ...legendEntries };
+    if (cleaned.show !== undefined || cleaned.text) entries[id] = cleaned;
+    else delete entries[id];
+    patchLegend({ entries });
+  };
 
   // Patch one label's figure-only override (placement nudge / hide). Keys back at
   // their neutral default are dropped so an override never lingers as an empty
@@ -557,6 +638,26 @@ export function FigureControls({
   const selectedDatum = selectedLabelId
     ? data.peakLabels?.find((p) => p.id === selectedLabelId)
     : undefined;
+  /** One row of the "Individual labels" list (shared by the scrolling and
+   *  non-scrolling branches so they can't drift apart). */
+  const renderPeakLabelRow = (d: PeakLabelDatum) => {
+    const ov = options.peakLabels.overrides[d.id];
+    return (
+      <PeakLabelRow
+        key={d.id}
+        text={labelText(d)}
+        color={labelColor(d)}
+        ownColor={d.color !== undefined}
+        hidden={ov?.hidden === true}
+        moved={!!(ov?.dx || ov?.dy)}
+        selected={d.id === selectedLabelId}
+        onSelect={() => onSelectLabel?.(d.id === selectedLabelId ? null : d.id)}
+        onToggleHidden={() => patchPeakLabelOverride(d.id, { hidden: !ov?.hidden })}
+        onReset={() => patchPeakLabelOverride(d.id, { dx: 0, dy: 0 })}
+        onSetColor={onSetPeakColor ? (c) => onSetPeakColor(d.id, c) : undefined}
+      />
+    );
+  };
 
   const presetKey =
     SIZE_PRESETS.find((s) => s.w === options.width && s.h === options.height)?.key ?? "custom";
@@ -782,6 +883,13 @@ export function FigureControls({
       {msMode && (
         <Section title="Peaks & labels" caption={`${data.peakLabels?.length ?? 0} peaks`}>
           <div className="grid gap-3">
+            {onShowSticksChange && (
+              <CheckLine
+                label="Peak sticks"
+                checked={showSticks ?? false}
+                onChange={onShowSticksChange}
+              />
+            )}
             <CheckLine
               label="Label peaks (m/z)"
               checked={options.peakLabels.show}
@@ -876,12 +984,24 @@ export function FigureControls({
                   checked={options.peakLabels.colorBySeries}
                   onChange={(v) => patchPeakLabels({ colorBySeries: v })}
                 />
-                <p className="text-[11px] text-muted-foreground">
-                  Labels track the data — only the tallest, non-overlapping peaks in view are
-                  drawn (raise “Max labels” or lower “Min spacing” to show more). Drag a label in
-                  the preview to move it; its text and colour come from the Peak table. Re-picking
-                  peaks resets label placement.
-                </p>
+                {/* Sticks in one colour + labels by series = a monochrome
+                    spectrum with a colour-coded annotation layer. */}
+                <div className="flex flex-wrap items-center gap-2">
+                  <CheckLine
+                    label="Uniform stick colour"
+                    checked={options.stickColor !== null}
+                    onChange={(v) => patch({ stickColor: v ? options.stickColor ?? "#1e293b" : null })}
+                  />
+                  {options.stickColor !== null && (
+                    <ColorField
+                      value={options.stickColor}
+                      onChange={(v) => patch({ stickColor: v })}
+                    />
+                  )}
+                  <span className="text-[11px] text-muted-foreground">
+                    Keeps the series colours in the labels and legend only.
+                  </span>
+                </div>
                 {(hiddenByThinning ?? 0) > 0 && (
                   <p className="text-[11px] text-amber-600">
                     {hiddenByThinning} label{hiddenByThinning === 1 ? "" : "s"} in view hidden by
@@ -917,6 +1037,29 @@ export function FigureControls({
                         onChange={(v) => patchPeakLabelOverride(selectedDatum.id, { dy: v })}
                       />
                     </div>
+                    {/* This one peak's own colour, for both its stick and its
+                        label — the per-peak override the Peak table also sets. */}
+                    {onSetPeakColor && (
+                      <div className="flex items-center gap-2">
+                        <ColorField
+                          value={selectedDatum.color ?? labelColor(selectedDatum)}
+                          onChange={(v) => onSetPeakColor(selectedDatum.id, v)}
+                        />
+                        <span className="text-[11px] text-muted-foreground">
+                          This peak’s colour
+                          {selectedDatum.color ? "" : " (currently inherited)"}
+                        </span>
+                        {selectedDatum.color && (
+                          <button
+                            type="button"
+                            onClick={() => onSetPeakColor(selectedDatum.id, null)}
+                            className="text-[11px] text-muted-foreground underline underline-offset-2 hover:text-foreground"
+                          >
+                            Clear
+                          </button>
+                        )}
+                      </div>
+                    )}
                     <div className="flex flex-wrap gap-2">
                       <Button
                         variant="outline"
@@ -959,7 +1102,7 @@ export function FigureControls({
                       )}
                     </div>
                     <p className="text-[11px] text-muted-foreground">
-                      Edit the label’s text and colour in the Peak table.
+                      Edit the label’s text in the Peak table.
                       {onDeleteLabelPeak
                         ? " Deleting only removes it from this figure — the peak stays in the table and exports."
                         : ""}
@@ -994,46 +1137,12 @@ export function FigureControls({
                     {(data.peakLabels?.length ?? 0) > 4 ? (
                       <ScrollArea className="h-56 pr-3">
                         <div className="grid gap-1.5">
-                          {(data.peakLabels ?? []).map((d) => {
-                            const ov = options.peakLabels.overrides[d.id];
-                            return (
-                              <PeakLabelRow
-                                key={d.id}
-                                text={labelText(d)}
-                                color={labelColor(d)}
-                                hidden={ov?.hidden === true}
-                                moved={!!(ov?.dx || ov?.dy)}
-                                selected={d.id === selectedLabelId}
-                                onSelect={() => onSelectLabel?.(d.id === selectedLabelId ? null : d.id)}
-                                onToggleHidden={() =>
-                                  patchPeakLabelOverride(d.id, { hidden: !ov?.hidden })
-                                }
-                                onReset={() => patchPeakLabelOverride(d.id, { dx: 0, dy: 0 })}
-                              />
-                            );
-                          })}
+                          {(data.peakLabels ?? []).map(renderPeakLabelRow)}
                         </div>
                       </ScrollArea>
                     ) : (
                       <div className="grid gap-1.5">
-                        {(data.peakLabels ?? []).map((d) => {
-                          const ov = options.peakLabels.overrides[d.id];
-                          return (
-                            <PeakLabelRow
-                              key={d.id}
-                              text={labelText(d)}
-                              color={labelColor(d)}
-                              hidden={ov?.hidden === true}
-                              moved={!!(ov?.dx || ov?.dy)}
-                              selected={d.id === selectedLabelId}
-                              onSelect={() => onSelectLabel?.(d.id === selectedLabelId ? null : d.id)}
-                              onToggleHidden={() =>
-                                patchPeakLabelOverride(d.id, { hidden: !ov?.hidden })
-                              }
-                              onReset={() => patchPeakLabelOverride(d.id, { dx: 0, dy: 0 })}
-                            />
-                          );
-                        })}
+                        {(data.peakLabels ?? []).map(renderPeakLabelRow)}
                       </div>
                     )}
                   </div>
@@ -1078,13 +1187,31 @@ export function FigureControls({
                     : "Or drag the legend in the preview to place it anywhere."}
                 </p>
               </div>
-              <div className="grid grid-cols-2 items-end gap-2">
+              <div className="grid grid-cols-3 items-end gap-2">
                 <NumField
                   label="Font size"
                   value={options.legend.fontSize}
                   onChange={(v) => patchLegend({ fontSize: v })}
                   min={6}
                 />
+                <div className="grid gap-1">
+                  <Label className="text-[11px] text-muted-foreground">Key</Label>
+                  <Select
+                    value={options.legend.marker ?? "line"}
+                    onValueChange={(v) => patchLegend({ marker: v as LegendMarker })}
+                  >
+                    <SelectTrigger className="h-8" title="Draw each legend key as a line sample or a filled dot">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {LEGEND_MARKERS.map((m) => (
+                        <SelectItem key={m.value} value={m.value}>
+                          {m.label}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
                 <div className="pb-2">
                   <CheckLine
                     label="Frame"
@@ -1093,6 +1220,58 @@ export function FigureControls({
                   />
                 </div>
               </div>
+
+              {/* Which series the legend names, what it calls them, and in what
+                  colour. The colour writes the SERIES colour rather than a
+                  legend-only one: a key whose colour differs from the data it
+                  keys would be a lie. */}
+              {options.series.length > 0 && (
+                <div className="grid gap-2">
+                  <div className="flex items-center justify-between gap-2">
+                    <Label className="text-[11px] text-muted-foreground">Entries</Label>
+                    <span className="text-[11px] text-muted-foreground">
+                      {legendShownCount} of {options.series.length}
+                    </span>
+                  </div>
+                  <LegendEntryList>
+                    {options.series.map((s) => {
+                      const ov = legendEntries[s.id];
+                      return (
+                        <div
+                          key={s.id}
+                          className="flex items-center gap-2 rounded-md border border-border/50 bg-background/40 px-2 py-1"
+                        >
+                          <input
+                            type="checkbox"
+                            checked={ov?.show ?? s.visible}
+                            onChange={(e) => patchLegendEntry(s.id, { show: e.target.checked }, s.visible)}
+                            title="Show this series in the legend"
+                            className="h-3.5 w-3.5 shrink-0"
+                          />
+                          <input
+                            type="color"
+                            value={s.color}
+                            onChange={(e) => patchSeries(s.id, { color: e.target.value })}
+                            title="Series colour (the legend keys the data, so this is the same colour the plot draws)"
+                            className="h-5 w-6 shrink-0 cursor-pointer rounded border border-border/60 bg-transparent p-0.5"
+                          />
+                          <Input
+                            value={ov?.text ?? ""}
+                            placeholder={s.label}
+                            title={ov?.text || s.label}
+                            onChange={(e) => patchLegendEntry(s.id, { text: e.target.value }, s.visible)}
+                            className="h-7 min-w-0 flex-1 text-xs"
+                          />
+                        </div>
+                      );
+                    })}
+                  </LegendEntryList>
+                  <p className="text-[11px] text-muted-foreground">
+                    Blank text uses the series name. Ticking a hidden series lists it in the legend
+                    without drawing it.
+                  </p>
+                </div>
+              )}
             </>
           )}
         </div>

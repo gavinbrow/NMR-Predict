@@ -234,3 +234,130 @@ describe("FigureSvg — scroll scales the y-axis", () => {
     expect(onResetZoom).toHaveBeenCalledTimes(1);
   });
 });
+
+describe("FigureSvg — legend", () => {
+  /** The legend rows' wording (every <text> that isn't a tick or a peak label). */
+  const legendTexts = (container: HTMLElement) =>
+    Array.from(container.querySelectorAll("text")).map((t) => t.textContent);
+
+  function twoSeries(): FigureData {
+    return {
+      x: [1, 2],
+      series: [
+        { id: "sticks:a", label: "ladder A", x: [1], y: [5], styleHints: { kind: "sticks", color: "#d946ef" } },
+        { id: "sticks:b", label: "ladder B", x: [2], y: [7], styleHints: { kind: "sticks", color: "#0ea5e9" } },
+      ],
+      xLabel: "m/z",
+      yLabel: "Intensity",
+      peakLabels: [],
+    };
+  }
+
+  it("names one entry per visible series by default", () => {
+    const data = twoSeries();
+    const options = defaultFigureOptions(data);
+    expect(options.legend.show).toBe(true);
+    const { container } = render(<FigureSvg data={data} options={options} decimate={false} />);
+    expect(legendTexts(container)).toEqual(expect.arrayContaining(["ladder A", "ladder B"]));
+  });
+
+  it("renames an entry and drops one the user hid", () => {
+    const data = twoSeries();
+    const base = defaultFigureOptions(data);
+    const options = {
+      ...base,
+      legend: {
+        ...base.legend,
+        entries: { "sticks:a": { text: "PEG-OH" }, "sticks:b": { show: false } },
+      },
+    };
+    const { container } = render(<FigureSvg data={data} options={options} decimate={false} />);
+    const texts = legendTexts(container);
+    expect(texts).toContain("PEG-OH");
+    expect(texts).not.toContain("ladder A");
+    expect(texts).not.toContain("ladder B");
+  });
+
+  it("lists a series the plot is hiding when the entry forces it on", () => {
+    const data = twoSeries();
+    const base = defaultFigureOptions(data);
+    const options = {
+      ...base,
+      series: base.series.map((s) => (s.id === "sticks:b" ? { ...s, visible: false } : s)),
+      legend: { ...base.legend, entries: { "sticks:b": { show: true } } },
+    };
+    const { container } = render(<FigureSvg data={data} options={options} decimate={false} />);
+    expect(legendTexts(container)).toContain("ladder B");
+  });
+
+  it("draws the key as a dot instead of a line sample", () => {
+    const data = twoSeries();
+    const base = defaultFigureOptions(data);
+    const lines = (o: typeof base) =>
+      render(<FigureSvg data={data} options={o} decimate={false} />).container.querySelectorAll("line");
+    const withLine = lines(base).length;
+    const dotOptions = { ...base, legend: { ...base.legend, marker: "dot" as const } };
+    const { container } = render(<FigureSvg data={data} options={dotOptions} decimate={false} />);
+    // Two line samples become two circles in the series' own colours.
+    expect(container.querySelectorAll("line").length).toBe(withLine - 2);
+    const fills = Array.from(container.querySelectorAll("circle")).map((c) => c.getAttribute("fill"));
+    expect(fills).toEqual(expect.arrayContaining(["#d946ef", "#0ea5e9"]));
+  });
+
+  it("a uniform stick colour repaints the stems but not the legend key", () => {
+    const data = twoSeries();
+    const base = defaultFigureOptions(data);
+    const options = { ...base, stickColor: "#333333" };
+    const { container } = render(<FigureSvg data={data} options={options} decimate={false} />);
+    const strokes = Array.from(container.querySelectorAll("path")).map((p) => p.getAttribute("stroke"));
+    expect(strokes).toEqual(["#333333", "#333333"]);
+    // The legend keys still carry each series' colour — it is a key to the data.
+    const keyStrokes = Array.from(container.querySelectorAll("line")).map((l) => l.getAttribute("stroke"));
+    expect(keyStrokes).toEqual(expect.arrayContaining(["#d946ef", "#0ea5e9"]));
+  });
+});
+
+describe("FigureSvg — legend, rendering splits", () => {
+  /** A ladder whose sticks the adapter split because one peak was recoloured. */
+  function splitData(): FigureData {
+    return {
+      x: [1, 2],
+      series: [
+        { id: "sticks:a", label: "ladder A", x: [1], y: [5], styleHints: { kind: "sticks", color: "#d946ef" } },
+        {
+          id: "sticks:a:c:#ff0000",
+          label: "ladder A",
+          x: [2],
+          y: [7],
+          styleHints: { kind: "sticks", color: "#ff0000" },
+          legendHidden: true,
+        },
+      ],
+      xLabel: "m/z",
+      yLabel: "Intensity",
+      peakLabels: [],
+    };
+  }
+
+  const legendRows = (container: HTMLElement) =>
+    Array.from(container.querySelectorAll("text")).filter((t) => t.textContent === "ladder A").length;
+
+  it("keeps a legendHidden series out of the legend without hiding its data", () => {
+    const data = splitData();
+    const options = defaultFigureOptions(data);
+    const { container } = render(<FigureSvg data={data} options={options} decimate={false} />);
+    expect(legendRows(container)).toBe(1); // not two identical rows
+    expect(container.querySelectorAll("path").length).toBe(2); // both stick sets still drawn
+  });
+
+  it("an explicit show override puts it back", () => {
+    const data = splitData();
+    const base = defaultFigureOptions(data);
+    const options = {
+      ...base,
+      legend: { ...base.legend, show: true, entries: { "sticks:a:c:#ff0000": { show: true } } },
+    };
+    const { container } = render(<FigureSvg data={data} options={options} decimate={false} />);
+    expect(legendRows(container)).toBe(2);
+  });
+});

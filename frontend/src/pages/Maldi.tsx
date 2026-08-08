@@ -67,6 +67,14 @@ import {
 } from "@/components/ui/table";
 import { useMaldiUndo, type UndoSnapshot } from "@/hooks/useMaldiUndo";
 import { usePersistedState } from "@/hooks/use-persisted-state";
+import {
+  defaultFigureOptions,
+  mergeSavedFigureOptions,
+  reconcileFigureOptions,
+  reconcilePeakLabelOverrides,
+  type FigureOptionSeed,
+  type FigureOptions,
+} from "@/lib/ir/figure";
 import { adductById, ALL_BUILTIN_ADDUCTS } from "@/lib/maldi/adducts";
 import { buildMaldiFigureData, type MaldiFigureSeriesGroup, type MaldiFigureSpectrum } from "@/lib/maldi/figure";
 import {
@@ -191,6 +199,31 @@ const DEFAULT_CARD_OPEN: Record<string, boolean> = { import: true, "peak-picking
 function sameRepeat(a: number, b: number): boolean {
   return Math.abs(a - b) < 5e-5;
 }
+
+/**
+ * What a MALDI publication figure should look like before anyone touches it.
+ * The shared engine's defaults suit an IR overlay (Arial, wide, gridded, a
+ * handful of horizontal labels); a stick spectrum wants the opposite — dozens of
+ * tightly-packed diagonal m/z labels over an ungridded, journal-proportioned
+ * plot in a serif face. Seeded per-host so IR/GC-MS figures keep their own
+ * defaults. Everything here stays fully editable in the maker's controls.
+ */
+const MALDI_FIGURE_SEED: FigureOptionSeed = {
+  fontFamily: "Times New Roman",
+  // 4:3 — the aspect most journals lay a single-column spectrum out at.
+  width: 800,
+  height: 600,
+  // 10× of 800×600 is 8000×6000 px, comfortably inside the canvas ceiling
+  // (`pngExportSize`) and past 600 dpi at print size.
+  pngScale: 10,
+  showGrid: false,
+  peakLabels: { rotation: -45, maxLabels: 40, minGap: 6 },
+  // The shared default only turns the legend on when the data already has
+  // several series — but MALDI's Figure tab is always mounted, so it is seeded
+  // from an empty spectrum and would default off forever. A stick figure of two
+  // polymers is exactly the case that needs a legend.
+  legend: { show: true },
+};
 
 const Maldi = () => {
   const [workerStatus, setWorkerStatus] = useState<WorkerStatus>("checking");
@@ -559,7 +592,10 @@ const Maldi = () => {
   // own convention (FigureDialog.tsx:16-18, ViewExport.tsx:196) is to hold
   // useFigureOptions at the host; MALDI was the lone violator.
   const [figShowProfile, setFigShowProfile] = useState(true);
-  const [figShowSticks, setFigShowSticks] = useState(false);
+  // Sticks on by default: a MALDI publication figure is a stick spectrum, and
+  // the sticks are what carry the per-ladder colours. The toggle now lives in
+  // the maker's "Peaks & labels" controls (MaldiFigurePanel).
+  const [figShowSticks, setFigShowSticks] = useState(true);
   const [figSelectedOnly, setFigSelectedOnly] = useState(false);
   // Flagged peaks (isotope/shoulder/matrix/salt) are excluded from the figure by
   // default — matches unexplainedPeaks (seriesMatch.ts:16-18) and the PeakTable
@@ -572,6 +608,9 @@ const Maldi = () => {
   // table / exports (decision 1). Session-only, so NOT in useMaldiUndo's deps.
   const [figSeriesIds, setFigSeriesIds] = useState<Set<string>>(() => new Set());
   const [figExcludedPeakIds, setFigExcludedPeakIds] = useState<Set<string>>(() => new Set());
+  // Figure styling read off a project being loaded, held until the loaded data
+  // has landed — see the effect next to `loadState`.
+  const [pendingFigureOptions, setPendingFigureOptions] = useState<FigureOptions | null>(null);
 
   const figHasSelection = (highlightedPeakIds?.size ?? 0) > 0;
 
@@ -608,14 +647,21 @@ const Maldi = () => {
     return { figShownPeaks: shown, figHiddenCount: base.length - shown.length };
   }, [analysisPeaks, figIncludeFlagged, figSelectedOnly, figHasSelection, highlightedPeakIds, figSelectedSeries, figExcludedPeakIds]);
 
-  // Per-series stick groups for the adapter: one per ticked ladder, ordered by
+  // Per-series stick groups for the adapter: one per CONFIRMED ladder, ordered by
   // precedence so a peak shared by several ladders is claimed by the right one —
   // confirmed first (all are, here) then higher score. Colour comes straight from
-  // `colorForSeries` so the figure agrees with the plot stems. Undefined when no
-  // ladder is ticked → the adapter emits the single legacy "sticks" series.
+  // `colorForSeries` so the figure agrees with the plot stems. Undefined only when
+  // nothing is confirmed → the adapter emits the single legacy "sticks" series.
+  //
+  // Grouping deliberately follows the confirmed ladders, NOT the figure's series
+  // picker: the picker is a filter ("draw only these"), and keying the grouping
+  // off it collapsed an untouched two-polymer figure into one "Peaks" series, so
+  // both ladders drew in one colour with no way to tell or style them apart.
+  // Groups with no shown peaks emit nothing (see `pushStickSeries`), so filtering
+  // still leaves exactly the ticked ladders in the figure and its legend.
   const figSeriesGroups = useMemo<MaldiFigureSeriesGroup[] | undefined>(() => {
-    if (figSelectedSeries.length === 0) return undefined;
-    return figSelectedSeries
+    if (figConfirmedSeries.length === 0) return undefined;
+    return figConfirmedSeries
       .slice()
       .sort((a, b) => (b.score ?? 0) - (a.score ?? 0))
       .map((s) => ({
@@ -624,7 +670,7 @@ const Maldi = () => {
         color: colorForSeries(s),
         peakIds: new Set(s.members.map((m) => m.peakId)),
       }));
-  }, [figSelectedSeries, allAdducts, colorForSeries]);
+  }, [figConfirmedSeries, allAdducts, colorForSeries]);
 
   const reportSeriesColors = useMemo(() => {
     const m = new Map<string, string>();
@@ -660,7 +706,7 @@ const Maldi = () => {
     });
   }, [processed, raw, sourceName, projectName, otherFigureSpectra, figShownPeaks, figShowProfile, figShowSticks, figSeriesGroups]);
 
-  const [figureOptions, setFigureOptions] = useFigureOptions(figureData);
+  const [figureOptions, setFigureOptions] = useFigureOptions(figureData, MALDI_FIGURE_SEED);
 
   // Figure picker + figure-only-delete handlers (WP6b). All mutate figure-local
   // Sets only; none touch analysis state or undo.
@@ -796,8 +842,19 @@ const Maldi = () => {
     state.copolymerA = copolymerA;
     state.copolymerB = copolymerB;
     state.exportHistory = exportHistory;
+    // The composed figure travels with the project: styling AND what it includes,
+    // so reopening never means rebuilding it from scratch.
+    state.figure = {
+      options: figureOptions,
+      showProfile: figShowProfile,
+      showSticks: figShowSticks,
+      selectedOnly: figSelectedOnly,
+      includeFlagged: figIncludeFlagged,
+      seriesIds: [...figSeriesIds],
+      excludedPeakIds: [...figExcludedPeakIds],
+    };
     return state;
-  }, [sourceName, raw, processed, steps, peaks, customAdducts, series, selectedAdductIds, pickParams, repeatMass, repeatMasses, endGroupMass, repeatIsotopeAware, copolymerA, copolymerB, exportHistory]);
+  }, [sourceName, raw, processed, steps, peaks, customAdducts, series, selectedAdductIds, pickParams, repeatMass, repeatMasses, endGroupMass, repeatIsotopeAware, copolymerA, copolymerB, exportHistory, figureOptions, figShowProfile, figShowSticks, figSelectedOnly, figIncludeFlagged, figSeriesIds, figExcludedPeakIds]);
 
   const loadState = useCallback((s: ProjectState) => {
     setSourceName(s.sourceName);
@@ -832,9 +889,46 @@ const Maldi = () => {
     setIsolateSelection(false);
     setSelectedCopolymerId(null);
     setParseMeta(null);
-    setFigSeriesIds(new Set());
-    setFigExcludedPeakIds(new Set());
+    // Restore the saved figure, or reset to this host's defaults when the project
+    // predates figure persistence. The styling itself is applied by the effect
+    // below rather than here: `useFigureOptions` re-seeds `peakLabels.show` on the
+    // render where labels first appear, which would otherwise overwrite what the
+    // project saved.
+    const fig = s.figure;
+    setFigShowProfile(fig?.showProfile ?? true);
+    setFigShowSticks(fig?.showSticks ?? true);
+    setFigSelectedOnly(fig?.selectedOnly ?? false);
+    setFigIncludeFlagged(fig?.includeFlagged ?? false);
+    setFigSeriesIds(new Set(fig?.seriesIds ?? []));
+    setFigExcludedPeakIds(new Set(fig?.excludedPeakIds ?? []));
+    setPendingFigureOptions(fig?.options ?? null);
   }, []);
+
+  // Apply a loaded project's figure styling once the loaded data has landed, so
+  // the options hook's reconciliation (which runs during the render that sees the
+  // new peaks/series) can't clobber it. Clears itself, so it runs exactly once
+  // per load.
+  useEffect(() => {
+    if (!pendingFigureOptions) return;
+    setPendingFigureOptions(null);
+    const merged = reconcileFigureOptions(
+      mergeSavedFigureOptions(
+        defaultFigureOptions(figureData, MALDI_FIGURE_SEED),
+        pendingFigureOptions,
+      ),
+      figureData,
+    );
+    // Reconcile against the loaded data too: a saved series/label id that no
+    // longer exists would otherwise leave a phantom legend row or an override
+    // pinned to nothing.
+    setFigureOptions({
+      ...merged,
+      peakLabels: {
+        ...merged.peakLabels,
+        overrides: reconcilePeakLabelOverrides(merged.peakLabels.overrides, figureData),
+      },
+    });
+  }, [pendingFigureOptions, figureData, setFigureOptions]);
 
   const snapshotActiveDoc = useCallback((): MaldiDocument | null => {
     if (!activeDocId) return null;
@@ -1081,6 +1175,22 @@ const Maldi = () => {
 
   const handleRemovePeak = useCallback((id: string) => {
     setPeaks((prev) => prev.filter((p) => p.id !== id));
+  }, []);
+
+  // One peak's own colour, set from the figure's label list (`null` clears it and
+  // hands the peak back to its series colour). It writes the same `Peak.color`
+  // the Peak table edits, so the plot, the table and the figure never disagree.
+  const handleSetPeakColor = useCallback((id: string, color: string | null) => {
+    setPeaks((prev) =>
+      prev.map((p) => {
+        if (p.id !== id) return p;
+        if (color === null) {
+          const { color: _cleared, ...rest } = p;
+          return rest;
+        }
+        return { ...p, color };
+      }),
+    );
   }, []);
 
   // --- Repeat / series / end-groups ------------------------------------------
@@ -1872,6 +1982,14 @@ const Maldi = () => {
   }, [deleteTarget, handleDelete]);
 
   // --- Interpretation + export ------------------------------------------------
+  // Every repeat unit in play, so a two-polymer sample gets both looked up in the
+  // repeat library and reported. Projects predating multi-repeat support have the
+  // single active repeat as their whole list.
+  const activeRepeatMasses = useMemo(
+    () => (repeatMasses.length ? repeatMasses : repeatMass > 0 ? [repeatMass] : []),
+    [repeatMasses, repeatMass],
+  );
+
   const findings = useMemo<Finding[]>(() => {
     if (peaks.length === 0) return [];
     const mw = summarizeMolWeight(peaks, series, series.length ? "series" : "all", {});
@@ -1880,9 +1998,10 @@ const Maldi = () => {
       series,
       adducts: allAdducts,
       repeatCandidates,
+      repeatMasses: activeRepeatMasses,
       molWeight: mw,
     });
-  }, [peaks, series, allAdducts, repeatCandidates]);
+  }, [peaks, series, allAdducts, repeatCandidates, activeRepeatMasses]);
 
   const recordExport = (kind: string, label: string) =>
     setExportHistory((prev) => [...prev, { kind, label, at: Date.now() }]);
@@ -1896,7 +2015,7 @@ const Maldi = () => {
     adducts: allAdducts,
     repeatMass,
     // Every repeat unit in play, so a two-polymer sample's report names both.
-    repeatMasses: repeatMasses.length ? repeatMasses : repeatMass > 0 ? [repeatMass] : [],
+    repeatMasses: activeRepeatMasses,
     molWeight: summarizeMolWeight(peaks, series, series.length ? "series" : "all", {}),
     findings,
     selectedSeriesIds: highlightedSeriesIds ? [...highlightedSeriesIds] : [],
@@ -1904,7 +2023,7 @@ const Maldi = () => {
     // silently embed the other open documents' traces now that overlays share
     // the canvas. (WP3 §9.)
     spectrumPng: plotHandleRef.current?.getPng({ primaryOnly: true }) ?? null,
-  }), [projectName, sourceName, raw, peaks, series, allAdducts, repeatMass, repeatMasses, findings, highlightedSeriesIds]);
+  }), [projectName, sourceName, raw, peaks, series, allAdducts, repeatMass, activeRepeatMasses, findings, highlightedSeriesIds]);
 
 
   const handleExport = useCallback(
@@ -2393,6 +2512,7 @@ const Maldi = () => {
                         hiddenPeakCount={figHiddenCount}
                         onRestorePeaks={handleFigureRestorePeaks}
                         onDeletePeak={handleFigureDeletePeak}
+                        onSetPeakColor={handleSetPeakColor}
                         figureData={figureData}
                         figureOptions={figureOptions}
                         onFigureOptionsChange={setFigureOptions}

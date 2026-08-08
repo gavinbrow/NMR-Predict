@@ -29,7 +29,18 @@ export interface InterpretationInput {
   repeatCandidates?: RepeatCandidate[];
   endGroupCandidates?: EndGroupCandidate[];
   molWeight?: MolWeightStats | null;
+  /**
+   * Every repeat unit the analyst currently has in play. A sample containing two
+   * polymers carries one entry per polymer, and each is looked up in the repeat
+   * library on its own — reporting only the dominant detected spacing left the
+   * second polymer unnamed.
+   */
+  repeatMasses?: number[];
 }
+
+/** A repeat unit and one of `repeatMasses` are the same when they agree to the
+ *  precision the detector and the Series panel round to. */
+const REPEAT_TOL = 0.005;
 
 /** Build a rule-based interpretation of the current analysis state. */
 export function interpretSpectrum(input: InterpretationInput): Finding[] {
@@ -48,9 +59,44 @@ export function interpretSpectrum(input: InterpretationInput): Finding[] {
     }.`,
   });
 
-  // Repeat unit.
+  // Repeat units. What the analyst has in play wins over what the detector
+  // guessed: once repeat units are selected, each gets its own library lookup and
+  // its own line, so a sample read as two polymers names both. The detected
+  // spacings are reported only while nothing has been selected yet.
+  const active = (input.repeatMasses ?? []).filter((m) => Number.isFinite(m) && m > 0);
   const topRepeat = input.repeatCandidates?.[0];
-  if (topRepeat) {
+  if (active.length > 0) {
+    for (const [i, mass] of active.entries()) {
+      const match = matchRepeatUnit(mass);
+      // Superseded readings are the SAME ladder seen through another adduct, so
+      // counting them would report a two-polymer sample as six series. Every
+      // other view hides them; the count follows suit.
+      const own = series.filter(
+        (s) => !s.supersededBy && Math.abs(s.repeatMass - mass) <= REPEAT_TOL,
+      );
+      const memberCount = own.reduce((n, s) => n + s.members.length, 0);
+      findings.push({
+        tone: match ? "good" : "info",
+        text: `${
+          active.length > 1 ? `Repeat unit ${i + 1} of ${active.length}` : "Repeat unit"
+        } ≈ ${mass.toFixed(3)} Da${
+          match
+            ? `, consistent with ${match.name}${match.formula ? ` (${match.formula})` : ""}`
+            : " (no library match)"
+        }${
+          own.length
+            ? ` — ${own.length} assigned series, ${memberCount} peaks.`
+            : " — no series assigned to it yet."
+        }`,
+      });
+    }
+    if (active.length > 1) {
+      findings.push({
+        tone: "info",
+        text: `${active.length} repeat units are in play, so the sample is being read as more than one polymer — check that each ladder's end group and adduct belong to the repeat unit it was assigned under.`,
+      });
+    }
+  } else if (topRepeat) {
     const match = matchRepeatUnit(topRepeat.repeatMass);
     findings.push({
       tone: "good",

@@ -51,6 +51,10 @@ type Drag =
       moved: boolean;
     };
 
+/** One legend row: the series it keys, and the wording it shows (the series'
+ *  own label unless a {@link LegendEntryOverride} renamed it). */
+type LegendEntry = { style: SeriesStyle; text: string };
+
 export interface FigureSvgProps {
   data: FigureData;
   options: FigureOptions;
@@ -155,6 +159,10 @@ export function FigureSvg({
 
     const paths = visible.map(({ st, sd }) => {
       const ownX = sd.x ?? data.x;
+      // A uniform stick colour paints every stem one colour so the series
+      // colours live only in the labels and the legend ("colour the labels, not
+      // the spectrum"). Line series always keep their own colour.
+      const color = st.kind === "sticks" && options.stickColor ? options.stickColor : st.color;
       if (st.kind === "sticks") {
         // Stems are the sparse peak set already — never decimated.
         const baseY = sd.baseline == null ? stickBaseY : sy(sd.baseline);
@@ -165,7 +173,7 @@ export function FigureSvg({
                 .map((xv, i) => ({ cx: sx(xv), cy: sy(sd.y[i]), ok: Number.isFinite(xv) && Number.isFinite(sd.y[i]) }))
                 .filter((p) => p.ok)
             : [];
-        return { st, d, markers };
+        return { st, d, markers, color };
       }
       let xs = ownX;
       let ys = sd.y;
@@ -192,7 +200,7 @@ export function FigureSvg({
               .map((xv, i) => ({ cx: sx(xv), cy: sy(ys[i]), ok: Number.isFinite(xv) && Number.isFinite(ys[i]) }))
               .filter((p) => p.ok)
           : [];
-      return { st, d, markers };
+      return { st, d, markers, color };
     });
 
     return { visible, xAxis, yAxis, marginTop, marginLeft, plotW, plotH, paths, sx, sy };
@@ -209,20 +217,34 @@ export function FigureSvg({
   // favour of a "+M more" row. Text width is estimated from the glyph count
   // (never measured — see labelBox note).
   const legend = options.legend;
-  const legendEntries = legend.show ? visible.map(({ st }) => st) : [];
+  // Which series get a row, and what each row says. A series is in the legend
+  // when it is visible, unless a per-entry override says otherwise; the row's
+  // wording is the override's text, else the series' own label. Driven off
+  // `options.series` (not the drawn set) so an override can name a series the
+  // plot is currently hiding.
+  const legendOverrides = legend.entries ?? {};
+  const legendEntries: LegendEntry[] = legend.show
+    ? options.series
+        .filter((st) => {
+          const forced = legendOverrides[st.id]?.show;
+          if (forced !== undefined) return forced;
+          return st.visible && !data.series.find((s) => s.id === st.id)?.legendHidden;
+        })
+        .map((st) => ({ style: st, text: legendOverrides[st.id]?.text?.trim() || st.label }))
+    : [];
   const lf = legend.fontSize;
   const rowH = lf * 1.5;
   const sampleW = 22;
   const colGap = 12;
   const padX = 16;
   const inset = 10;
-  const labelW = (e: SeriesStyle) => e.label.length * lf * 0.6;
+  const labelW = (e: LegendEntry) => e.text.length * lf * 0.6;
   const moreText = (m: number) => `+${m} more`;
   const maxRows = Math.max(1, Math.floor((plotH - 12) / rowH));
   const n = legendEntries.length;
 
   type LegendCell = {
-    e?: SeriesStyle;
+    e?: LegendEntry;
     text: string;
     col: number;
     row: number;
@@ -241,7 +263,7 @@ export function FigureSvg({
       legendH = 12 + rowH * n;
       legendCells = legendEntries.map((e, i) => ({
         e,
-        text: e.label,
+        text: e.text,
         col: 0,
         row: i,
         isMore: false,
@@ -285,7 +307,7 @@ export function FigureSvg({
         for (let i = start; i < end; i += 1) {
           legendCells.push({
             e: legendEntries[i],
-            text: legendEntries[i].label,
+            text: legendEntries[i].text,
             col: c,
             row: i - start,
             isMore: false,
@@ -703,13 +725,13 @@ export function FigureSvg({
           </clipPath>
         </defs>
         <g clipPath={`url(#${clipId})`}>
-          {paths.map(({ st, d }) =>
+          {paths.map(({ st, d, color }) =>
             d ? (
               <path
                 key={`p${st.id}`}
                 d={d}
                 fill="none"
-                stroke={st.color}
+                stroke={color}
                 strokeWidth={st.lineWidth}
                 strokeDasharray={dashArray(st.lineStyle, st.lineWidth)}
                 strokeLinejoin="round"
@@ -717,9 +739,9 @@ export function FigureSvg({
               />
             ) : null,
           )}
-          {paths.map(({ st, markers }) =>
+          {paths.map(({ st, markers, color }) =>
             markers.map((m, i) => (
-              <circle key={`m${st.id}-${i}`} cx={m.cx} cy={m.cy} r={st.markerSize} fill={st.color} />
+              <circle key={`m${st.id}-${i}`} cx={m.cx} cy={m.cy} r={st.markerSize} fill={color} />
             )),
           )}
         </g>
@@ -847,22 +869,27 @@ export function FigureSvg({
             {legendCells.map((cell, i) => {
               const cx = lx + colX[cell.col] + sampleW / 2;
               const cy = ly + 6 + rowH * cell.row + rowH / 2;
-              const e = cell.e;
+              const st = cell.e?.style;
+              // "dot" replaces the whole line sample with one filled circle —
+              // the clearer key for a stick spectrum, where a horizontal line
+              // resembles nothing that is actually drawn.
+              const dot = legend.marker === "dot";
               return (
                 <g key={`l${i}`}>
-                  {e && e.lineStyle !== "none" && (
+                  {st && dot && <circle cx={cx} cy={cy} r={Math.max(2, lf * 0.32)} fill={st.color} />}
+                  {st && !dot && st.lineStyle !== "none" && (
                     <line
                       x1={lx + colX[cell.col]}
                       x2={lx + colX[cell.col] + sampleW}
                       y1={cy}
                       y2={cy}
-                      stroke={e.color}
-                      strokeWidth={e.lineWidth}
-                      strokeDasharray={dashArray(e.lineStyle, e.lineWidth)}
+                      stroke={st.color}
+                      strokeWidth={st.lineWidth}
+                      strokeDasharray={dashArray(st.lineStyle, st.lineWidth)}
                     />
                   )}
-                  {e && e.markers && (
-                    <circle cx={cx} cy={cy} r={e.markerSize} fill={e.color} />
+                  {st && !dot && st.markers && (
+                    <circle cx={cx} cy={cy} r={st.markerSize} fill={st.color} />
                   )}
                   <text
                     x={lx + colX[cell.col] + sampleW + 6}

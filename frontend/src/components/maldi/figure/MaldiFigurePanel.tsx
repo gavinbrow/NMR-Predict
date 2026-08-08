@@ -25,7 +25,9 @@ interface MaldiFigurePanelProps {
   /** Include the continuous profile trace(s). */
   showProfile: boolean;
   onShowProfileChange: (v: boolean) => void;
-  /** Include the picked peaks as vertical sticks. */
+  /** Include the picked peaks as vertical sticks. Surfaced in the maker's
+   *  "Peaks & labels" controls rather than this bar — it is a statement about
+   *  the peaks, and that is where users go looking for it. */
   showSticks: boolean;
   onShowSticksChange: (v: boolean) => void;
   /** Narrow sticks + labels to the highlighted series/cluster only. */
@@ -64,6 +66,10 @@ interface MaldiFigurePanelProps {
   /** Remove one peak's stick + label from the figure (the peak stays elsewhere).
    *  Wired down to the selected-label editor's "Delete peak from figure". */
   onDeletePeak: (id: string) => void;
+  /** Set (`color`) or clear (`null`) one peak's own colour — the same
+   *  `Peak.color` the Peak table edits, reachable from the figure's label list
+   *  so a single peak can be recoloured without leaving the figure. */
+  onSetPeakColor: (id: string, color: string | null) => void;
 
   /** Figure-engine data + options, owned by the host. */
   figureData: FigureData;
@@ -138,6 +144,7 @@ export function MaldiFigurePanel({
   hiddenPeakCount,
   onRestorePeaks,
   onDeletePeak,
+  onSetPeakColor,
   figureData,
   figureOptions,
   onFigureOptionsChange,
@@ -169,14 +176,6 @@ export function MaldiFigurePanel({
       <div className="flex flex-wrap items-center gap-x-5 gap-y-2 rounded-2xl border border-border/60 bg-card px-4 py-3 shadow-card">
         <span className="text-xs font-semibold text-foreground">Include</span>
         <ToggleLine id="fig-profile" label="Profile trace" checked={showProfile} onChange={onShowProfileChange} />
-        <ToggleLine
-          id="fig-sticks"
-          label="Peak sticks"
-          checked={showSticks}
-          onChange={onShowSticksChange}
-          disabled={shownPeaks.length === 0}
-          title={shownPeaks.length === 0 ? "No peaks pass the current filters — pick peaks or relax the filters to enable" : undefined}
-        />
         <ToggleLine
           id="fig-selected"
           label="Selected peaks only"
@@ -262,6 +261,9 @@ export function MaldiFigurePanel({
         options={figureOptions}
         onChange={onFigureOptionsChange}
         onDeletePeak={onDeletePeak}
+        showSticks={showSticks}
+        onShowSticksChange={onShowSticksChange}
+        onSetPeakColor={onSetPeakColor}
       />
     </div>
   );
