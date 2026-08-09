@@ -1,7 +1,15 @@
 import { describe, it, expect } from "vitest";
 import ExcelJS from "exceljs";
 import JSZip from "jszip";
-import { exportReportExcel, reportableSeries, reportRepeatMasses, type ReportPayload } from "../export";
+import {
+  ADDUCT_UNASSIGNED,
+  collectEndGroupFits,
+  exportReportExcel,
+  reportableSeries,
+  reportRepeatMasses,
+  type ReportPayload,
+  type ReportSeries,
+} from "../export";
 import type { Peak, Series, Adduct } from "../types";
 
 /** Build a minimal but realistic payload with one 4-member series. */
@@ -283,5 +291,114 @@ describe("reportableSeries", () => {
   it("leaves an untouched list alone", () => {
     const all = [s("a"), s("b")];
     expect(reportableSeries(all).map((x) => x.id)).toEqual(["a", "b"]);
+  });
+
+  /** A ladder over the given peak ids, as `assignSeries` emits one per adduct. */
+  const ladder = (id: string, adductId: string, peakIds: string[], extra: Partial<Series> = {}): Series => ({
+    id,
+    repeatMass: 44,
+    endGroupMass: 18,
+    adductId,
+    members: peakIds.map((peakId, n) => ({ peakId, n })),
+    score: 1,
+    ...extra,
+  });
+
+  it("collapses never-confirmed adduct readings of one ladder into a single entry", () => {
+    // What the user sees before confirming anything: the SAME peaks assigned
+    // three times over, which used to print three blocks and three charts.
+    const peaks = ["p0", "p1", "p2", "p3"];
+    const out = reportableSeries([
+      ladder("h", "h", peaks, { score: 0.7 }),
+      ladder("na", "na", peaks, { score: 0.9 }),
+      ladder("k", "k", peaks, { score: 0.5 }),
+    ]);
+    expect(out).toHaveLength(1);
+    expect(out[0].id).toBe("na"); // best-scoring reading stands in for the group
+    expect(out[0].adductUnassigned).toBe(true);
+  });
+
+  it("keeps the confirmed reading, unflagged, when one exists", () => {
+    const peaks = ["p0", "p1", "p2", "p3"];
+    const out = reportableSeries([
+      ladder("h", "h", peaks, { score: 0.9 }),
+      ladder("na", "na", peaks, { endGroupLocked: true, score: 0.4 }),
+    ]);
+    expect(out.map((x) => x.id)).toEqual(["na"]);
+    expect(out[0].adductUnassigned).toBeUndefined();
+  });
+
+  it("does not collapse ladders that describe different peaks", () => {
+    const out = reportableSeries([
+      ladder("a", "na", ["p0", "p1", "p2", "p3"]),
+      ladder("b", "na", ["q0", "q1", "q2", "q3"]),
+    ]);
+    expect(out.map((x) => x.id)).toEqual(["a", "b"]);
+    expect(out.every((x) => !x.adductUnassigned)).toBe(true);
+  });
+
+  it("leaves a lone unconfirmed ladder unflagged", () => {
+    // Nothing to disambiguate against, so the report can still name its adduct.
+    const out = reportableSeries([ladder("solo", "na", ["p0", "p1", "p2"])]);
+    expect(out.map((x) => x.id)).toEqual(["solo"]);
+    expect(out[0].adductUnassigned).toBeUndefined();
+  });
+
+  it("keeps the app's ordering", () => {
+    const first = ["p0", "p1", "p2", "p3"];
+    const second = ["q0", "q1", "q2", "q3"];
+    const out = reportableSeries([
+      ladder("a-h", "h", first, { score: 0.9 }),
+      ladder("b-na", "na", second, { score: 0.9 }),
+      ladder("a-na", "na", first, { score: 0.5 }),
+      ladder("b-h", "h", second, { score: 0.5 }),
+    ]);
+    expect(out.map((x) => x.id)).toEqual(["a-h", "b-na"]);
+  });
+});
+
+describe("collectEndGroupFits", () => {
+  const peak = (id: string, mz: number): Peak => ({ id, mz, intensity: 100 });
+  const NA: Adduct = { id: "na", label: "[M+Na]+", massShift: 22.9892, charge: 1, builtin: true };
+
+  /** A clean PEG-like ladder: m/z = 18.011 + n·44.026 + Na. */
+  const ladderPeaks = [5, 6, 7, 8].map((n) => peak(`p${n}`, 18.0106 + n * 44.02621 + 22.9892));
+
+  const base = (series: ReportSeries[]): ReportPayload => ({
+    projectName: "p",
+    sourceName: "s",
+    pointCount: 0,
+    peaks: ladderPeaks,
+    series,
+    adducts: [NA],
+  });
+
+  const ladder = (extra: Partial<Series> = {}): Series => ({
+    id: "s1",
+    repeatMass: 44.02621,
+    endGroupMass: 18.0106,
+    adductId: "na",
+    members: [5, 6, 7, 8].map((n) => ({ peakId: `p${n}`, n })),
+    score: 1,
+    ...extra,
+  });
+
+  it("fits neutral mass when the adduct is known", () => {
+    const [fit] = collectEndGroupFits(base([ladder()]));
+    expect(fit.massBasis).toBe("neutral");
+    expect(fit.adductLabel).toBe("[M+Na]+");
+    expect(fit.repeatFit).toBeCloseTo(44.02621, 4);
+    expect(fit.endGroupFit).toBeCloseTo(18.0106, 3);
+  });
+
+  it("falls back to observed m/z when no adduct was assigned", () => {
+    // Same ladder, no confirmed adduct: the slope still recovers the repeat unit,
+    // but the intercept carries the adduct along with the end group — so it must
+    // NOT be reported as an end-group mass.
+    const [fit] = collectEndGroupFits(base([{ ...ladder(), adductUnassigned: true }]));
+    expect(fit.massBasis).toBe("m/z");
+    expect(fit.adductLabel).toBe(ADDUCT_UNASSIGNED);
+    expect(fit.repeatFit).toBeCloseTo(44.02621, 4);
+    expect(fit.endGroupFit).toBeCloseTo(18.0106 + 22.9892, 3);
   });
 });

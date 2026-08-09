@@ -8,6 +8,7 @@ import {
   EyeOff,
   Lock,
   LockOpen,
+  MousePointerSquareDashed,
   Plus,
   Trash2,
   X,
@@ -55,9 +56,19 @@ interface PeakTableProps {
   onAddPeaksToSeries?: (seriesId: string, peakIds: string[]) => void;
   /** Drop peaks from whichever series currently owns them. */
   onRemovePeaksFromSeries?: (peakIds: string[]) => void;
+  /**
+   * Make a brand-new series out of these peaks and move them into it. The target
+   * an arbitrary group of peaks needs: the automatic assignment only ever creates
+   * ladders it found itself, so "these ten peaks are a thing, colour them
+   * together" had nowhere to go. Omit to hide the option.
+   */
+  onCreateSeriesFromPeaks?: (peakIds: string[]) => void;
 }
 
 type SortKey = "mz" | "intensity" | "snr" | "width";
+
+/** Sentinel value for the assign picker's "new series" row. Not a series id. */
+const NEW_SERIES_VALUE = "__new__";
 
 /** Numeric value a peak sorts by for a given column (undefined sinks to end). */
 function sortValue(peak: Peak, key: SortKey): number | undefined {
@@ -95,6 +106,7 @@ export function PeakTable({
   seriesByPeakId,
   onAddPeaksToSeries,
   onRemovePeaksFromSeries,
+  onCreateSeriesFromPeaks,
 }: PeakTableProps) {
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [newMz, setNewMz] = useState("");
@@ -226,12 +238,23 @@ export function PeakTable({
   // neighbour a repeat away — so the leftover peaks the "unexplained only" filter
   // surfaces can be dropped into whichever series the analyst says they belong to.
   // Hidden until at least one series exists — an empty picker is pure noise.
-  const canAssignSeries = (assignableSeries?.length ?? 0) > 0 && onAddPeaksToSeries != null;
+  const canAssignSeries =
+    ((assignableSeries?.length ?? 0) > 0 && onAddPeaksToSeries != null) ||
+    onCreateSeriesFromPeaks != null;
   const assignPeaksTo = (seriesId: string, peakIds: string[]) => {
     if (peakIds.length === 0) return;
-    if (seriesId) onAddPeaksToSeries?.(seriesId, peakIds);
+    if (seriesId === NEW_SERIES_VALUE) onCreateSeriesFromPeaks?.(peakIds);
+    else if (seriesId) onAddPeaksToSeries?.(seriesId, peakIds);
     else onRemovePeaksFromSeries?.(peakIds);
   };
+
+  // Pull the plot's selection (the "Select peaks" rubber-band, or the peaks of a
+  // clicked ladder) into the table's own checkbox selection, so a drag on the
+  // spectrum feeds every bulk action here instead of only the highlight colour.
+  const highlightedVisible = useMemo(() => {
+    if (!highlightedPeakIds?.size) return [] as string[];
+    return visiblePeaks.filter((p) => highlightedPeakIds.has(p.id)).map((p) => p.id);
+  }, [highlightedPeakIds, visiblePeaks]);
 
   return (
     <div className="flex h-full flex-col">
@@ -259,21 +282,36 @@ export function PeakTable({
           <input type="checkbox" checked={unexplainedOnly} onChange={(e) => setUnexplainedOnly(e.target.checked)} />
           Unexplained only{unexplainedCount > 0 && ` (${unexplainedCount})`}
         </label>
+        {highlightedVisible.length > 0 && (
+          <Button
+            size="sm"
+            variant="outline"
+            className="h-7"
+            title="Tick every peak the plot currently has selected, so the bulk actions here act on them"
+            onClick={() => setSelected(new Set(highlightedVisible))}
+          >
+            <MousePointerSquareDashed className="mr-1 h-3.5 w-3.5" />
+            Select {highlightedVisible.length} from plot
+          </Button>
+        )}
         {canAssignSeries && (
           <select
             className="h-7 rounded-md border border-border/60 bg-background px-1.5 text-[11px]"
             value=""
             disabled={selected.size === 0}
-            title="Add the selected peaks to a series (the ladder is re-fit around them)"
+            title="Move the selected peaks into a series — an existing ladder (re-fit around them) or a new group of your own"
             onChange={(e) => {
               assignPeaksTo(e.target.value === "__none__" ? "" : e.target.value, [...selected]);
               e.currentTarget.value = "";
             }}
           >
             <option value="" disabled>
-              {selected.size > 0 ? `Add ${selected.size} to series…` : "Add to series…"}
+              {selected.size > 0 ? `Move ${selected.size} to series…` : "Move to series…"}
             </option>
-            {assignableSeries!.map((s) => (
+            {onCreateSeriesFromPeaks && (
+              <option value={NEW_SERIES_VALUE}>+ New series from selection</option>
+            )}
+            {(assignableSeries ?? []).map((s) => (
               <option key={s.id} value={s.id}>
                 {s.confirmed ? "" : "· "}
                 {s.label}

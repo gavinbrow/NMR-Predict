@@ -31,7 +31,7 @@ export function matchSeriesForEndGroup(
     }
   }
   return null;
-}
+}
 /** Fraction of the smaller member set two series share (by peak id). 1 = identical
  *  ladders, 0 = disjoint. Alternative adduct readings of the same peaks score ~1. */
 export function seriesMemberOverlap(a: Series, b: Series): number {
@@ -42,10 +42,16 @@ export function seriesMemberOverlap(a: Series, b: Series): number {
   return denom > 0 ? shared / denom : 0;
 }
 
+/** Member-overlap above which two series are treated as the same ladder read under
+ *  different adducts. Shared by `sameLadderSiblings` (which hides the losers once
+ *  one is confirmed) and the report's collapse of never-confirmed readings, so the
+ *  two never disagree about what "the same ladder" means. */
+export const SAME_LADDER_OVERLAP = 0.6;
+
 /** Pending series that are alternative adduct readings of the SAME peak ladder as
  *  `target` (they share most of their member peaks). Excludes `target`, already-
  *  confirmed series (endGroupLocked), and already-superseded series. */
-export function sameLadderSiblings(series: Series[], target: Series, minOverlap = 0.6): Series[] {
+export function sameLadderSiblings(series: Series[], target: Series, minOverlap = SAME_LADDER_OVERLAP): Series[] {
   return series.filter(
     (s) =>
       s.id !== target.id &&

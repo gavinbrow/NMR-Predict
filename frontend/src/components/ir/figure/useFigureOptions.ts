@@ -68,14 +68,32 @@ export function useFigureOptions(
 
   // Follow host label changes (e.g. %T → Absorbance, time-unit changes) unless
   // the user has edited the label away from what the host last provided.
+  //
+  // A changed axis label also means the axis changed UNITS, which invalidates any
+  // manual bound the user zoomed in with: dragging or scrolling the preview writes
+  // real numbers into `x.min`/`y.max` (FigureMaker's `handleZoom`), and those
+  // numbers only mean anything in the unit they were captured in. MALDI's Normalize
+  // is the case that bites — it flips the y label between "Intensity" and
+  // "Rel. intensity (%)", and it turns itself on the moment a second document
+  // becomes visible. A user who had scrolled the preview to 0–8000 counts kept that
+  // axis over 0–100 % data, so both traces flattened onto the baseline and the
+  // figure looked like it had ignored the new file. Drop the bounds on the axis
+  // whose unit moved, and only that one: an m/z window stays meaningful when the
+  // intensity unit changes underneath it.
   const [hostLabels, setHostLabels] = useState(() => ({ x: data.xLabel, y: data.yLabel }));
   if (hostLabels.x !== data.xLabel || hostLabels.y !== data.yLabel) {
     const prevLabels = hostLabels;
+    const xChanged = prevLabels.x !== data.xLabel;
+    const yChanged = prevLabels.y !== data.yLabel;
     setHostLabels({ x: data.xLabel, y: data.yLabel });
     setOptions((prev) => ({
       ...prev,
-      x: prev.x.label === prevLabels.x ? { ...prev.x, label: data.xLabel } : prev.x,
-      y: prev.y.label === prevLabels.y ? { ...prev.y, label: data.yLabel } : prev.y,
+      x: xChanged
+        ? { ...prev.x, label: prev.x.label === prevLabels.x ? data.xLabel : prev.x.label, min: null, max: null }
+        : prev.x,
+      y: yChanged
+        ? { ...prev.y, label: prev.y.label === prevLabels.y ? data.yLabel : prev.y.label, min: null, max: null }
+        : prev.y,
     }));
   }
 

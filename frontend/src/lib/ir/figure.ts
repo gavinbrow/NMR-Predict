@@ -226,6 +226,25 @@ export interface LegendEntryOverride {
   text?: string;
 }
 
+/**
+ * A legend row that keys something the figure does not draw as a series: a
+ * shading convention, a marker the analyst added by hand, a note about a few
+ * specific peaks ("* = matrix cluster"). The per-series {@link LegendEntryOverride}
+ * can only rename or hide rows that already exist, so without this there was no
+ * way to say anything in the legend that wasn't a series name.
+ *
+ * Notes are drawn after the series rows, in order, and flow into the legend's
+ * extra columns exactly like series rows do.
+ */
+export interface LegendNote {
+  /** Stable id — the React key and the target of edits. */
+  id: string;
+  /** Row wording. Blank notes are skipped, so a half-typed row never renders. */
+  text: string;
+  /** Key colour, or `null` for a row of plain text with no colour key at all. */
+  color: string | null;
+}
+
 export interface LegendOptions {
   show: boolean;
   position: LegendPosition;
@@ -243,6 +262,9 @@ export interface LegendOptions {
    *  colour is deliberately NOT overridable: the legend is a key to the data, so
    *  it always shows the series' own colour. Default `{}`. */
   entries: Record<string, LegendEntryOverride>;
+  /** Extra rows that key something other than a series — see {@link LegendNote}.
+   *  Default `[]`. */
+  notes: LegendNote[];
 }
 
 export interface FigureOptions {
@@ -396,6 +418,7 @@ export function defaultFigureOptions(data: FigureData, seed: FigureOptionSeed = 
       frame: true,
       marker: "line",
       entries: {},
+      notes: [],
       ...seed.legend,
     },
     peakLabels: {
@@ -438,7 +461,12 @@ export function mergeSavedFigureOptions(
     x: { ...base.x, ...saved.x },
     y: { ...base.y, ...saved.y },
     series: saved.series ?? base.series,
-    legend: { ...base.legend, ...saved.legend, entries: saved.legend?.entries ?? {} },
+    legend: {
+      ...base.legend,
+      ...saved.legend,
+      entries: saved.legend?.entries ?? {},
+      notes: saved.legend?.notes ?? [],
+    },
     peakLabels: {
       ...base.peakLabels,
       ...saved.peakLabels,

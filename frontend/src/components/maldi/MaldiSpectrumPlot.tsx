@@ -1,4 +1,4 @@
-import { Crosshair, Download, Eye, ListPlus, Ruler, RotateCcw, Tag, Trash2 } from "lucide-react";
+import { BoxSelect, Crosshair, Download, Eye, ListPlus, Ruler, RotateCcw, Tag, Trash2 } from "lucide-react";
 import { forwardRef, useEffect, useImperativeHandle, useMemo, useRef, useState } from "react";
 import uPlot from "uplot";
 import type { AlignedData, Options } from "uplot";
@@ -109,6 +109,14 @@ interface MaldiSpectrumPlotProps {
   onAddPeak?: (mz: number, intensity: number) => void;
   /** Manually remove a peak by id (clicking it in click-to-pick mode). */
   onRemovePeak?: (id: string) => void;
+  /**
+   * Replace the peak selection with the ids the user rubber-banded on the plot
+   * (empty = clear). Enables the "Select peaks" region tool; omit it and the
+   * button doesn't appear. This is the bulk-edit entry point: the host puts the
+   * ids into its highlight set, which the Peak table can pull into its own
+   * checkbox selection for a mass recolour or a move into a series.
+   */
+  onSelectPeaks?: (ids: string[]) => void;
   /** Toggle a peak in/out of the currently-selected series (provided only while a
    *  series is selected). Enables the plot's "Edit ladder" click mode. */
   onToggleSeriesMember?: (peakId: string) => void;
@@ -270,6 +278,7 @@ export const MaldiSpectrumPlot = forwardRef<MaldiSpectrumPlotHandle, MaldiSpectr
       overlaySticks,
       onAddPeak,
       onRemovePeak,
+      onSelectPeaks,
       onToggleSeriesMember,
       isolate: isolateProp,
       onIsolateChange,
@@ -296,8 +305,10 @@ export const MaldiSpectrumPlot = forwardRef<MaldiSpectrumPlotHandle, MaldiSpectr
     const isolate = isolateProp ?? isolateLocal;
     const setIsolate = (on: boolean) => (onIsolateChange ? onIsolateChange(on) : setIsolateLocal(on));
     const [measureMode, setMeasureMode] = useState(false);
-    // Region tools: drag a box to add a peak (apex in range) or delete peaks in it.
-    const [regionMode, setRegionMode] = useState<"none" | "add" | "delete">("none");
+    // Region tools: drag a box to add a peak (apex in range), delete every peak in
+    // it, or select every peak in it (the bulk-edit entry point — the Peak table
+    // picks the selection up and can recolour it or move it into a series).
+    const [regionMode, setRegionMode] = useState<"none" | "add" | "delete" | "select">("none");
     // "Edit ladder" mode: click peaks to add/remove them from the selected series.
     const [editSeries, setEditSeries] = useState(false);
     // The hover readout is written straight to the DOM (not React state) so moving
@@ -344,6 +355,7 @@ export const MaldiSpectrumPlot = forwardRef<MaldiSpectrumPlotHandle, MaldiSpectr
     const isolateRef = useRef(isolate);
     const onAddPeakRef = useRef(onAddPeak);
     const onRemovePeakRef = useRef(onRemovePeak);
+    const onSelectPeaksRef = useRef(onSelectPeaks);
     const onToggleSeriesMemberRef = useRef(onToggleSeriesMember);
     const activeRef = useRef<SpectrumData | null>(null);
     const activeTraceRef = useRef<PlotTrace | null>(null);
@@ -391,6 +403,7 @@ export const MaldiSpectrumPlot = forwardRef<MaldiSpectrumPlotHandle, MaldiSpectr
     isolateRef.current = isolate;
     onAddPeakRef.current = onAddPeak;
     onRemovePeakRef.current = onRemovePeak;
+    onSelectPeaksRef.current = onSelectPeaks;
     activeRef.current = active;
     activeTraceRef.current = activeTrace;
     tracesRef.current = traces;
@@ -1420,7 +1433,9 @@ export const MaldiSpectrumPlot = forwardRef<MaldiSpectrumPlotHandle, MaldiSpectr
       const plot = plotRef.current;
       if (!plot || regionMode === "none" || !active) return;
       const over = plot.over;
-      const rgb = regionMode === "delete" ? "239,68,68" : "14,165,233"; // red / sky
+      // red (delete) / violet (select) / sky (add)
+      const rgb =
+        regionMode === "delete" ? "239,68,68" : regionMode === "select" ? "168,85,247" : "14,165,233";
       let startX: number | null = null;
       let box: HTMLDivElement | null = null;
 
@@ -1460,23 +1475,33 @@ export const MaldiSpectrumPlot = forwardRef<MaldiSpectrumPlotHandle, MaldiSpectr
         startX = null;
         removeBox();
         const mode = regionModeRef.current;
+        /** The nearest drawn, editable peak within ~8 px of `sx`, or null. */
+        const nearestPeakId = (): string | null => {
+          let nearestId: string | null = null;
+          let nearestDist = 8;
+          for (const peak of peaksRef.current) {
+            if (peak.accepted === false && !peak.flag) continue;
+            if (!isActiveDocPeak(peak)) continue;
+            const d = Math.abs(plot.valToPos(peak.centroid ?? peak.mz, "x") - sx);
+            if (d <= nearestDist) {
+              nearestDist = d;
+              nearestId = peak.id;
+            }
+          }
+          return nearestId;
+        };
+
         // Tiny drag → treat as a click (point selection).
         if (bPx - aPx < 4) {
           const clickMz = plot.posToVal(sx, "x");
           if (mode === "delete") {
-            // Remove the nearest drawn peak within ~8 px.
-            let nearestId: string | null = null;
-            let nearestDist = 8;
-            for (const peak of peaksRef.current) {
-              if (peak.accepted === false && !peak.flag) continue;
-              if (!isActiveDocPeak(peak)) continue;
-              const d = Math.abs(plot.valToPos(peak.centroid ?? peak.mz, "x") - sx);
-              if (d <= nearestDist) {
-                nearestDist = d;
-                nearestId = peak.id;
-              }
-            }
+            const nearestId = nearestPeakId();
             if (nearestId) onRemovePeakRef.current?.(nearestId);
+          } else if (mode === "select") {
+            // A click in select mode is a one-peak selection; a click on empty
+            // space clears it, which is the only way back to "nothing selected".
+            const nearestId = nearestPeakId();
+            onSelectPeaksRef.current?.(nearestId ? [nearestId] : []);
           } else {
             const apex = apexNear(active, clickMz);
             if (apex) onAddPeakRef.current?.(apex.mz, apex.intensity);
@@ -1491,6 +1516,18 @@ export const MaldiSpectrumPlot = forwardRef<MaldiSpectrumPlotHandle, MaldiSpectr
             const m = peak.centroid ?? peak.mz;
             if (m >= loMz && m <= hiMz) onRemovePeakRef.current?.(peak.id);
           }
+        } else if (mode === "select") {
+          // Every editable peak of the ACTIVE document inside the box — the same
+          // ownership rule the delete tool uses, so a drag can never sweep up peaks
+          // belonging to a file the user isn't editing.
+          const picked: string[] = [];
+          for (const peak of peaksRef.current) {
+            if (peak.accepted === false && !peak.flag) continue;
+            if (!isActiveDocPeak(peak)) continue;
+            const m = peak.centroid ?? peak.mz;
+            if (m >= loMz && m <= hiMz) picked.push(peak.id);
+          }
+          onSelectPeaksRef.current?.(picked);
         } else {
           const apex = apexInRange(active, loMz, hiMz);
           if (apex) onAddPeakRef.current?.(apex.mz, apex.intensity);
@@ -1615,6 +1652,23 @@ export const MaldiSpectrumPlot = forwardRef<MaldiSpectrumPlotHandle, MaldiSpectr
               Delete peaks
             </Button>
           )}
+          {onSelectPeaks && (
+            <Button
+              size="sm"
+              variant={regionMode === "select" ? "default" : "outline"}
+              className="h-7"
+              title="Right-drag a box over the spectrum to select every peak inside it, then bulk-edit them in the Peak table"
+              onClick={() => {
+                setRegionMode((v) => (v === "select" ? "none" : "select"));
+                setMeasureMode(false);
+                setMeasure(null);
+                setEditSeries(false);
+              }}
+            >
+              <BoxSelect className="mr-1 h-3.5 w-3.5" />
+              Select peaks
+            </Button>
+          )}
           {onToggleSeriesMember && (
             <Button
               size="sm"
@@ -1666,7 +1720,9 @@ export const MaldiSpectrumPlot = forwardRef<MaldiSpectrumPlotHandle, MaldiSpectr
                 ? "Right-click-drag a box over a peak to add it (or click to snap to the nearest apex) · left-drag still zooms."
                 : regionMode === "delete"
                   ? "Right-click-drag a red box to delete every peak inside it (or click a peak to remove it) · left-drag still zooms."
-                  : "Drag to zoom · double-click to zoom out · scroll to scale the y-axis."}
+                  : regionMode === "select"
+                    ? "Right-click-drag a violet box to select every peak inside it, then bulk-edit them in the Peak table (click empty space to clear) · left-drag still zooms."
+                    : "Drag to zoom · double-click to zoom out · scroll to scale the y-axis."}
         </p>
       </div>
     );

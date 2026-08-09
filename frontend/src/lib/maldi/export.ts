@@ -13,6 +13,7 @@ import { injectCharts, type ChartSpec } from "./excelChartInject";
 import type { EndGroupCandidate } from "./endgroups";
 import type { Finding } from "./interpret";
 import type { MolWeightStats } from "./molweight";
+import { SAME_LADDER_OVERLAP, seriesMemberOverlap } from "./seriesMatch";
 import type {
   Adduct,
   Peak,
@@ -196,22 +197,78 @@ export function exportProjectJson(record: ProjectRecord): void {
 // --- Report (PDF + Excel) ----------------------------------------------------
 
 /**
- * The series a report should describe: the ones the rest of the app treats as
- * real ladders.
+ * One ladder as a report describes it. `adductUnassigned` marks a ladder the
+ * analyst never decided an adduct for — see {@link reportableSeries}. The report
+ * then names no adduct and no end group for it, and fits it on the observed m/z
+ * instead of a neutral mass it would have to invent an adduct to compute.
+ */
+export interface ReportSeries extends Series {
+  adductUnassigned?: boolean;
+}
+
+/**
+ * The series a report should describe: one entry per real ladder.
  *
- * A series carrying `supersededBy` has been folded into another one — either an
- * [M+H]+/[M+K]+ reading of peaks now claimed by a confirmed sibling, or a ladder
- * absorbed by "Combine series". Every other view already hides them
- * (`SeriesPanel`, `SeriesTable`, the plot's highlight groups, `unexplainedPeaks`),
- * because listing a ladder and the readings it superseded describes the same
- * peaks two or three times over. Reports used to take the raw list, so a sample
- * the user had already combined came out of the report split back into its parts
- * — and any per-series summary over that list double-counted their shared peaks.
+ * Two things collapse here, both of which used to print the same peaks over and
+ * over:
+ *
+ * 1. A series carrying `supersededBy` has been folded into another one — either
+ *    an [M+H]+/[M+K]+ reading of peaks now claimed by a confirmed sibling, or a
+ *    ladder absorbed by "Combine series". Every other view already hides them
+ *    (`SeriesPanel`, `SeriesTable`, the plot's highlight groups,
+ *    `unexplainedPeaks`), so a sample the user had already combined came out of
+ *    the report split back into its parts, and any per-series summary over that
+ *    list double-counted their shared peaks.
+ *
+ * 2. `assignSeries` emits one series per candidate adduct, so an UNCONFIRMED
+ *    ladder exists three or four times over — same peaks, different assumed
+ *    adduct, hence a different (equally assumed) end group. Nothing supersedes
+ *    them until the analyst confirms one, so the report printed a block, a
+ *    regression chart and an Excel chart for each. Those readings are one
+ *    measurement, not three: keep the best-scoring one, flag it
+ *    {@link ReportSeries.adductUnassigned}, and let the renderers state plainly
+ *    that no adduct was assigned rather than pick one on the analyst's behalf.
+ *
+ * Ladders are grouped by member overlap against the group's first series (never
+ * transitively — chaining would merge two genuinely different ladders that each
+ * happen to overlap a third). A group containing a confirmed (`endGroupLocked`)
+ * series keeps only the confirmed ones: that's the decided answer for those peaks.
  *
  * Callers should pass the result as {@link ReportPayload.series}.
  */
-export function reportableSeries(series: Series[]): Series[] {
-  return series.filter((s) => !s.supersededBy);
+export function reportableSeries(series: Series[]): ReportSeries[] {
+  const active = series.filter((s) => !s.supersededBy);
+  const groups: Series[][] = [];
+  for (const s of active) {
+    const group = groups.find((g) => seriesMemberOverlap(g[0], s) >= SAME_LADDER_OVERLAP);
+    if (group) group.push(s);
+    else groups.push([s]);
+  }
+
+  const keep = new Map<string, boolean>(); // series id → adductUnassigned
+  for (const group of groups) {
+    const confirmed = group.filter((s) => s.endGroupLocked);
+    if (confirmed.length) {
+      for (const s of confirmed) keep.set(s.id, false);
+      continue;
+    }
+    if (group.length === 1) {
+      keep.set(group[0].id, false);
+      continue;
+    }
+    const best = [...group].sort(
+      (a, b) => b.score - a.score || b.members.length - a.members.length,
+    )[0];
+    keep.set(best.id, true);
+  }
+
+  // Map over `active` rather than the groups so the report keeps the order the
+  // rest of the app shows these ladders in.
+  return active.flatMap((s) => {
+    const unassigned = keep.get(s.id);
+    if (unassigned == null) return [];
+    return [unassigned ? { ...s, adductUnassigned: true } : s];
+  });
 }
 
 export interface ReportPayload {
@@ -219,7 +276,9 @@ export interface ReportPayload {
   sourceName: string;
   pointCount: number;
   peaks: Peak[];
-  series: Series[];
+  /** Build with {@link reportableSeries} — it drops superseded readings and
+   *  collapses the never-confirmed adduct variants of one ladder into one entry. */
+  series: ReportSeries[];
   adducts: Adduct[];
   /** The active repeat unit (kept for callers that only track one). */
   repeatMass?: number;
@@ -264,20 +323,33 @@ function topPeaks(peaks: Peak[], limit: number): Peak[] {
 
 // --- End-group regression (mass vs oligomer number) --------------------------
 
+/** Wording used everywhere a report would otherwise print an adduct it does not
+ *  have. One constant so the PDF, the Excel sheet and its chart titles agree. */
+export const ADDUCT_UNASSIGNED = "adduct not assigned";
+
 /** A least-squares fit of neutral mass against oligomer number n for one end
  *  group: slope ≈ the repeat unit, intercept ≈ the end-group neutral mass, and R²
  *  measures how cleanly the ladder obeys mass = endGroup + n·repeat. */
 export interface EndGroupFit {
-  /** Adduct label, e.g. "[M+Na]+". */
+  /** Adduct label, e.g. "[M+Na]+", or a plain statement that none was assigned. */
   adductLabel: string;
-  /** Residual end-group mass (mod repeat) the candidate was clustered on. */
+  /** Residual end-group mass (mod repeat) the candidate was clustered on. Only
+   *  meaningful when {@link massBasis} is "neutral". */
   residualMass: number;
   /** Nearest library end group, if any. */
   libraryMatch?: string;
   /** Fitted slope — the apparent repeat-unit mass (Da). */
   repeatFit: number;
-  /** Fitted intercept — the apparent end-group neutral mass (Da). */
+  /** Fitted intercept — the apparent end-group neutral mass (Da) on a neutral
+   *  fit, or end group + adduct combined on an "m/z" fit. */
   endGroupFit: number;
+  /**
+   * What the fit was run on. "neutral" removes a known adduct from each m/z;
+   * "m/z" is the honest fallback for a ladder whose adduct the analyst never
+   * assigned — the slope is still the repeat unit, but the intercept carries the
+   * unknown adduct along with the end group, so it is NOT an end-group mass.
+   */
+  massBasis: "neutral" | "m/z";
   /** Coefficient of determination, 0..1. */
   r2: number;
   /** The per-oligomer points used in the fit. */
@@ -317,7 +389,9 @@ function linearFit(xs: number[], ys: number[]): { slope: number; intercept: numb
  * fits best-first, skipping any with fewer than three points.
  */
 export function collectEndGroupFits(payload: ReportPayload): EndGroupFit[] {
-  const sources: { adductId: string; residualMass: number; libraryMatch?: string; members: { peakId: string; n: number }[] }[] =
+  // `adductId: null` = the ladder has no assigned adduct, so the fit runs on the
+  // observed m/z. Solved end-group candidates always carry one by construction.
+  const sources: { adductId: string | null; residualMass: number; libraryMatch?: string; members: { peakId: string; n: number }[] }[] =
     payload.endGroupCandidates && payload.endGroupCandidates.length
       ? payload.endGroupCandidates.map((c) => ({
           adductId: c.adductId,
@@ -326,7 +400,7 @@ export function collectEndGroupFits(payload: ReportPayload): EndGroupFit[] {
           members: c.members ?? [],
         }))
       : payload.series.map((s) => ({
-          adductId: s.adductId,
+          adductId: s.adductUnassigned ? null : s.adductId,
           residualMass: s.endGroupMass,
           members: s.members,
         }));
@@ -334,14 +408,15 @@ export function collectEndGroupFits(payload: ReportPayload): EndGroupFit[] {
   const peakById = new Map(payload.peaks.map((p) => [p.id, p] as const));
   const fits: EndGroupFit[] = [];
   for (const src of sources) {
-    const adduct = adductById(payload.adducts, src.adductId);
+    const adduct = src.adductId != null ? adductById(payload.adducts, src.adductId) : null;
     const xs: number[] = [];
     const ys: number[] = [];
     for (const m of src.members) {
       const peak = peakById.get(m.peakId);
       if (!peak) continue;
+      const mz = peak.centroid ?? peak.mz;
       xs.push(m.n);
-      ys.push(neutralMass(peak.centroid ?? peak.mz, adduct));
+      ys.push(adduct ? neutralMass(mz, adduct) : mz);
     }
     if (xs.length < 3 || new Set(xs).size < 2) continue;
     const { slope, intercept, r2 } = linearFit(xs, ys);
@@ -349,11 +424,12 @@ export function collectEndGroupFits(payload: ReportPayload): EndGroupFit[] {
       .map((n, i) => ({ n, mass: ys[i], predicted: intercept + slope * n }))
       .sort((a, b) => a.n - b.n);
     fits.push({
-      adductLabel: adduct.label,
+      adductLabel: adduct ? adduct.label : ADDUCT_UNASSIGNED,
       residualMass: src.residualMass,
-      libraryMatch: src.libraryMatch,
+      libraryMatch: adduct ? src.libraryMatch : undefined,
       repeatFit: slope,
       endGroupFit: intercept,
+      massBasis: adduct ? "neutral" : "m/z",
       r2,
       points,
     });
@@ -379,7 +455,13 @@ function drawRegressionChart(
   doc.setFontSize(9);
   doc.setTextColor(0);
   const lib = fit.libraryMatch ? ` (${fit.libraryMatch})` : "";
-  doc.text(`${fit.adductLabel} · end ${fit.residualMass.toFixed(2)} Da${lib}`.slice(0, 64), x0, y0 + 9);
+  // With no adduct there is no end-group mass to name — the repeat unit is the
+  // only thing this ladder actually establishes.
+  const chartTitle =
+    fit.massBasis === "neutral"
+      ? `${fit.adductLabel} · end ${fit.residualMass.toFixed(2)} Da${lib}`
+      : `${fit.adductLabel} · m/z vs n`;
+  doc.text(chartTitle.slice(0, 64), x0, y0 + 9);
 
   const bx = x0;
   const by = y0 + titleH;
@@ -413,8 +495,12 @@ function drawRegressionChart(
   doc.setFont("helvetica", "normal");
   doc.setFontSize(8);
   doc.setTextColor(90);
+  // On an m/z fit the intercept is end group + adduct, so it is labelled
+  // "offset" — calling it an end group would be the very assumption the analyst
+  // declined to make.
+  const interceptLabel = fit.massBasis === "neutral" ? "end group" : "offset (end group + adduct)";
   doc.text(
-    `repeat ${fit.repeatFit.toFixed(3)} Da · end group ${fit.endGroupFit.toFixed(2)} Da · R² ${fit.r2.toFixed(4)} · ${fit.points.length} pts`,
+    `repeat ${fit.repeatFit.toFixed(3)} Da · ${interceptLabel} ${fit.endGroupFit.toFixed(2)} Da · R² ${fit.r2.toFixed(4)} · ${fit.points.length} pts`,
     bx,
     by + bh + 10,
   );
@@ -524,13 +610,32 @@ export function exportReportPdf(payload: ReportPayload): void {
     doc.text("Assigned series", margin, y);
     y += 14;
     doc.setFont("helvetica", "normal");
+    if (payload.series.some((s) => s.adductUnassigned)) {
+      doc.setFontSize(8);
+      doc.setTextColor(120);
+      doc.text(
+        "Ladders marked “adduct not assigned” matched more than one adduct equally well; confirm one in the Series tab to resolve the end group.",
+        margin,
+        y,
+      );
+      doc.setTextColor(0);
+      y += 12;
+    }
     doc.setFontSize(9);
     for (const s of [...payload.series].sort((a, b) => b.score - a.score).slice(0, 10)) {
       ensureSpace(12);
       const nameTag = s.label ? `${s.label}  \u00b7  ` : "";
       const mergeTag = s.mergedFrom?.length ? `  [merged from ${s.mergedFrom.length}]` : "";
+      // No adduct assigned means no end group either: both numbers come from the
+      // same assumption, so printing one without the other would be misleading.
+      const chemistry = s.adductUnassigned
+        ? ADDUCT_UNASSIGNED
+        : `${adductById(payload.adducts, s.adductId).label}`;
+      const endTag = s.adductUnassigned
+        ? ""
+        : `  end ${s.endGroupMass.toFixed(2)} Da${s.endGroupLabel ? ` (${s.endGroupLabel})` : ""}`;
       doc.text(
-        `${nameTag}${adductById(payload.adducts, s.adductId).label}  repeat ${s.repeatMass.toFixed(2)} Da  end ${s.endGroupMass.toFixed(2)} Da${s.endGroupLabel ? ` (${s.endGroupLabel})` : ""}  ${s.members.length} peaks  err ${(s.meanErrorDa ?? 0).toFixed(3)}  score ${Math.round(s.score * 100)}%${mergeTag}`,
+        `${nameTag}${chemistry}  repeat ${s.repeatMass.toFixed(2)} Da${endTag}  ${s.members.length} peaks  err ${(s.meanErrorDa ?? 0).toFixed(3)}  score ${Math.round(s.score * 100)}%${mergeTag}`,
         margin + 8,
         y,
       );
@@ -559,7 +664,13 @@ export function exportReportPdf(payload: ReportPayload): void {
     doc.setFont("helvetica", "normal");
     doc.setFontSize(8);
     doc.setTextColor(120);
-    doc.text("neutral mass = end group + n × repeat unit; R² gauges how cleanly each ladder fits", margin, y);
+    doc.text(
+      egFits.some((f) => f.massBasis === "m/z")
+        ? "neutral mass = end group + n × repeat unit; R² gauges how cleanly each ladder fits. Ladders with no assigned adduct are fitted on the observed m/z."
+        : "neutral mass = end group + n × repeat unit; R² gauges how cleanly each ladder fits",
+      margin,
+      y,
+    );
     doc.setTextColor(0);
     y += 14;
 
@@ -696,7 +807,10 @@ export async function exportReportExcel(payload: ReportPayload): Promise<void> {
 
     for (let seriesIndex = 0; seriesIndex < seriesToExport.length; seriesIndex += 1) {
       const s = seriesToExport[seriesIndex];
-      const adduct = adductById(payload.adducts, s.adductId);
+      // A ladder with no assigned adduct has no neutral mass — fit column D on the
+      // observed m/z instead, so the block keeps its shape (and its chart ranges)
+      // without the sheet claiming a chemistry the analyst never confirmed.
+      const adduct = s.adductUnassigned ? null : adductById(payload.adducts, s.adductId);
       const members = [...s.members].sort((a, b) => a.n - b.n);
       const xs: number[] = [];
       const ys: number[] = [];
@@ -705,7 +819,7 @@ export async function exportReportExcel(payload: ReportPayload): Promise<void> {
         const peak = peakById.get(m.peakId);
         if (!peak) continue;
         const rawMz = peak.centroid ?? peak.mz;
-        const neutral = neutralMass(rawMz, adduct);
+        const neutral = adduct ? neutralMass(rawMz, adduct) : rawMz;
         xs.push(m.n);
         ys.push(neutral);
         points.push({ peak, n: m.n, rawMz, neutral });
@@ -742,7 +856,9 @@ export async function exportReportExcel(payload: ReportPayload): Promise<void> {
       row += 1;
 
       const endGroupLabel = s.endGroupLabel ? ` (${s.endGroupLabel})` : "";
-      ws.getCell(`A${row}`).value = `Adduct: ${adduct.id} (${adduct.label})`;
+      ws.getCell(`A${row}`).value = adduct
+        ? `Adduct: ${adduct.id} (${adduct.label})`
+        : `Adduct: ${ADDUCT_UNASSIGNED}`;
       ws.getCell(`B${row}`).value = "Slope =";
       ws.getCell(`C${row}`).value = { formula: `SLOPE(${neutralRange},${nRange})` };
       ws.getCell(`C${row}`).numFmt = "0.0000";
@@ -756,11 +872,13 @@ export async function exportReportExcel(payload: ReportPayload): Promise<void> {
 
       ws.getCell(`A${row}`).value = `Repeat: ${s.repeatMass.toFixed(2)} Da`;
       const mergeNote = s.mergedFrom?.length ? ` · forced together from ${s.mergedFrom.length} series` : "";
-      ws.getCell(`B${row}`).value = `End group: ${s.endGroupMass.toFixed(2)} Da${endGroupLabel}${mergeNote}`;
+      ws.getCell(`B${row}`).value = adduct
+        ? `End group: ${s.endGroupMass.toFixed(2)} Da${endGroupLabel}${mergeNote}`
+        : `End group: not assigned — several adducts fit these peaks equally well${mergeNote}`;
       ws.mergeCells(`B${row}:G${row}`);
       row += 1;
 
-      ws.getCell(`A${row}`).value = `Equation: ${formatEquation(slope, intercept)}`;
+      ws.getCell(`A${row}`).value = `Equation: ${formatEquation(slope, intercept)}${adduct ? "" : "  (on observed m/z)"}`;
       ws.mergeCells(`A${row}:G${row}`);
       row += 1;
 
@@ -772,7 +890,7 @@ export async function exportReportExcel(payload: ReportPayload): Promise<void> {
       ws.getCell(`A${row}`).value = "n";
       ws.getCell(`B${row}`).value = "m/z (raw)";
       ws.getCell(`C${row}`).value = "intensity";
-      ws.getCell(`D${row}`).value = "neutral mass";
+      ws.getCell(`D${row}`).value = adduct ? "neutral mass" : "m/z (fit basis)";
       ws.getCell(`E${row}`).value = "predicted";
       ws.getCell(`F${row}`).value = "residual";
       ws.getCell(`G${row}`).value = "fit line";
@@ -811,8 +929,11 @@ export async function exportReportExcel(payload: ReportPayload): Promise<void> {
         sheetName: "Series",
         // The repeat unit AND the end group are in the title: a sample can carry
         // several ladders of one repeat unit (two polymers, or one whose ladder
-        // the assignment split), and only the end group tells those apart.
-        title: `Series ${seriesIndex + 1}${s.label ? ` (${s.label})` : ""} — ${adduct.label} · ${s.repeatMass.toFixed(2)} Da · EG ${s.endGroupMass.toFixed(2)}`,
+        // the assignment split), and only the end group tells those apart. With no
+        // adduct there is no end group to name, so the repeat unit stands alone.
+        title: adduct
+          ? `Series ${seriesIndex + 1}${s.label ? ` (${s.label})` : ""} — ${adduct.label} · ${s.repeatMass.toFixed(2)} Da · EG ${s.endGroupMass.toFixed(2)}`
+          : `Series ${seriesIndex + 1}${s.label ? ` (${s.label})` : ""} — ${ADDUCT_UNASSIGNED} · ${s.repeatMass.toFixed(2)} Da`,
         xRange: nRange,
         yRange: neutralRange,
         anchorCol: 8,

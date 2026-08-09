@@ -1,4 +1,4 @@
-import { Eye, EyeOff, RotateCcw, X } from "lucide-react";
+import { Eye, EyeOff, Plus, RotateCcw, X } from "lucide-react";
 import { useMemo } from "react";
 import { Section } from "@/components/ir/Section";
 import { Button } from "@/components/ui/button";
@@ -22,6 +22,7 @@ import {
   type GridStyle,
   type LegendEntryOverride,
   type LegendMarker,
+  type LegendNote,
   type LegendOptions,
   type LegendPosition,
   type LineStyle,
@@ -97,6 +98,9 @@ const LEGEND_MARKERS: { value: LegendMarker; label: string }[] = [
 /** Fallback swatch for a peak with no colour of its own (the sky the MALDI
  *  adapter stems unassigned peaks in). */
 const NO_PEAK_COLOR = "#0ea5e9";
+/** Starting key colour for a new free-text legend line — the same slate as the
+ *  frame, so a new row reads as annotation rather than as another data series. */
+const DEFAULT_NOTE_COLOR = "#334155";
 
 /** A small labelled numeric input. */
 function NumField({
@@ -643,6 +647,19 @@ export function FigureControls({
     else delete entries[id];
     patchLegend({ entries });
   };
+
+  // Free-text legend rows (see LegendNote). Blank ones are kept in the options
+  // while the user types — FigureSvg skips them — so an empty new row doesn't
+  // vanish out from under the cursor.
+  const legendNotes = options.legend.notes ?? [];
+  const addLegendNote = () =>
+    patchLegend({
+      notes: [...legendNotes, { id: crypto.randomUUID(), text: "", color: DEFAULT_NOTE_COLOR }],
+    });
+  const patchLegendNote = (id: string, p: Partial<LegendNote>) =>
+    patchLegend({ notes: legendNotes.map((nt) => (nt.id === id ? { ...nt, ...p } : nt)) });
+  const removeLegendNote = (id: string) =>
+    patchLegend({ notes: legendNotes.filter((nt) => nt.id !== id) });
 
   // Patch one label's figure-only override (placement nudge / hide). Keys back at
   // their neutral default are dropped so an override never lingers as an empty
@@ -1374,6 +1391,74 @@ export function FigureControls({
                   </p>
                 </div>
               )}
+
+              {/* Extra lines: legend rows for things the figure doesn't draw as a
+                  series (a shading convention, a note about a handful of peaks).
+                  The rows above can only rename or hide series that already
+                  exist, so this is the only way to say anything else. */}
+              <div className="grid gap-2">
+                <div className="flex items-center justify-between gap-2">
+                  <Label className="text-[11px] text-muted-foreground">Extra lines</Label>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    className="h-6 px-2 text-[11px]"
+                    onClick={() => addLegendNote()}
+                  >
+                    <Plus className="mr-1 h-3 w-3" />
+                    Add line
+                  </Button>
+                </div>
+                {legendNotes.length > 0 && (
+                  <LegendEntryList>
+                    {legendNotes.map((note) => (
+                      <div
+                        key={note.id}
+                        className="flex items-center gap-2 rounded-md border border-border/50 bg-background/40 px-2 py-1"
+                      >
+                        <input
+                          type="checkbox"
+                          checked={note.color !== null}
+                          onChange={(e) =>
+                            patchLegendNote(note.id, {
+                              color: e.target.checked ? DEFAULT_NOTE_COLOR : null,
+                            })
+                          }
+                          title="Draw a colour key beside this line"
+                          className="h-3.5 w-3.5 shrink-0"
+                        />
+                        <input
+                          type="color"
+                          value={note.color ?? DEFAULT_NOTE_COLOR}
+                          disabled={note.color === null}
+                          onChange={(e) => patchLegendNote(note.id, { color: e.target.value })}
+                          title={note.color === null ? "Tick the box to give this line a colour key" : "Key colour"}
+                          className="h-5 w-6 shrink-0 cursor-pointer rounded border border-border/60 bg-transparent p-0.5 disabled:opacity-30"
+                        />
+                        <Input
+                          value={note.text}
+                          placeholder="e.g. * = matrix cluster"
+                          onChange={(e) => patchLegendNote(note.id, { text: e.target.value })}
+                          className="h-7 min-w-0 flex-1 text-xs"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => removeLegendNote(note.id)}
+                          title="Remove this line"
+                          className="shrink-0 text-muted-foreground/60 transition-smooth hover:text-destructive"
+                        >
+                          <X className="h-3.5 w-3.5" />
+                        </button>
+                      </div>
+                    ))}
+                  </LegendEntryList>
+                )}
+                <p className="text-[11px] text-muted-foreground">
+                  Rows the figure has no series for. They appear under the series keys; untick the
+                  box for plain text with no colour key.
+                </p>
+              </div>
             </>
           )}
         </div>

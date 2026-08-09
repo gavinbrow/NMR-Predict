@@ -60,9 +60,12 @@ type Drag =
       moved: boolean;
     };
 
-/** One legend row: the series it keys, and the wording it shows (the series'
- *  own label unless a {@link LegendEntryOverride} renamed it). */
-type LegendEntry = { style: SeriesStyle; text: string };
+/**
+ * One legend row. `style` is present when the row keys a real series (and gives
+ * the key its line width / dash / marker); a {@link LegendNote} row has none.
+ * `color` is the key colour, or null for a plain caption row with no key.
+ */
+type LegendEntry = { style?: SeriesStyle; text: string; color: string | null };
 
 export interface FigureSvgProps {
   data: FigureData;
@@ -233,13 +236,25 @@ export function FigureSvg({
   // plot is currently hiding.
   const legendOverrides = legend.entries ?? {};
   const legendEntries: LegendEntry[] = legend.show
-    ? options.series
-        .filter((st) => {
-          const forced = legendOverrides[st.id]?.show;
-          if (forced !== undefined) return forced;
-          return st.visible && !data.series.find((s) => s.id === st.id)?.legendHidden;
-        })
-        .map((st) => ({ style: st, text: legendOverrides[st.id]?.text?.trim() || st.label }))
+    ? [
+        ...options.series
+          .filter((st) => {
+            const forced = legendOverrides[st.id]?.show;
+            if (forced !== undefined) return forced;
+            return st.visible && !data.series.find((s) => s.id === st.id)?.legendHidden;
+          })
+          .map((st) => ({
+            style: st,
+            text: legendOverrides[st.id]?.text?.trim() || st.label,
+            color: st.color,
+          })),
+        // Free-text rows the analyst added for things the figure doesn't draw as
+        // a series. Last, so they read as footnotes to the keys above them; blank
+        // ones are skipped so a half-typed row never widens the box.
+        ...(legend.notes ?? [])
+          .filter((note) => note.text.trim().length > 0)
+          .map((note) => ({ text: note.text.trim(), color: note.color })),
+      ]
     : [];
   const lf = legend.fontSize;
   const rowH = lf * 1.5;
@@ -882,22 +897,27 @@ export function FigureSvg({
               const cx = lx + colX[cell.col] + sampleW / 2;
               const cy = ly + 6 + rowH * cell.row + rowH / 2;
               const st = cell.e?.style;
+              // A note row has no series behind it, so it borrows the default
+              // line weight and a solid dash — and a note with no colour draws no
+              // key at all, leaving its text aligned with the rows above.
+              const key = cell.isMore ? null : cell.e?.color ?? null;
               // "dot" replaces the whole line sample with one filled circle —
               // the clearer key for a stick spectrum, where a horizontal line
               // resembles nothing that is actually drawn.
               const dot = legend.marker === "dot";
+              const drawLine = !dot && (st ? st.lineStyle !== "none" : true);
               return (
                 <g key={`l${i}`}>
-                  {st && dot && <circle cx={cx} cy={cy} r={Math.max(2, lf * 0.32)} fill={st.color} />}
-                  {st && !dot && st.lineStyle !== "none" && (
+                  {key && dot && <circle cx={cx} cy={cy} r={Math.max(2, lf * 0.32)} fill={key} />}
+                  {key && drawLine && (
                     <line
                       x1={lx + colX[cell.col]}
                       x2={lx + colX[cell.col] + sampleW}
                       y1={cy}
                       y2={cy}
-                      stroke={st.color}
-                      strokeWidth={st.lineWidth}
-                      strokeDasharray={dashArray(st.lineStyle, st.lineWidth)}
+                      stroke={key}
+                      strokeWidth={st?.lineWidth ?? 2}
+                      strokeDasharray={st ? dashArray(st.lineStyle, st.lineWidth) : undefined}
                     />
                   )}
                   {st && !dot && st.markers && (

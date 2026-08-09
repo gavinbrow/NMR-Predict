@@ -96,6 +96,7 @@ import {
   fitLadder,
   mergeSeriesGroup,
   peaksForRepeat,
+  positionalMembers,
   seriesDisplayLabel,
   seriesForRepeat,
   splitMergedSeries,
@@ -1020,6 +1021,19 @@ const Maldi = () => {
     setHighlightedPeakIds(ids);
   }, []);
 
+  // The plot's "Select peaks" rubber-band. The ids land in the flat highlight set,
+  // which is what the Peak table's "Select N from plot" button reads — the bridge
+  // between a drag on the spectrum and every bulk action in the table (recolour,
+  // label, delete, move into a series).
+  const handleSelectPeaksFromPlot = useCallback(
+    (ids: string[]) => {
+      setSelectedSeriesId(null);
+      setSelectedCopolymerId(null);
+      highlightPeaks(ids.length ? new Set(ids) : undefined);
+    },
+    [highlightPeaks],
+  );
+
   const resetDownstream = useCallback(() => {
     setPeaks([]);
     setSeries([]);
@@ -1631,7 +1645,11 @@ const Maldi = () => {
       const fit = fitLadder(peaks, peakIds, s.repeatMass, adductById(allAdducts, s.adductId));
       return {
         ...s,
-        members: fit?.members ?? [],
+        // `fitLadder` returns null for a group with no repeat unit to fit against
+        // — a hand-made group from `handleCreateSeriesFromPeaks`. Falling through
+        // to `[]` there would silently empty the group on the next membership
+        // edit, so number its members positionally instead.
+        members: fit?.members ?? (peakIds.length ? positionalMembers(peaks, peakIds) : []),
         endGroupMass: s.endGroupLocked ? s.endGroupMass : fit?.endGroupMass ?? s.endGroupMass,
         meanErrorDa: fit?.meanErrorDa ?? s.meanErrorDa,
         score: fit?.score ?? 0,
@@ -1671,6 +1689,53 @@ const Maldi = () => {
       );
     },
     [refitSeries, series, allAdducts],
+  );
+
+  // Make a new series out of an arbitrary set of peaks and move them into it.
+  // The automatic assignment only ever creates ladders it found by spacing, so
+  // "these peaks belong together — colour them and treat them as one thing" had
+  // no target at all. Created confirmed (`endGroupLocked`), because it IS the
+  // analyst's decision: it lands straight in the Series table where it can be
+  // named, described and recoloured, and its colour reaches the plot and figure.
+  // When a repeat unit is active the group is fitted like any ladder; without one
+  // it keeps positional oligomer numbers (see `positionalMembers`).
+  const handleCreateSeriesFromPeaks = useCallback(
+    (peakIds: string[]) => {
+      const ids = [...new Set(peakIds)];
+      if (ids.length === 0) return;
+      const adduct = selectedAdducts[0] ?? allAdducts[0];
+      if (!adduct) return;
+      const repeat = repeatMass && repeatMass > 0 ? repeatMass : 0;
+      const fit = repeat > 0 ? fitLadder(peaks, ids, repeat, adduct) : null;
+      const groupCount = series.filter((s) => !s.supersededBy).length + 1;
+      const created: Series = {
+        id: crypto.randomUUID(),
+        label: `Group ${groupCount}`,
+        repeatMass: repeat,
+        endGroupMass: fit?.endGroupMass ?? 0,
+        adductId: adduct.id,
+        members: fit?.members ?? positionalMembers(peaks, ids),
+        score: fit?.score ?? 0,
+        meanErrorDa: fit?.meanErrorDa,
+        r2: fit?.r2,
+        endGroupLocked: true,
+      };
+      // The peaks MOVE: drop them from any other live series first, exactly like
+      // `handleAddPeaksToSeries`, so the table's Series column stays a single-owner
+      // picker. Superseded series are left alone so a delete can still restore them.
+      const drop = new Set(ids);
+      setSeries((prev) => [
+        ...prev.map((s) => {
+          if (s.supersededBy) return s;
+          if (!s.members.some((m) => drop.has(m.peakId))) return s;
+          return refitSeries(s, s.members.filter((m) => !drop.has(m.peakId)).map((m) => m.peakId));
+        }),
+        created,
+      ]);
+      setSelectedSeriesId(created.id);
+      toast.success(`Made "${created.label}" from ${ids.length} ${ids.length === 1 ? "peak" : "peaks"}`);
+    },
+    [peaks, series, selectedAdducts, allAdducts, repeatMass, refitSeries],
   );
 
   const handleRemovePeaksFromSeries = useCallback(
@@ -2633,6 +2698,7 @@ const Maldi = () => {
                         overlaySticks={overlay?.sticks ?? null}
                         onAddPeak={handleAddPeak}
                         onRemovePeak={handleRemovePeak}
+                        onSelectPeaks={handleSelectPeaksFromPlot}
                         onToggleSeriesMember={selectedSeriesId ? handleToggleSeriesMember : undefined}
                         isolate={isolateSelection}
                         onIsolateChange={setIsolateSelection}
@@ -2700,6 +2766,7 @@ const Maldi = () => {
                                 seriesByPeakId,
                                 onAddPeaksToSeries: handleAddPeaksToSeries,
                                 onRemovePeaksFromSeries: handleRemovePeaksFromSeries,
+                                onCreateSeriesFromPeaks: handleCreateSeriesFromPeaks,
                               })}
                         />
                       </div>

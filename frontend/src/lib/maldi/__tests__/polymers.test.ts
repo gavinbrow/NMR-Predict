@@ -6,6 +6,7 @@ import {
   fitLadder,
   mergeSeriesGroup,
   peaksForRepeat,
+  positionalMembers,
   seriesDisplayLabel,
   seriesForRepeat,
   splitMergedSeries,
@@ -358,5 +359,34 @@ describe("stripLegacyAutoLabels", () => {
       { ...base, label: "[M+Na]+ · 74.04 Da" },
     ]);
     expect(kept.map((s) => s.label)).toEqual(["PEG-OH", "[M+Na]+ · 74.04 Da"]);
+  });
+});
+
+describe("positionalMembers", () => {
+  const peak = (id: string, mz: number): Peak => ({ id, mz, intensity: 1 });
+
+  it("numbers a hand-made group by ascending m/z, whatever order it arrives in", () => {
+    const peaks = [peak("c", 300), peak("a", 100), peak("b", 200)];
+    expect(positionalMembers(peaks, ["c", "a", "b"])).toEqual([
+      { peakId: "a", n: 0 },
+      { peakId: "b", n: 1 },
+      { peakId: "c", n: 2 },
+    ]);
+  });
+
+  it("prefers the centroid over the raw m/z, like the rest of the module", () => {
+    const peaks: Peak[] = [
+      { id: "a", mz: 100, centroid: 400, intensity: 1 },
+      { id: "b", mz: 200, centroid: 200.5, intensity: 1 },
+    ];
+    expect(positionalMembers(peaks, ["a", "b"]).map((m) => m.peakId)).toEqual(["b", "a"]);
+  });
+
+  it("drops ids that no longer name a peak", () => {
+    expect(positionalMembers([peak("a", 100)], ["a", "gone"])).toEqual([{ peakId: "a", n: 0 }]);
+  });
+
+  it("returns nothing for an empty selection", () => {
+    expect(positionalMembers([peak("a", 100)], [])).toEqual([]);
   });
 });

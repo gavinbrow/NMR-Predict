@@ -14,10 +14,16 @@ import type { MaldiDocument } from "@/pages/Maldi";
  *  - checkbox — whether the trace is drawn on the plot (`visible`);
  *  - name — bold when this is the active document; clicking it makes it active;
  *  - × — closes the document;
- *  - intensity multiplier and vertical offset numbers (compact, revealed on
- *    hover; the multiplier stays visible once it is not 1);
  *  - "reference" marker — pinned by the user, used as the minuend of the
- *    active − reference difference trace.
+ *    active − reference difference trace;
+ *  - a SECOND line carrying the intensity multiplier and vertical offset.
+ *
+ * The numbers get their own line because the panel is a fixed 240 px column
+ * (`lg:grid-cols-[1fr_240px]` in `Maldi.tsx`) and they used to sit beside the
+ * name: two 48 px inputs plus the dot, checkbox, ref and close left the name
+ * NINE pixels, so every document rendered as a single letter and an ellipsis.
+ * `opacity-0` hid them without giving the space back — only a real layout change
+ * does that. Don't move them back onto the name's line.
  *
  * Active and visible are INDEPENDENT states (mMass's model), with one guard:
  * making a document active forces `visible: true`, because active-but-hidden is
@@ -182,148 +188,163 @@ export function DocumentsPanel({
             <li
               key={d.id}
               className={[
-                "group flex items-center gap-1.5 rounded-md border px-1.5 py-1 transition-smooth",
+                "group flex flex-col gap-0.5 rounded-md border px-1.5 py-1 transition-smooth",
                 isActive
                   ? "border-primary/60 bg-primary/5"
                   : "border-border/50 bg-background/60 hover:border-primary/30",
               ].join(" ")}
             >
-              {/* Colour dot — click opens the native picker (also the legend swatch).
-                  The dot only OPENS the picker (it never toggles closed) so a single
-                  click reliably opens it on the first try; the previous toggle-on-
-                  every-click behaviour let the same click re-close the picker via a
-                  second toggle. Closing is handled by the click-away backdrop below
-                  so the picker only closes on an explicit outside click. */}
-              <div className="relative shrink-0">
+              <div className="flex items-center gap-1.5">
+                {/* Colour dot — click opens the native picker (also the legend swatch).
+                    The dot only OPENS the picker (it never toggles closed) so a single
+                    click reliably opens it on the first try; the previous toggle-on-
+                    every-click behaviour let the same click re-close the picker via a
+                    second toggle. Closing is handled by the click-away backdrop below
+                    so the picker only closes on an explicit outside click. */}
+                <div className="relative shrink-0">
+                  <button
+                    type="button"
+                    title="Trace colour"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setOpenColorFor(d.id);
+                    }}
+                    className="block h-4 w-4 rounded-full border border-border/60"
+                    style={{ backgroundColor: d.color }}
+                  />
+                  {openColorFor === d.id && (
+                    <>
+                      {/* Click-away backdrop: a click anywhere outside the picker
+                          closes it. Fixed + inset-0 so it covers the viewport without
+                          affecting layout; sits below the picker (z-10 vs z-20). */}
+                      <button
+                        type="button"
+                        aria-hidden
+                        tabIndex={-1}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setOpenColorFor(null);
+                        }}
+                        className="fixed inset-0 z-10 cursor-default"
+                      />
+                      <div
+                        className="absolute left-0 top-5 z-20"
+                        onClick={(e) => e.stopPropagation()}
+                      >
+                        <input
+                          type="color"
+                          value={d.color}
+                          onChange={(e) => onUpdate(d.id, { color: e.target.value })}
+                          onClick={(e) => e.stopPropagation()}
+                          className="block h-7 w-9 cursor-pointer rounded border border-border/60 bg-background p-0.5"
+                        />
+                      </div>
+                    </>
+                  )}
+                </div>
+
+                {/* Visibility checkbox. The active document's checkbox is disabled
+                    and forced-checked — active-but-hidden is a dead state. */}
+                <Checkbox
+                  checked={isVisible}
+                  onCheckedChange={(v) => onUpdate(d.id, { visible: v === true })}
+                  disabled={isActive}
+                  className="h-3.5 w-3.5"
+                  title={isActive ? "The active document is always visible" : isVisible ? "Hide this trace" : "Show this trace"}
+                />
+
+                {/* Name — click to make active. Bold when active. */}
                 <button
                   type="button"
-                  title="Trace colour"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    setOpenColorFor(d.id);
-                  }}
-                  className="block h-4 w-4 rounded-full border border-border/60"
-                  style={{ backgroundColor: d.color }}
-                />
-                {openColorFor === d.id && (
-                  <>
-                    {/* Click-away backdrop: a click anywhere outside the picker
-                        closes it. Fixed + inset-0 so it covers the viewport without
-                        affecting layout; sits below the picker (z-10 vs z-20). */}
-                    <button
-                      type="button"
-                      aria-hidden
-                      tabIndex={-1}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        setOpenColorFor(null);
-                      }}
-                      className="fixed inset-0 z-10 cursor-default"
-                    />
-                    <div
-                      className="absolute left-0 top-5 z-20"
-                      onClick={(e) => e.stopPropagation()}
-                    >
-                      <input
-                        type="color"
-                        value={d.color}
-                        onChange={(e) => onUpdate(d.id, { color: e.target.value })}
-                        onClick={(e) => e.stopPropagation()}
-                        className="block h-7 w-9 cursor-pointer rounded border border-border/60 bg-background p-0.5"
-                      />
-                    </div>
-                  </>
-                )}
+                  onClick={() => onSwitch(d.id)}
+                  className={[
+                    "min-w-0 flex-1 truncate text-left text-[11px]",
+                    isActive ? "font-semibold text-foreground" : "text-muted-foreground hover:text-foreground",
+                  ].join(" ")}
+                  title={d.name}
+                >
+                  {d.name}
+                </button>
+
+                {/* Reference marker / toggle. A star that pins the row as the
+                    difference-mode reference (the minuend of `active − reference`).
+                    Clicking it again unpins it; the Difference switch stays enabled
+                    only while a reference is set. Hidden rows are ineligible as a
+                    reference — subtracting a trace the user can't see is confusing
+                    (the active doc's checkbox is disabled, so it can't become a
+                    hidden reference). */}
+                <button
+                  type="button"
+                  onClick={() => onReferenceDocIdChange(isReference ? null : d.id)}
+                  disabled={!isVisible}
+                  className={[
+                    "shrink-0 rounded px-1 text-[9px] uppercase tracking-wide transition-smooth",
+                    isReference
+                      ? "bg-primary/15 font-semibold text-primary"
+                      : "text-muted-foreground/60 hover:text-foreground",
+                    !isVisible ? "opacity-30" : "",
+                  ].join(" ")}
+                  title={isReference ? "Reference for Difference mode — click to clear" : isVisible ? "Use as reference for Difference mode" : "Show the trace to use it as the reference"}
+                >
+                  ref
+                </button>
+
+                {/* Close. */}
+                <button
+                  type="button"
+                  onClick={() => onClose(d.id)}
+                  className="shrink-0 text-muted-foreground/60 hover:text-destructive"
+                  title="Close document"
+                >
+                  <X className="h-3.5 w-3.5" />
+                </button>
               </div>
 
-              {/* Visibility checkbox. The active document's checkbox is disabled
-                  and forced-checked — active-but-hidden is a dead state. */}
-              <Checkbox
-                checked={isVisible}
-                onCheckedChange={(v) => onUpdate(d.id, { visible: v === true })}
-                disabled={isActive}
-                className="h-3.5 w-3.5"
-                title={isActive ? "The active document is always visible" : isVisible ? "Hide this trace" : "Show this trace"}
-              />
+              {/* Second line: the two per-trace numbers. Indented to line up
+                  under the name, and always visible — they were hover-only, which
+                  made a scaled or offset document look untouched until you moved
+                  the mouse over its row. */}
+              <div className="flex items-center gap-1 pl-[26px] text-[10px] text-muted-foreground">
+                {/* Intensity multiplier. Normalize scales every trace to its own
+                    100 %, which flattens the very comparison a multi-file view is
+                    for; this is the per-document knob that says "this one at half
+                    height" without touching the data. It applies to the trace, to
+                    that document's peak markers, and to the figure. */}
+                <span aria-hidden title="Intensity multiplier (1 = as measured)">
+                  &times;
+                </span>
+                <Input
+                  type="number"
+                  step={0.1}
+                  min={0}
+                  value={d.scale ?? 1}
+                  onChange={(e) => onUpdate(d.id, { scale: Number(e.target.value) })}
+                  title="Intensity multiplier (1 = as measured)"
+                  aria-label={`Intensity multiplier for ${d.name}`}
+                  className={[
+                    "h-5 w-14 shrink-0 px-1 text-[10px]",
+                    (d.scale ?? 1) === 1 ? "" : "font-semibold text-foreground",
+                  ].join(" ")}
+                />
 
-              {/* Name — click to make active. Bold when active. */}
-              <button
-                type="button"
-                onClick={() => onSwitch(d.id)}
-                className={[
-                  "min-w-0 flex-1 truncate text-left text-[11px]",
-                  isActive ? "font-semibold text-foreground" : "text-muted-foreground hover:text-foreground",
-                ].join(" ")}
-                title={d.name}
-              >
-                {d.name}
-              </button>
-
-              {/* Reference marker / toggle. A star that pins the row as the
-                  difference-mode reference (the minuend of `active − reference`).
-                  Clicking it again unpins it; the Difference switch stays enabled
-                  only while a reference is set. Hidden rows are ineligible as a
-                  reference — subtracting a trace the user can't see is confusing
-                  (the active doc's checkbox is disabled, so it can't become a
-                  hidden reference). */}
-              <button
-                type="button"
-                onClick={() => onReferenceDocIdChange(isReference ? null : d.id)}
-                disabled={!isVisible}
-                className={[
-                  "shrink-0 rounded px-1 text-[9px] uppercase tracking-wide transition-smooth",
-                  isReference
-                    ? "bg-primary/15 font-semibold text-primary"
-                    : "text-muted-foreground/60 hover:text-foreground",
-                  !isVisible ? "opacity-30" : "",
-                ].join(" ")}
-                title={isReference ? "Reference for Difference mode — click to clear" : isVisible ? "Use as reference for Difference mode" : "Show the trace to use it as the reference"}
-              >
-                ref
-              </button>
-
-              {/* Intensity multiplier — compact number revealed on hover, like
-                  the offset beside it. Normalize scales every trace to its own
-                  100 %, which flattens the very comparison a multi-file view is
-                  for; this is the per-document knob that says "this one at half
-                  height" without touching the data. It applies to the trace, to
-                  that document's peak markers, and to the figure. Stays visible
-                  once set away from 1 so a scaled document is never a mystery. */}
-              <Input
-                type="number"
-                step={0.1}
-                min={0}
-                value={d.scale ?? 1}
-                onChange={(e) => onUpdate(d.id, { scale: Number(e.target.value) })}
-                title="Intensity multiplier (1 = as measured)"
-                aria-label={`Intensity multiplier for ${d.name}`}
-                className={[
-                  "h-6 w-12 shrink-0 px-1 text-[11px] transition-smooth group-hover:opacity-100 focus:opacity-100",
-                  (d.scale ?? 1) === 1 ? "opacity-0" : "opacity-100 font-semibold",
-                ].join(" ")}
-              />
-
-              {/* Vertical offset — compact number revealed on hover. The active
-                  trace's offset is editable too; the plot applies it to the
-                  active trace just like any other (see `MaldiSpectrumPlot`). */}
-              <Input
-                type="number"
-                value={d.offset ?? 0}
-                onChange={(e) => onUpdate(d.id, { offset: Number(e.target.value) || 0 })}
-                title="Vertical offset"
-                aria-label={`Vertical offset for ${d.name}`}
-                className="h-6 w-12 shrink-0 px-1 text-[11px] opacity-0 transition-smooth group-hover:opacity-100 focus:opacity-100"
-              />
-
-              {/* Close. */}
-              <button
-                type="button"
-                onClick={() => onClose(d.id)}
-                className="shrink-0 text-muted-foreground/60 hover:text-destructive"
-                title="Close document"
-              >
-                <X className="h-3.5 w-3.5" />
-              </button>
+                {/* Vertical offset. The active trace's offset is editable too;
+                    the plot applies it to the active trace just like any other
+                    (see `MaldiSpectrumPlot`). */}
+                <span aria-hidden className="ml-auto" title="Vertical offset">
+                  &#8597;
+                </span>
+                <Input
+                  type="number"
+                  value={d.offset ?? 0}
+                  onChange={(e) => onUpdate(d.id, { offset: Number(e.target.value) || 0 })}
+                  title="Vertical offset"
+                  aria-label={`Vertical offset for ${d.name}`}
+                  className={[
+                    "h-5 w-14 shrink-0 px-1 text-[10px]",
+                    (d.offset ?? 0) === 0 ? "" : "font-semibold text-foreground",
+                  ].join(" ")}
+                />
+              </div>
             </li>
           );
         })}

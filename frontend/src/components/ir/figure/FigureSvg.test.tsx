@@ -421,3 +421,71 @@ describe("FigureSvg — label thinning priority", () => {
     expect(drawn(container)).not.toContain("tall");
   });
 });
+
+describe("FigureSvg — custom legend lines", () => {
+  const withLegend = () => {
+    const data = msData();
+    const base = defaultFigureOptions(data);
+    return {
+      data,
+      base: { ...base, legend: { ...base.legend, show: true } },
+    };
+  };
+
+  it("draws a note row that keys nothing the figure plots", () => {
+    // The gap this fills: the per-series overrides can only rename or hide rows
+    // that already exist, so a caption about a few peaks had nowhere to go.
+    const { data, base } = withLegend();
+    const options = {
+      ...base,
+      legend: {
+        ...base.legend,
+        notes: [{ id: "n1", text: "* = matrix cluster", color: "#22c55e" }],
+      },
+    };
+    const { container } = render(<FigureSvg data={data} options={options} decimate={false} />);
+    const texts = Array.from(container.querySelectorAll("text")).map((t) => t.textContent);
+    expect(texts).toContain("* = matrix cluster");
+    expect(container.querySelector('line[stroke="#22c55e"]')).not.toBeNull();
+  });
+
+  it("draws a colourless note as plain text with no key", () => {
+    const { data, base } = withLegend();
+    const options = {
+      ...base,
+      legend: { ...base.legend, notes: [{ id: "n1", text: "shaded = replicate", color: null }] },
+    };
+    const { container } = render(<FigureSvg data={data} options={options} decimate={false} />);
+    const texts = Array.from(container.querySelectorAll("text")).map((t) => t.textContent);
+    expect(texts).toContain("shaded = replicate");
+    expect(container.querySelector('line[stroke="#22c55e"]')).toBeNull();
+  });
+
+  it("skips a blank note so a half-typed row never renders", () => {
+    const { data, base } = withLegend();
+    const withNote = {
+      ...base,
+      legend: { ...base.legend, notes: [{ id: "n1", text: "  ", color: "#22c55e" }] },
+    };
+    const { container } = render(<FigureSvg data={data} options={withNote} decimate={false} />);
+    expect(container.querySelector('line[stroke="#22c55e"]')).toBeNull();
+  });
+
+  it("shows notes even when no series is in the legend", () => {
+    // A single-trace figure defaults the legend off; turning it on for a note
+    // alone must still produce a box.
+    const { data, base } = withLegend();
+    const options = {
+      ...base,
+      legend: {
+        ...base.legend,
+        entries: { profile: { show: false }, sticks: { show: false } },
+        notes: [{ id: "n1", text: "n = 12 shoulder", color: "#d946ef" }],
+      },
+    };
+    const { container } = render(<FigureSvg data={data} options={options} decimate={false} />);
+    const texts = Array.from(container.querySelectorAll("text")).map((t) => t.textContent);
+    expect(texts).toContain("n = 12 shoulder");
+    expect(texts).not.toContain("peaks");
+  });
+});

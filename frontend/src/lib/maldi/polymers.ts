@@ -541,6 +541,30 @@ export function fitLadder(
   return { endGroupMass, meanErrorDa, score, r2, members };
 }
 
+/**
+ * Members numbered 0,1,2… by ascending m/z — the fallback for a group of peaks
+ * that is NOT a ladder, so {@link fitLadder} has no repeat unit to number them
+ * against. A hand-made group ("these peaks are the impurity") is a real thing a
+ * user wants to name and colour, and n has to be *something* for the tables and
+ * the Excel block; the ordinal is the only honest answer.
+ *
+ * Peak ids that aren't in `peaks` are dropped, matching `fitLadder`.
+ */
+export function positionalMembers(
+  peaks: Peak[],
+  peakIds: Iterable<string>,
+): { peakId: string; n: number }[] {
+  const byId = new Map(peaks.map((p) => [p.id, p] as const));
+  const found: Peak[] = [];
+  for (const id of peakIds) {
+    const p = byId.get(id);
+    if (p) found.push(p);
+  }
+  return found
+    .sort((a, b) => peakMz(a) - peakMz(b))
+    .map((p, i) => ({ peakId: p.id, n: i }));
+}
+
 /** R² of an ordinary least-squares fit of ys on xs (1 if degenerate). Used to show
  *  how cleanly a ladder obeys neutral mass = endGroup + n·repeat. */
 function regressionR2(xs: number[], ys: number[]): number {
