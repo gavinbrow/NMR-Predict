@@ -137,6 +137,87 @@ export function resampleOntoGappy(grid: Float64Array, spectrum: SpectrumData): F
 }
 
 /**
+ * Resample onto `grid` keeping each bin's PEAK rather than an interpolated
+ * sample: for every grid point, the tallest source intensity whose m/z is nearer
+ * to it than to any neighbouring grid point. Grid points outside the spectrum's
+ * m/z range emit `NaN` (same gapping contract as {@link resampleOntoGappy}); a
+ * grid FINER than the source has bins no sample lands in, and those fall back to
+ * linear interpolation, so this is a drop-in replacement at any density.
+ *
+ * This exists because {@link resampleOntoGappy} is only correct when the grid is
+ * at least as fine as the data. The multi-trace plot resamples onto a
+ * 12 000-point grid spanning the whole m/z range — ~0.3 Da per point over a
+ * typical 200–4000 window — while MALDI peaks are a few hundredths of a Dalton
+ * wide. Interpolating there samples the FLANKS of most peaks and misses their
+ * apexes, which:
+ *   - draws the ladder at a random 50–100 % of each peak's true height,
+ *   - under-estimates the trace maximum, so `Normalize` divides by the wrong
+ *     number, and
+ *   - therefore scales the peak markers (which use the peak's TRUE intensity)
+ *     far above the trace, where the plot's clip rectangle discards them —
+ *     the "normalize hides my peak labels" bug.
+ * Taking the bin maximum keeps every apex, exactly as `downsample`'s min/max
+ * bucketing does for the single-trace path.
+ *
+ * Both `grid` and `spectrum.mz` must be ascending; the walk is O(grid + samples).
+ */
+export function envelopeOnto(grid: Float64Array, spectrum: SpectrumData): Float64Array {
+  const n = grid.length;
+  const out = new Float64Array(n);
+  if (n === 0) return out;
+  const { mz, intensity } = spectrum;
+  const m = mz.length;
+  if (m === 0) {
+    out.fill(NaN);
+    return out;
+  }
+
+  // Half a grid step of slack at each end so a sample just outside the first /
+  // last grid point still lands in its bin instead of being dropped.
+  const step = n > 1 ? (grid[n - 1] - grid[0]) / (n - 1) : 0;
+  const lo = grid[0] - step / 2;
+  const hi = grid[n - 1] + step / 2;
+
+  const filled = new Uint8Array(n);
+  let g = 0;
+  for (let j = 0; j < m; j += 1) {
+    const x = mz[j];
+    if (x < lo) continue;
+    if (x > hi) break;
+    const v = intensity[j];
+    if (!Number.isFinite(v)) continue;
+    while (g < n - 1 && grid[g + 1] <= x) g += 1;
+    const idx = g < n - 1 && grid[g + 1] - x < x - grid[g] ? g + 1 : g;
+    if (!filled[idx] || v > out[idx]) {
+      out[idx] = v;
+      filled[idx] = 1;
+    }
+  }
+
+  // Bins no sample landed in (grid finer than the data): interpolate inside the
+  // spectrum's range, gap outside it.
+  let k = 0;
+  for (let i = 0; i < n; i += 1) {
+    if (filled[i]) continue;
+    const x = grid[i];
+    if (x < mz[0] || x > mz[m - 1]) {
+      out[i] = NaN;
+      continue;
+    }
+    while (k < m - 1 && mz[k + 1] < x) k += 1;
+    if (k >= m - 1) {
+      out[i] = intensity[m - 1];
+      continue;
+    }
+    const x0 = mz[k];
+    const x1 = mz[k + 1];
+    const t = x1 === x0 ? 0 : (x - x0) / (x1 - x0);
+    out[i] = intensity[k] + t * (intensity[k + 1] - intensity[k]);
+  }
+  return out;
+}
+
+/**
  * Scale a trace so its max becomes 100. Returns the input unchanged when the
  * max is ≤ 0 (an all-zero or all-negative trace). Lifted out of `CompareView`
  * (and used by the overlay-capable `MaldiSpectrumPlot`) so both views share one
@@ -148,6 +229,20 @@ export function normalizeTrace(arr: Float64Array): Float64Array {
   if (max <= 0) return arr;
   const out = new Float64Array(arr.length);
   for (let i = 0; i < arr.length; i += 1) out[i] = (arr[i] / max) * 100;
+  return out;
+}
+
+/**
+ * Multiply a trace by a constant. Returns the input unchanged when `factor` is
+ * 1 (or not a usable number) so callers don't pay an allocation in the common
+ * case. This is the user's per-document intensity multiplier — applied AFTER
+ * any normalisation and BEFORE {@link applyOffset}, so "×2" means "draw this
+ * document twice as tall wherever it currently sits".
+ */
+export function applyScale(arr: Float64Array, factor: number): Float64Array {
+  if (!Number.isFinite(factor) || factor === 1) return arr;
+  const out = new Float64Array(arr.length);
+  for (let i = 0; i < arr.length; i += 1) out[i] = arr[i] * factor;
   return out;
 }
 

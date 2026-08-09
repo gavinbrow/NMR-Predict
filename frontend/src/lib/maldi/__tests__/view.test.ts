@@ -2,7 +2,9 @@ import { describe, expect, it } from "vitest";
 import type { SpectrumData } from "../types";
 import {
   applyOffset,
+  applyScale,
   downsample,
+  envelopeOnto,
   normalizeTrace,
   peakMarkerScale,
   resampleOnto,
@@ -170,6 +172,114 @@ describe("resampleOntoGappy on a union grid", () => {
     const bOut = resampleOntoGappy(grid, b);
     expect(Number.isNaN(bOut[0])).toBe(true);
     expect(Number.isNaN(bOut[bOut.length - 1])).toBe(false);
+  });
+});
+
+/** A Gaussian peak train: the shape MALDI data actually has — narrow peaks on a
+ *  fine grid — which is what makes interpolated resampling lose apexes. */
+function peakTrain(
+  centres: [mz: number, height: number][],
+  lo: number,
+  hi: number,
+  step: number,
+  sigma: number,
+): SpectrumData {
+  const n = Math.round((hi - lo) / step) + 1;
+  const mz = new Float64Array(n);
+  const intensity = new Float64Array(n);
+  for (let i = 0; i < n; i += 1) {
+    const x = lo + i * step;
+    let y = 0;
+    for (const [c, a] of centres) {
+      const d = x - c;
+      if (Math.abs(d) < 1) y += a * Math.exp(-(d * d) / (2 * sigma * sigma));
+    }
+    mz[i] = x;
+    intensity[i] = y;
+  }
+  return { mz, intensity };
+}
+
+describe("envelopeOnto", () => {
+  it("keeps every peak's apex where interpolation loses it", () => {
+    // Peaks 0.09 Da wide sitting between the points of a ~0.42 Da grid — the
+    // multi-document plot's regime, where linear interpolation samples flanks.
+    const centres: [number, number][] = [
+      [520.31, 1000],
+      [660.77, 800],
+      [812.13, 600],
+    ];
+    const s = peakTrain(centres, 500, 1000, 0.01, 0.04);
+    const grid = unionGrid([s], 500, 1000, 1200);
+
+    const env = envelopeOnto(grid, s);
+    const lerp = resampleOntoGappy(grid, s);
+    const near = (arr: Float64Array, target: number) => {
+      let m = 0;
+      for (let i = 0; i < grid.length; i += 1) {
+        if (Math.abs(grid[i] - target) < 1 && arr[i] > m) m = arr[i];
+      }
+      return m;
+    };
+
+    for (const [c, height] of centres) {
+      // The envelope lands on the apex; interpolation misses most of it.
+      expect(near(env, c)).toBeCloseTo(height, 5);
+      expect(near(lerp, c)).toBeLessThan(height * 0.5);
+    }
+  });
+
+  it("makes the trace maximum agree with the data's, so normalising is honest", () => {
+    const s = peakTrain([[701.37, 4000], [745.42, 2500]], 500, 1000, 0.01, 0.04);
+    const grid = unionGrid([s], 500, 1000, 1200);
+    const max = (arr: Float64Array) => arr.reduce((m, v) => (Number.isFinite(v) && v > m ? v : m), 0);
+
+    expect(max(envelopeOnto(grid, s))).toBeCloseTo(4000, 5);
+    // The bug this replaces: a normalize divisor far below the true maximum,
+    // which then scales the peak markers off the top of the plot.
+    expect(max(resampleOntoGappy(grid, s))).toBeLessThan(4000 * 0.6);
+  });
+
+  it("gaps grid points outside the spectrum's m/z range", () => {
+    const a = spectrum([100, 200, 300], [10, 20, 30]);
+    const b = spectrum([400, 500, 600], [40, 50, 60]);
+    const grid = unionGrid([a, b], undefined, undefined, 7);
+    const aOut = envelopeOnto(grid, a);
+    const bOut = envelopeOnto(grid, b);
+    expect(Number.isNaN(aOut[0])).toBe(false);
+    expect(Number.isNaN(aOut[aOut.length - 1])).toBe(true);
+    expect(Number.isNaN(bOut[0])).toBe(true);
+    expect(Number.isNaN(bOut[bOut.length - 1])).toBe(false);
+  });
+
+  it("interpolates bins no sample lands in (grid finer than the data)", () => {
+    const s = spectrum([100, 200], [0, 100]);
+    const grid = Float64Array.from([100, 125, 150, 175, 200]);
+    const out = envelopeOnto(grid, s);
+    expect(Array.from(out)).toEqual([0, 25, 50, 75, 100]);
+  });
+
+  it("returns all-NaN for an empty spectrum and an empty array for an empty grid", () => {
+    const out = envelopeOnto(Float64Array.from([1, 2, 3]), spectrum([], []));
+    expect(Array.from(out).every((v) => Number.isNaN(v))).toBe(true);
+    expect(envelopeOnto(new Float64Array(0), spectrum([1], [1])).length).toBe(0);
+  });
+});
+
+describe("applyScale", () => {
+  it("multiplies every sample", () => {
+    expect(Array.from(applyScale(Float64Array.from([1, 2, 3]), 2.5))).toEqual([2.5, 5, 7.5]);
+  });
+
+  it("returns the input untouched for a no-op or unusable factor", () => {
+    const arr = Float64Array.from([1, 2, 3]);
+    expect(applyScale(arr, 1)).toBe(arr);
+    expect(applyScale(arr, NaN)).toBe(arr);
+  });
+
+  it("composes with applyOffset the way the plot does (scale, then offset)", () => {
+    const arr = Float64Array.from([10, 20]);
+    expect(Array.from(applyOffset(applyScale(arr, 0.5), 100))).toEqual([105, 110]);
   });
 });
 

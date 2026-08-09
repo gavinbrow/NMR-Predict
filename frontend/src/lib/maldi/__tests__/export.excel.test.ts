@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import ExcelJS from "exceljs";
 import JSZip from "jszip";
-import { exportReportExcel, reportRepeatMasses, type ReportPayload } from "../export";
+import { exportReportExcel, reportableSeries, reportRepeatMasses, type ReportPayload } from "../export";
 import type { Peak, Series, Adduct } from "../types";
 
 /** Build a minimal but realistic payload with one 4-member series. */
@@ -254,5 +254,34 @@ describe("exportReportExcel — multiple repeat units", () => {
     );
     expect(froms).toHaveLength(2);
     expect(froms[1]).toBeGreaterThanOrEqual(tos[0]);
+  });
+});
+describe("reportableSeries", () => {
+  /** A bare series carrying only what the filter looks at. */
+  const s = (id: string, supersededBy?: string): Series => ({
+    id,
+    repeatMass: 44,
+    endGroupMass: 18,
+    adductId: "na",
+    members: [],
+    score: 1,
+    ...(supersededBy ? { supersededBy } : {}),
+  });
+
+  it("drops readings folded into another ladder, keeping the survivor", () => {
+    // The shape `assignSeries` + confirm leaves behind: one confirmed [M+Na]+
+    // ladder and its [M+H]+/[M+K]+ readings of the same peaks pointing at it.
+    const out = reportableSeries([s("na"), s("h", "na"), s("k", "na")]);
+    expect(out.map((x) => x.id)).toEqual(["na"]);
+  });
+
+  it("drops the parts absorbed by a combine, keeping the combined ladder", () => {
+    const out = reportableSeries([s("merged"), s("partA", "merged"), s("partB", "merged")]);
+    expect(out.map((x) => x.id)).toEqual(["merged"]);
+  });
+
+  it("leaves an untouched list alone", () => {
+    const all = [s("a"), s("b")];
+    expect(reportableSeries(all).map((x) => x.id)).toEqual(["a", "b"]);
   });
 });

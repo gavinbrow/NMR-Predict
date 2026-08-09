@@ -85,6 +85,7 @@ import {
   exportReportExcel,
   exportReportPdf,
   deserializeProject,
+  reportableSeries,
   type ReportPayload,
 } from "@/lib/maldi/export";
 import { interpretSpectrum, type Finding } from "@/lib/maldi/interpret";
@@ -153,11 +154,19 @@ export interface MaldiDocument {
    * trace must not undo an unrelated analysis edit). The colour doubles as the
    * legend swatch in the Documents panel; `offset` is the per-trace vertical
    * shift used by the overlay/stack view; `visible` gates whether the trace is
-   * drawn at all.
+   * drawn at all; `scale` is the user's manual intensity multiplier.
    */
   color: string;
   visible: boolean;
   offset: number;
+  /**
+   * Manual intensity multiplier for this document's trace, its peak markers and
+   * its share of the figure — applied after Normalize and before `offset`.
+   * Defaults to 1. Normalize takes every spectrum to its own 100 %, which is
+   * rarely the comparison you want: this is the knob that says "this file at
+   * half height" or "that trace ×3" without touching either document's data.
+   */
+  scale?: number;
 }
 
 /** Owning document for a pooled peak (Combine documents mode). */
@@ -230,7 +239,15 @@ const MALDI_FIGURE_SEED: FigureOptionSeed = {
   // (`pngExportSize`) and past 600 dpi at print size.
   pngScale: 10,
   showGrid: false,
-  peakLabels: { rotation: -45, maxLabels: 40, minGap: 6 },
+  // Transparent so the figure drops straight into a manuscript or a slide over
+  // whatever background it lands on, and bold axes because a spectrum is usually
+  // reproduced small — both stay one click away in the maker's controls.
+  background: "transparent",
+  axisBold: true,
+  // One decimal is the precision a MALDI figure is read at: 1 143.8 rather than
+  // 1 143.80. Two decimals doubles the width of forty diagonal labels for a digit
+  // nobody quotes off a figure.
+  peakLabels: { rotation: -45, maxLabels: 40, minGap: 6, decimals: 1 },
   // The shared default only turns the legend on when the data already has
   // several series — but MALDI's Figure tab is always mounted, so it is seeded
   // from an empty spectrum and would default off forever. A stick figure of two
@@ -466,7 +483,7 @@ const Maldi = () => {
       .map((d): StackSpectrum | null => {
         const spectrum = d.id === activeDocId ? processed ?? raw : d.state.processedSpectrum ?? d.state.rawSpectrum;
         return spectrum
-          ? { id: d.id, name: d.name, spectrum, color: d.color, visible: d.visible, offset: d.offset }
+          ? { id: d.id, name: d.name, spectrum, color: d.color, visible: d.visible, offset: d.offset, scale: d.scale }
           : null;
       })
       .filter((x): x is StackSpectrum => x !== null);
@@ -546,9 +563,31 @@ const Maldi = () => {
         color: d.color ?? "#0ea5e9",
         visible: d.visible !== false,
         offset: d.offset ?? 0,
+        scale: d.scale ?? 1,
       })),
     [docSpectra],
   );
+
+  // Peaks the plot marks: every VISIBLE document's, with the owning document id
+  // alongside so each marker is drawn against its own trace's transform. Before
+  // this the plot only ever annotated the active document, so a two-file session
+  // showed one file's ladders and silently dropped the other's. The active
+  // document's peaks come from the LIVE hook (newer than its snapshot); the
+  // others from their stored state, exactly as `docSpectra` does. With a single
+  // open document this is `peaks` and a one-entry map — unchanged behaviour.
+  const { plotPeaks, plotPeakDocIds } = useMemo(() => {
+    const out: Peak[] = [];
+    const owners = new Map<string, string>();
+    for (const d of documents) {
+      if (d.visible === false) continue;
+      const src = d.id === activeDocId ? peaks : d.state.peaks ?? [];
+      for (const p of src) {
+        out.push(p);
+        owners.set(p.id, d.id);
+      }
+    }
+    return { plotPeaks: out, plotPeakDocIds: owners };
+  }, [documents, activeDocId, peaks]);
   // Normalize: ON by default when more than one document is visible (a weak
   // spectrum is invisible under a strong one), OFF for a single document —
   // normalising a lone spectrum would change today's behaviour and the Peak
@@ -695,6 +734,7 @@ const Maldi = () => {
               name: d.name,
               color: d.color,
               offset: d.offset ?? 0,
+              scale: d.scale ?? 1,
               spectrum,
               peaks: isActive ? peaks : d.state.peaks ?? [],
               series: isActive ? series : d.state.series ?? [],
@@ -810,7 +850,9 @@ const Maldi = () => {
         peaks: visible,
         seriesGroups: ladders,
         color: e.color,
-        scale: normalize && max > 0 ? 100 / max : 1,
+        // Normalize's own factor times the user's manual multiplier, so the
+        // figure puts this file exactly where the plot does.
+        scale: (normalize && max > 0 ? 100 / max : 1) * e.scale,
         offset: e.offset,
       });
       // The picker keys by DOCUMENT id (it drives per-document actions), and
@@ -820,6 +862,7 @@ const Maldi = () => {
         name: e.name,
         color: e.color,
         peakCount: visible.length,
+        scale: e.scale,
         ladders: ladders.map((g) => ({ id: g.id, label: g.label, color: g.color })),
       });
     });
@@ -1921,6 +1964,19 @@ const Maldi = () => {
     [figPeakDocId, activeDocId, documents, handleUpdateDocument],
   );
 
+  // Set one file's intensity multiplier from the figure maker. It writes the
+  // DOCUMENT's `scale`, the same field the Documents panel edits, so the figure
+  // and the plot can't drift apart. Guarded to a finite, non-negative number: an
+  // empty input yields NaN, and a NaN multiplier would blank the trace.
+  const handleSetFigureFileScale = useCallback(
+    (fileId: string, scale: number) => {
+      handleUpdateDocument(fileId, {
+        scale: Number.isFinite(scale) && scale >= 0 ? scale : 1,
+      });
+    },
+    [handleUpdateDocument],
+  );
+
   // Stack toggle. ON: save every document's current offset, then assign
   // `index * step` walking the VISIBLE documents in document order (active
   // included, treated no differently). OFF: restore each saved offset,
@@ -1951,6 +2007,31 @@ const Maldi = () => {
     },
     [documents, handleUpdateDocument],
   );
+
+  // A per-document offset is expressed in whatever units the plot is currently
+  // drawing: raw counts with Normalize off, 0–100 % with it on. Toggling
+  // Normalize therefore has to re-express them. Without this, an offset entered
+  // in counts (2 000, say) survives into normalised space, where the data spans
+  // 0–100: the y-axis stretches to accommodate the offset, every trace collapses
+  // onto the baseline, and the axis stops describing the spectra — on the plot
+  // and, because the figure mirrors these offsets, in the figure maker too.
+  // Stacked offsets are re-derived by the effect below, so this converts only
+  // the manual ones.
+  const prevNormalizeRef = useRef(normalize);
+  useEffect(() => {
+    const was = prevNormalizeRef.current;
+    prevNormalizeRef.current = normalize;
+    if (was === normalize || stacked) return;
+    const max = maxIntensityAcrossVisibleTraces;
+    if (!(max > 0)) return;
+    const factor = normalize ? 100 / max : max / 100;
+    for (const d of documents) {
+      const offset = d.offset ?? 0;
+      if (!offset) continue;
+      handleUpdateDocument(d.id, { offset: offset * factor });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [normalize]);
 
   // While stacked, re-apply evenly-spaced offsets whenever the visible set
   // changes (show/hide, import, close) or Normalize toggles, so the stack stays
@@ -2207,24 +2288,30 @@ const Maldi = () => {
   const recordExport = (kind: string, label: string) =>
     setExportHistory((prev) => [...prev, { kind, label, at: Date.now() }]);
 
+  // Series the report describes — see `reportableSeries` for why the superseded
+  // ones are dropped.
+  const reportSeries = useMemo(() => reportableSeries(series), [series]);
+
   const buildReportPayload = useCallback((): ReportPayload => ({
     projectName,
     sourceName,
     pointCount: raw?.mz.length ?? 0,
     peaks,
-    series,
+    series: reportSeries,
     adducts: allAdducts,
     repeatMass,
     // Every repeat unit in play, so a two-polymer sample's report names both.
     repeatMasses: activeRepeatMasses,
-    molWeight: summarizeMolWeight(peaks, series, series.length ? "series" : "all", {}),
+    // Superseded readings share their peaks with the ladder that superseded
+    // them, so summarising over the raw list counts those peaks twice.
+    molWeight: summarizeMolWeight(peaks, reportSeries, reportSeries.length ? "series" : "all", {}),
     findings,
     selectedSeriesIds: highlightedSeriesIds ? [...highlightedSeriesIds] : [],
     // `primaryOnly` so a PDF/Excel report about the active document doesn't
     // silently embed the other open documents' traces now that overlays share
     // the canvas. (WP3 §9.)
     spectrumPng: plotHandleRef.current?.getPng({ primaryOnly: true }) ?? null,
-  }), [projectName, sourceName, raw, peaks, series, allAdducts, repeatMass, activeRepeatMasses, findings, highlightedSeriesIds]);
+  }), [projectName, sourceName, raw, peaks, reportSeries, allAdducts, repeatMass, activeRepeatMasses, findings, highlightedSeriesIds]);
 
 
   const handleExport = useCallback(
@@ -2538,7 +2625,8 @@ const Maldi = () => {
                         ref={plotHandleRef}
                         raw={raw}
                         processed={processed}
-                        peaks={peaks}
+                        peaks={plotPeaks}
+                        peakDocIds={plotPeakDocIds}
                         highlightedPeakIds={highlightedPeakIds}
                         highlightGroups={plotHighlightGroups}
                         reportSeriesColors={reportSeriesColors}
@@ -2708,6 +2796,7 @@ const Maldi = () => {
                         selectedSeriesIds={figSeriesIds}
                         onToggleSeries={handleToggleFigureSeries}
                         onToggleFileSeries={handleToggleFigureFileSeries}
+                        onSetFileScale={handleSetFigureFileScale}
                         hiddenPeakCount={figHiddenCount}
                         onRestorePeaks={handleFigureRestorePeaks}
                         onDeletePeak={handleFigureDeletePeak}

@@ -1,5 +1,6 @@
 import { FigureMaker } from "@/components/ir/figure/FigureMaker";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import type { FigureData, FigureOptions } from "@/lib/ir/figure";
 import type { Peak, SpectrumData } from "@/lib/maldi/types";
@@ -24,6 +25,9 @@ export interface MaldiFigureFileInfo {
   color: string;
   /** Peaks of this file the figure currently draws. */
   peakCount: number;
+  /** The document's manual intensity multiplier (1 = as measured). Shared with
+   *  the on-screen plot, so a file scaled here is scaled there too. */
+  scale: number;
   /** This file's confirmed ladders. */
   ladders: MaldiFigureLadderInfo[];
 }
@@ -81,6 +85,9 @@ interface MaldiFigurePanelProps {
   onToggleSeries: (id: string) => void;
   /** Tick (`true`) or untick (`false`) every ladder of one file at once. */
   onToggleFileSeries: (fileId: string, on: boolean) => void;
+  /** Set one file's intensity multiplier (the same value the Documents panel's
+   *  "×" edits — the figure mirrors the plot rather than keeping a second one). */
+  onSetFileScale: (fileId: string, scale: number) => void;
   /** How many peaks are currently hidden by figure-only deletes (in this view). */
   hiddenPeakCount: number;
   /** Restore every figure-only-deleted peak (never a one-way door). */
@@ -161,6 +168,7 @@ export function MaldiFigurePanel({
   selectedSeriesIds,
   onToggleSeries,
   onToggleFileSeries,
+  onSetFileScale,
   hiddenPeakCount,
   onRestorePeaks,
   onDeletePeak,
@@ -251,45 +259,80 @@ export function MaldiFigurePanel({
           the plot's highlight (WP6b). Across files it sections by file, so a
           two-polymer sample in one file and a reference in another stay legible;
           the colours and wording match what the figure's Series controls show. */}
-      {allLadders.length > 0 && (
+      {/* One block per file: its intensity multiplier, and its assigned ladders.
+          The multiplier is the same `MaldiDocument.scale` the Documents panel
+          edits — Normalize takes every spectrum to its own 100 %, which is
+          rarely the comparison you actually want, so this is where a file gets
+          brought up or pushed down against the others. Editing it here moves the
+          plot too, deliberately: the figure is a picture of what is on screen,
+          and a second, figure-only scale would let the two disagree. */}
+      {files.length > 0 && (
         <div className="rounded-2xl border border-border/60 bg-card px-4 py-3 shadow-card">
           <div className="mb-2 flex items-center justify-between gap-2">
-            <span className="text-xs font-semibold text-foreground">Series</span>
-            <span className="text-[11px] text-muted-foreground">
-              {selectedSeriesIds.size === 0
-                ? "All peaks — tick ladders to show only those"
-                : `${selectedSeriesIds.size} of ${allLadders.length} shown`}
+            <span className="text-xs font-semibold text-foreground">
+              {crossFile ? "Files & series" : "File & series"}
             </span>
+            {allLadders.length > 0 && (
+              <span className="text-[11px] text-muted-foreground">
+                {selectedSeriesIds.size === 0
+                  ? "All peaks — tick ladders to show only those"
+                  : `${selectedSeriesIds.size} of ${allLadders.length} shown`}
+              </span>
+            )}
           </div>
           <div className="grid gap-2.5">
-            {files
-              .filter((f) => f.ladders.length > 0)
-              .map((f) => {
-                const on = f.ladders.filter((l) => selectedSeriesIds.has(l.id)).length;
-                return (
-                  <div key={f.id} className="grid gap-1.5">
-                    {crossFile && (
-                      <div className="flex items-center gap-1.5">
-                        <span
-                          className="h-2.5 w-2.5 shrink-0 rounded-full border border-border/60"
-                          style={{ backgroundColor: f.color }}
-                        />
-                        <span className="truncate text-[11px] font-semibold text-foreground">
-                          {f.name}
-                        </span>
-                        <span className="text-[11px] text-muted-foreground">
-                          {f.peakCount} peak{f.peakCount === 1 ? "" : "s"}
-                        </span>
-                        <button
-                          type="button"
-                          onClick={() => onToggleFileSeries(f.id, on < f.ladders.length)}
-                          className="text-[11px] underline underline-offset-2 text-muted-foreground hover:text-foreground"
-                        >
-                          {on < f.ladders.length ? "All" : "None"}
-                        </button>
-                      </div>
+            {files.map((f) => {
+              const on = f.ladders.filter((l) => selectedSeriesIds.has(l.id)).length;
+              return (
+                <div key={f.id} className="grid gap-1.5">
+                  <div className="flex items-center gap-1.5">
+                    <span
+                      className="h-2.5 w-2.5 shrink-0 rounded-full border border-border/60"
+                      style={{ backgroundColor: f.color }}
+                    />
+                    <span className="truncate text-[11px] font-semibold text-foreground">
+                      {f.name}
+                    </span>
+                    <span className="shrink-0 text-[11px] text-muted-foreground">
+                      {f.peakCount} peak{f.peakCount === 1 ? "" : "s"}
+                    </span>
+                    <label
+                      className="flex shrink-0 items-center gap-1 text-[11px] text-muted-foreground"
+                      title="Intensity multiplier for this file — 1 draws it as measured. Also applies on the spectrum plot."
+                    >
+                      <span aria-hidden>×</span>
+                      <span className="sr-only">{`Intensity multiplier for ${f.name}`}</span>
+                      <Input
+                        type="number"
+                        step={0.1}
+                        min={0}
+                        value={f.scale}
+                        onChange={(e) => onSetFileScale(f.id, Number(e.target.value))}
+                        className="h-6 w-16 px-1 text-[11px]"
+                      />
+                    </label>
+                    {f.scale !== 1 && (
+                      <button
+                        type="button"
+                        onClick={() => onSetFileScale(f.id, 1)}
+                        className="shrink-0 text-[11px] underline underline-offset-2 text-muted-foreground hover:text-foreground"
+                        title="Draw this file at its measured intensity"
+                      >
+                        Reset
+                      </button>
                     )}
-                    <div className={`flex flex-wrap gap-x-4 gap-y-1.5${crossFile ? " pl-4" : ""}`}>
+                    {f.ladders.length > 0 && (
+                      <button
+                        type="button"
+                        onClick={() => onToggleFileSeries(f.id, on < f.ladders.length)}
+                        className="ml-auto shrink-0 text-[11px] underline underline-offset-2 text-muted-foreground hover:text-foreground"
+                      >
+                        {on < f.ladders.length ? "All" : "None"}
+                      </button>
+                    )}
+                  </div>
+                  {f.ladders.length > 0 && (
+                    <div className="flex flex-wrap gap-x-4 gap-y-1.5 pl-4">
                       {f.ladders.map((l) => (
                         <label
                           key={l.id}
@@ -309,9 +352,10 @@ export function MaldiFigurePanel({
                         </label>
                       ))}
                     </div>
-                  </div>
-                );
-              })}
+                  )}
+                </div>
+              );
+            })}
           </div>
         </div>
       )}

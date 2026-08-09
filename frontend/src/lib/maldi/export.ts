@@ -195,6 +195,25 @@ export function exportProjectJson(record: ProjectRecord): void {
 
 // --- Report (PDF + Excel) ----------------------------------------------------
 
+/**
+ * The series a report should describe: the ones the rest of the app treats as
+ * real ladders.
+ *
+ * A series carrying `supersededBy` has been folded into another one — either an
+ * [M+H]+/[M+K]+ reading of peaks now claimed by a confirmed sibling, or a ladder
+ * absorbed by "Combine series". Every other view already hides them
+ * (`SeriesPanel`, `SeriesTable`, the plot's highlight groups, `unexplainedPeaks`),
+ * because listing a ladder and the readings it superseded describes the same
+ * peaks two or three times over. Reports used to take the raw list, so a sample
+ * the user had already combined came out of the report split back into its parts
+ * — and any per-series summary over that list double-counted their shared peaks.
+ *
+ * Callers should pass the result as {@link ReportPayload.series}.
+ */
+export function reportableSeries(series: Series[]): Series[] {
+  return series.filter((s) => !s.supersededBy);
+}
+
 export interface ReportPayload {
   projectName: string;
   sourceName: string;

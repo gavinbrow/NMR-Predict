@@ -40,6 +40,9 @@ export interface StackSpectrum {
   visible?: boolean;
   /** Vertical offset (stacked-style) applied to the resampled trace. */
   offset?: number;
+  /** The user's manual intensity multiplier for this document, applied after any
+   *  normalisation and before {@link offset}. Defaults to 1. */
+  scale?: number;
 }
 
 /** One processing step, stored in order so processed data is always re-derivable. */

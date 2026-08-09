@@ -14,7 +14,8 @@ import type { MaldiDocument } from "@/pages/Maldi";
  *  - checkbox — whether the trace is drawn on the plot (`visible`);
  *  - name — bold when this is the active document; clicking it makes it active;
  *  - × — closes the document;
- *  - vertical offset number (compact, revealed on hover);
+ *  - intensity multiplier and vertical offset numbers (compact, revealed on
+ *    hover; the multiplier stays visible once it is not 1);
  *  - "reference" marker — pinned by the user, used as the minuend of the
  *    active − reference difference trace.
  *
@@ -57,7 +58,8 @@ interface DocumentsPanelProps {
   onSwitch: (id: string) => void;
   /** Close a document (remove it from the session). */
   onClose: (id: string) => void;
-  /** Patch a document's session-only trace styling (colour / visibility / offset). */
+  /** Patch a document's session-only trace styling (colour / visibility / offset
+   *  / intensity multiplier). */
   onUpdate: (id: string, patch: Partial<MaldiDocument>) => void;
   /** Import dropped spectrum files (handled by the host's multi-file importer). */
   onImportFiles: (files: FileList) => void;
@@ -280,6 +282,27 @@ export function DocumentsPanel({
                 ref
               </button>
 
+              {/* Intensity multiplier — compact number revealed on hover, like
+                  the offset beside it. Normalize scales every trace to its own
+                  100 %, which flattens the very comparison a multi-file view is
+                  for; this is the per-document knob that says "this one at half
+                  height" without touching the data. It applies to the trace, to
+                  that document's peak markers, and to the figure. Stays visible
+                  once set away from 1 so a scaled document is never a mystery. */}
+              <Input
+                type="number"
+                step={0.1}
+                min={0}
+                value={d.scale ?? 1}
+                onChange={(e) => onUpdate(d.id, { scale: Number(e.target.value) })}
+                title="Intensity multiplier (1 = as measured)"
+                aria-label={`Intensity multiplier for ${d.name}`}
+                className={[
+                  "h-6 w-12 shrink-0 px-1 text-[11px] transition-smooth group-hover:opacity-100 focus:opacity-100",
+                  (d.scale ?? 1) === 1 ? "opacity-0" : "opacity-100 font-semibold",
+                ].join(" ")}
+              />
+
               {/* Vertical offset — compact number revealed on hover. The active
                   trace's offset is editable too; the plot applies it to the
                   active trace just like any other (see `MaldiSpectrumPlot`). */}
@@ -288,6 +311,7 @@ export function DocumentsPanel({
                 value={d.offset ?? 0}
                 onChange={(e) => onUpdate(d.id, { offset: Number(e.target.value) || 0 })}
                 title="Vertical offset"
+                aria-label={`Vertical offset for ${d.name}`}
                 className="h-6 w-12 shrink-0 px-1 text-[11px] opacity-0 transition-smooth group-hover:opacity-100 focus:opacity-100"
               />
 

@@ -347,6 +347,10 @@ export interface FigureOptionSeed {
   pngScale?: number;
   /** Initial gridline visibility, applied to BOTH axes. */
   showGrid?: boolean;
+  /** Initial figure background. Defaults to "white". */
+  background?: "white" | "transparent";
+  /** Initial bold weight for the axis + tick labels. Defaults to false. */
+  axisBold?: boolean;
   legend?: Partial<LegendOptions>;
   peakLabels?: Partial<PeakLabelOptions>;
 }
@@ -373,14 +377,14 @@ export function defaultFigureOptions(data: FigureData, seed: FigureOptionSeed = 
     width: seed.width ?? 900,
     height: seed.height ?? 560,
     pngScale: seed.pngScale ?? 2,
-    background: "white",
+    background: seed.background ?? "white",
     reversedX: data.reversedX ?? false,
     stickColor: null,
     frameShow: true,
     frameColor: "#334155",
     frameWidth: 1,
     axisColor: "#0f172a",
-    axisBold: false,
+    axisBold: seed.axisBold ?? false,
     x: defaultAxisOptions(data.xLabel, showGrid),
     y: defaultAxisOptions(data.yLabel, showGrid),
     series: data.series.map(defaultSeriesStyle),

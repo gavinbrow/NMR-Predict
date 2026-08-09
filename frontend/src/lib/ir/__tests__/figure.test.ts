@@ -386,6 +386,20 @@ describe("default & reconcile options", () => {
     expect(opts.reversedX).toBe(false);
   });
 
+  it("takes background and axis weight from the host seed, white/regular without one", () => {
+    const bare = defaultFigureOptions(makeData(["a"]));
+    expect(bare.background).toBe("white");
+    expect(bare.axisBold).toBe(false);
+    // The MALDI seed's choices: drop the figure onto any page, and stay legible
+    // at the size a spectrum is reproduced.
+    const seeded = defaultFigureOptions(makeData(["a"]), {
+      background: "transparent",
+      axisBold: true,
+    });
+    expect(seeded.background).toBe("transparent");
+    expect(seeded.axisBold).toBe(true);
+  });
+
   it("legend defaults off for a single series and above 12 series", () => {
     expect(defaultFigureOptions(makeData(["a"])).legend.show).toBe(false);
     const many = makeData(Array.from({ length: 13 }, (_, i) => `s${i}`));

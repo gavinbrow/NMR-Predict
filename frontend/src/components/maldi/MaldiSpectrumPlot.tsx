@@ -5,7 +5,7 @@ import type { AlignedData, Options } from "uplot";
 import "uplot/dist/uPlot.min.css";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
-import { applyOffset, downsample, normalizeTrace, peakMarkerScale, resampleOntoGappy, sliceRange, unionGrid } from "@/lib/maldi/view";
+import { applyOffset, applyScale, downsample, envelopeOnto, normalizeTrace, peakMarkerScale, sliceRange, unionGrid } from "@/lib/maldi/view";
 import type { Peak, SpectrumData } from "@/lib/maldi/types";
 
 /** Imperative handle so the page can grab the rendered canvas for reports. */
@@ -51,12 +51,45 @@ export interface PlotTrace {
   visible: boolean;
   /** Vertical offset (stacked-style) applied to the (optionally normalised) trace. */
   offset: number;
+  /**
+   * The user's own intensity multiplier for this document (Documents panel "×"),
+   * applied AFTER normalisation and BEFORE {@link offset}. Defaults to 1. Lets a
+   * weak spectrum be brought up beside a strong one — or a dominant one pushed
+   * down — without touching either document's data. Peak markers of this
+   * document are scaled by it too, so sticks and labels stay on their trace.
+   */
+  scale?: number;
+}
+
+/** The y-transform that takes one document's RAW peak intensities to plotted
+ *  units: `intensity * scale + offset`. One per visible document, so a figure
+ *  with several files puts every document's markers on its own trace. */
+interface TraceTransform {
+  scale: number;
+  offset: number;
 }
 
 interface MaldiSpectrumPlotProps {
   raw: SpectrumData | null;
   processed: SpectrumData | null;
+  /**
+   * Every peak the plot should mark. With several documents open this is the
+   * union of the VISIBLE documents' peaks (see {@link peakDocIds}), so a
+   * multi-file session annotates every file rather than only whichever one
+   * happens to be active.
+   */
   peaks: Peak[];
+  /**
+   * Peak id → owning document id, for the peaks above. Each peak is drawn with
+   * ITS OWN document's y-transform, which is what keeps a marker on its trace
+   * when the documents are normalised to different maxima, scaled by hand or
+   * stacked. Peaks of a hidden document are skipped, and peaks of a document
+   * other than the active one are drawn dimmed (matching their trace) and are
+   * not click-targets for the peak-editing tools. Omit it entirely (single
+   * document, tests) and every peak uses the active document's transform, which
+   * is exactly the previous behaviour.
+   */
+  peakDocIds?: Map<string, string>;
   /** Peak ids to emphasize (e.g. a clicked series or repeat-unit ladder). */
   highlightedPeakIds?: Set<string>;
   /** Color-coded peak groups (the distinct ladders of one repeat unit). Each
@@ -183,6 +216,16 @@ function apexInRange(
 
 /** Above this many points we render a min/max-bucketed view and re-slice on zoom. */
 const MAX_RENDER_POINTS = 12000;
+/**
+ * Headroom above the tallest drawn sample when pinning the y-axis. A peak marker
+ * is an arrowhead plus its m/z label drawn ~22 px ABOVE the apex, and the draw
+ * hook clips to the plot box — so the old 5 % left the tallest peak in any view
+ * (there is always one, and normalising guarantees it sits at 100) with its own
+ * label chopped off the top. 12 % of a ~265 px plot is ~32 px, enough for the
+ * label to land inside. Difference mode keeps its own symmetric padding: its
+ * markers are read off the rendered array, not stacked above an apex.
+ */
+const Y_HEADROOM = 1.12;
 /** Bright colour used for highlighted (selected-series) peaks. */
 const HIGHLIGHT = "#d946ef";
 
@@ -220,6 +263,7 @@ export const MaldiSpectrumPlot = forwardRef<MaldiSpectrumPlotHandle, MaldiSpectr
       raw,
       processed,
       peaks,
+      peakDocIds,
       highlightedPeakIds,
       highlightGroups,
       reportSeriesColors,
@@ -290,6 +334,7 @@ export const MaldiSpectrumPlot = forwardRef<MaldiSpectrumPlotHandle, MaldiSpectr
 
     // Mutable refs the uPlot draw hook reads, so we can redraw without recreating.
     const peaksRef = useRef(peaks);
+    const peakDocIdsRef = useRef(peakDocIds);
     const showLabelsRef = useRef(showLabels);
     const highlightRef = useRef(highlightedPeakIds);
     const groupColorsRef = useRef(groupColors);
@@ -315,19 +360,28 @@ export const MaldiSpectrumPlot = forwardRef<MaldiSpectrumPlotHandle, MaldiSpectr
     const activeTraceIdRef = useRef<string | null>(null);
     const normalizeRef = useRef<boolean | undefined>(undefined);
     const differenceWithRef = useRef<SpectrumData | null>(null);
-    // The transform that took the active trace's RAW counts to plotted units
-    // (FP3): `scale = peakMarkerScale(normalize, activeWindowMax)` and the
-    // per-trace offset. `difference` flags the signed-delta case, where the
-    // peak marker's height is read from the rendered array instead.
-    const activeTransformRef = useRef<{ scale: number; offset: number; difference: boolean }>({
-      scale: 1,
-      offset: 0,
-      difference: false,
-    });
+    // The transforms that take RAW counts to plotted units (FP3), one per
+    // VISIBLE document plus the active document's as the fallback for any peak
+    // with no known owner. Each is `scale = peakMarkerScale(normalize,
+    // thatTraceWindowMax) * userScale` and that trace's offset — per-document,
+    // because two normalised traces divide by different maxima and a hand-scaled
+    // or stacked one moves independently, so one shared transform would put
+    // every marker but the active document's in the wrong place. `difference`
+    // flags the signed-delta case for the ACTIVE trace, where the marker height
+    // is read from the rendered array instead.
+    const transformsRef = useRef<{
+      byDoc: Map<string, TraceTransform>;
+      active: TraceTransform & { difference: boolean };
+    }>({ byDoc: new Map(), active: { scale: 1, offset: 0, difference: false } });
+    // Set while a `primaryOnly` capture is in flight, so the grab that hides the
+    // other documents' traces hides their peak markers too — a report about the
+    // active document must not carry another document's annotations.
+    const primaryOnlyRef = useRef(false);
     logYRef.current = logY;
     regionModeRef.current = regionMode;
     onToggleSeriesMemberRef.current = onToggleSeriesMember;
     peaksRef.current = peaks;
+    peakDocIdsRef.current = peakDocIds;
     showLabelsRef.current = showLabels;
     highlightRef.current = highlightedPeakIds;
     groupColorsRef.current = groupColors;
@@ -343,6 +397,18 @@ export const MaldiSpectrumPlot = forwardRef<MaldiSpectrumPlotHandle, MaldiSpectr
     activeTraceIdRef.current = activeTraceId;
     normalizeRef.current = normalize;
     differenceWithRef.current = differenceWith ?? null;
+
+    // The peak-editing tools (add/delete/edit-ladder) act on the ACTIVE document
+    // only — its peak list is what the Peak table, the series editor and the undo
+    // stack all describe, and `onAddPeak`/`onRemovePeak` write to it. Other
+    // documents' markers are drawn (dimmed) but are never click targets, so a
+    // stray click can't silently delete a peak from a file you aren't editing.
+    // Reads through refs, so effects holding an older closure still see the
+    // current owner map.
+    const isActiveDocPeak = (peak: Peak): boolean => {
+      const docId = peakDocIdsRef.current?.get(peak.id);
+      return docId == null || docId === activeTraceIdRef.current;
+    };
 
     // Zoom-history machinery (persists across redraws; reset on a new spectrum).
     const historyRef = useRef<{ min: number; max: number }[]>([]);
@@ -373,8 +439,9 @@ export const MaldiSpectrumPlot = forwardRef<MaldiSpectrumPlotHandle, MaldiSpectr
     //   the series list length changed and the uPlot instance must be rebuilt;
     //   a colour/visibility/offset/active change leaves it stable.
     // `traceDataKey` — covers everything `setData` would need to reflect
-    //   (offset + normalize + difference, plus the id key for safety). Used by
-    //   the in-place styling effect to know whether to swap the data array.
+    //   (offset + per-document scale + normalize + difference, plus the id key
+    //   for safety). Used by the in-place styling effect to know whether to swap
+    //   the data array.
     // Both are derived from props via `useMemo` so the same string identity is
     // returned across renders that don't change the inputs.
     const traceIdsKey = useMemo(
@@ -387,7 +454,7 @@ export const MaldiSpectrumPlot = forwardRef<MaldiSpectrumPlotHandle, MaldiSpectr
       norm: boolean | undefined,
       diff: boolean,
     ): string =>
-      `${list.map((t) => `${t.id}:${t.offset ?? 0}`).join("|")}#${norm ? 1 : 0}#${diff ? 1 : 0}`;
+      `${list.map((t) => `${t.id}:${t.offset ?? 0}:${t.scale ?? 1}`).join("|")}#${norm ? 1 : 0}#${diff ? 1 : 0}`;
     const traceDataKeyRef = useRef<string>("");
 
     // Capture the spectrum as a PNG showing the FULL m/z range (every peak), not
@@ -411,6 +478,7 @@ export const MaldiSpectrumPlot = forwardRef<MaldiSpectrumPlotHandle, MaldiSpectr
       // visibility — so a PNG or PDF report about the active document doesn't
       // silently embed the other open documents' traces.
       const savedShow: boolean[] = [];
+      primaryOnlyRef.current = primaryOnly;
       if (primaryOnly) {
         const activeId = activeTraceIdRef.current;
         for (let i = 0; i < tracesRef.current.length; i += 1) {
@@ -443,6 +511,7 @@ export const MaldiSpectrumPlot = forwardRef<MaldiSpectrumPlotHandle, MaldiSpectr
         }
       } finally {
         // Restore trace visibility even if `apply` threw.
+        primaryOnlyRef.current = false;
         if (primaryOnly) {
           for (let i = 0; i < tracesRef.current.length; i += 1) {
             const seriesIdx = i + 1;
@@ -526,21 +595,45 @@ export const MaldiSpectrumPlot = forwardRef<MaldiSpectrumPlotHandle, MaldiSpectr
         (t) => t.visible !== false && effectiveSpectrum(t).mz.length > 0,
       );
 
-      let activeWindowMax = 0;
-      const recordActiveMax = (arr: Float64Array) => {
-        if (activeId == null) return;
+      // Per-document window maxima, recorded from the RENDERED (pre-normalise)
+      // samples of each trace — the same numbers `normalizeTrace` will divide
+      // by, so a marker sits exactly on its own apex.
+      const windowMaxByDoc = new Map<string, number>();
+      const recordMax = (id: string, arr: Float64Array) => {
+        let m = windowMaxByDoc.get(id) ?? 0;
         for (let i = 0; i < arr.length; i += 1) {
           const v = arr[i];
-          if (Number.isFinite(v) && v > activeWindowMax) activeWindowMax = v;
+          if (Number.isFinite(v) && v > m) m = v;
         }
+        windowMaxByDoc.set(id, m);
+      };
+      const userScaleOf = (t: PlotTrace): number =>
+        Number.isFinite(t.scale) && t.scale != null && t.scale > 0 ? t.scale : 1;
+      // Build `transformsRef` from the recorded maxima. Called once at the end of
+      // every path so the peak markers can never be drawn against a stale
+      // transform (a zoom, a normalize toggle and a rescale all land here).
+      const publishTransforms = () => {
+        const byDoc = new Map<string, TraceTransform>();
+        for (const t of traces) {
+          byDoc.set(t.id, {
+            scale: peakMarkerScale(!!norm, windowMaxByDoc.get(t.id) ?? 0) * userScaleOf(t),
+            offset: t.offset ?? 0,
+          });
+        }
+        const activeTrace = activeId != null ? traces.find((t) => t.id === activeId) : undefined;
+        transformsRef.current = {
+          byDoc,
+          active: {
+            ...(activeId != null
+              ? byDoc.get(activeId) ?? { scale: peakMarkerScale(!!norm, 0), offset: activeOffset }
+              : { scale: peakMarkerScale(!!norm, 0), offset: activeOffset }),
+            difference: ref != null && activeTrace != null,
+          },
+        };
       };
 
       if (visibleTraces.length === 0) {
-        activeTransformRef.current = {
-          scale: peakMarkerScale(!!norm, 0),
-          offset: activeOffset,
-          difference: ref != null,
-        };
+        publishTransforms();
         const cols: (number[] | Float64Array)[] = [new Float64Array(0)];
         for (let i = 0; i < traces.length; i += 1) cols.push(new Float64Array(0));
         return cols as unknown as AlignedData;
@@ -575,10 +668,10 @@ export const MaldiSpectrumPlot = forwardRef<MaldiSpectrumPlotHandle, MaldiSpectr
             continue;
           }
           let y: number[] | Float64Array = view.intensity as unknown as number[];
+          recordMax(t0.id, view.intensity as Float64Array);
           if (t0.id === activeId && ref && ref.mz.length > 0) {
             const activeY = norm ? normalizeTrace(view.intensity) : (view.intensity as Float64Array);
-            recordActiveMax(activeY);
-            const refSampled = resampleOntoGappy(view.mz, ref);
+            const refSampled = envelopeOnto(view.mz, ref);
             const refY = norm ? normalizeTrace(refSampled) : refSampled;
             const diff = new Float64Array(view.mz.length);
             for (let i = 0; i < diff.length; i += 1) {
@@ -586,11 +679,10 @@ export const MaldiSpectrumPlot = forwardRef<MaldiSpectrumPlotHandle, MaldiSpectr
               const r = refY[i];
               diff[i] = Number.isFinite(a) && Number.isFinite(r) ? a - r : NaN;
             }
-            y = applyOffset(diff, t0.offset ?? 0);
+            y = applyOffset(applyScale(diff, userScaleOf(t0)), t0.offset ?? 0);
           } else {
-            recordActiveMax(view.intensity as Float64Array);
             y = norm ? normalizeTrace(view.intensity) : (view.intensity as Float64Array);
-            y = applyOffset(y, t0.offset ?? 0);
+            y = applyOffset(applyScale(y, userScaleOf(t0)), t0.offset ?? 0);
           }
           cols.push(y);
         }
@@ -613,11 +705,14 @@ export const MaldiSpectrumPlot = forwardRef<MaldiSpectrumPlotHandle, MaldiSpectr
             cols.push(new Float64Array(grid.length).fill(NaN));
             continue;
           }
-          const sampled = resampleOntoGappy(grid, spec);
+          // Envelope (bin-maximum), never linear interpolation: this grid is far
+          // coarser than the data, and interpolating it flattens the peaks the
+          // whole view exists to show — see `envelopeOnto`.
+          const sampled = envelopeOnto(grid, spec);
+          recordMax(t0.id, sampled);
           if (t0.id === activeId && ref && ref.mz.length > 0) {
             const activeY = norm ? normalizeTrace(sampled) : sampled;
-            recordActiveMax(activeY);
-            const refSampled = resampleOntoGappy(grid, ref);
+            const refSampled = envelopeOnto(grid, ref);
             const refY = norm ? normalizeTrace(refSampled) : refSampled;
             const diff = new Float64Array(grid.length);
             for (let i = 0; i < diff.length; i += 1) {
@@ -625,28 +720,28 @@ export const MaldiSpectrumPlot = forwardRef<MaldiSpectrumPlotHandle, MaldiSpectr
               const r = refY[i];
               diff[i] = Number.isFinite(a) && Number.isFinite(r) ? a - r : NaN;
             }
-            cols.push(applyOffset(diff, t0.offset ?? 0));
+            cols.push(applyOffset(applyScale(diff, userScaleOf(t0)), t0.offset ?? 0));
           } else {
-            if (t0.id === activeId) recordActiveMax(sampled);
             const normed = norm ? normalizeTrace(sampled) : sampled;
-            cols.push(applyOffset(normed, t0.offset ?? 0));
+            cols.push(applyOffset(applyScale(normed, userScaleOf(t0)), t0.offset ?? 0));
           }
         }
       }
 
-      // If the active trace was hidden (so its max was never recorded), still
-      // compute its window max by resampling onto the grid so the peak-marker
-      // transform is correct.
-      if (activeId != null && activeSpec && activeWindowMax === 0 && grid.length > 0) {
-        const sampled = resampleOntoGappy(grid, activeSpec);
-        recordActiveMax(sampled);
+      // A trace that was hidden (or is not the single visible one) never had its
+      // max recorded above, so fill in any document that still has none by
+      // sampling it onto the grid. Its peaks are not drawn while it is hidden,
+      // but its transform must be right the moment it comes back.
+      if (grid.length > 0) {
+        for (const t of traces) {
+          if (windowMaxByDoc.has(t.id)) continue;
+          const spec = effectiveSpectrum(t);
+          if (spec.mz.length === 0) continue;
+          recordMax(t.id, envelopeOnto(grid, spec));
+        }
       }
 
-      activeTransformRef.current = {
-        scale: peakMarkerScale(!!norm, activeWindowMax),
-        offset: activeOffset,
-        difference: ref != null,
-      };
+      publishTransforms();
       return cols as unknown as AlignedData;
     };
 
@@ -743,6 +838,14 @@ export const MaldiSpectrumPlot = forwardRef<MaldiSpectrumPlotHandle, MaldiSpectr
         const baseline = top + height;
         const activeAi = tracesRef.current.findIndex((t) => t.id === activeTraceIdRef.current);
         const activeIdx = activeAi >= 0 ? activeAi + 1 : 1;
+        const owners = peakDocIdsRef.current;
+        const transforms = transformsRef.current;
+        const activeDocId = activeTraceIdRef.current;
+        // Documents whose trace is hidden annotate nothing — a marker with no
+        // trace under it is noise. Captured once per draw.
+        const hiddenDocs = new Set(
+          tracesRef.current.filter((t) => t.visible === false).map((t) => t.id),
+        );
         ctx.save();
         ctx.beginPath();
         ctx.rect(left, top, width, height);
@@ -751,6 +854,12 @@ export const MaldiSpectrumPlot = forwardRef<MaldiSpectrumPlotHandle, MaldiSpectr
         ctx.textAlign = "center";
 
         for (const peak of list) {
+          // Which document this peak belongs to decides both whether it is drawn
+          // at all and what y-transform puts it on its own trace.
+          const docId = owners?.get(peak.id);
+          const ownDoc = docId == null || docId === activeDocId;
+          if (docId != null && hiddenDocs.has(docId)) continue;
+          if (!ownDoc && primaryOnlyRef.current) continue;
           const groupColor = groupColors.get(peak.id);
           const highlighted = groupColor != null || (highlights?.has(peak.id) ?? false);
           if (isolating && !highlighted) continue;
@@ -767,7 +876,9 @@ export const MaldiSpectrumPlot = forwardRef<MaldiSpectrumPlotHandle, MaldiSpectr
           // `active − reference` (no scalar transform is correct) — look the
           // height up from the rendered array at the peak's nearest x index and
           // skip the marker when that sample is NaN.
-          const tr = activeTransformRef.current;
+          const tr = ownDoc
+            ? transforms.active
+            : { ...(transforms.byDoc.get(docId!) ?? transforms.active), difference: false };
           let yVal: number;
           if (tr.difference) {
             const idx = u.valToIdx(mz);
@@ -789,6 +900,9 @@ export const MaldiSpectrumPlot = forwardRef<MaldiSpectrumPlotHandle, MaldiSpectr
             yVal = Math.max(plotted, u.scales.y.min ?? 0);
           }
           const y = u.valToPos(yVal, "y", true);
+          // Another document's markers are dimmed exactly like its trace, so the
+          // active document's annotations stay the ones that read first.
+          ctx.globalAlpha = ownDoc ? 1 : 0.55;
 
           if (highlighted) {
             // Bright bold stem from baseline to apex + larger marker + bold label.
@@ -826,6 +940,7 @@ export const MaldiSpectrumPlot = forwardRef<MaldiSpectrumPlotHandle, MaldiSpectr
               ctx.fillText(mz.toFixed(2), x, y - 20);
             }
           }
+          ctx.globalAlpha = 1;
         }
 
         // Δm measurement markers.
@@ -893,8 +1008,9 @@ export const MaldiSpectrumPlot = forwardRef<MaldiSpectrumPlotHandle, MaldiSpectr
             u.setScale("y", { min: -span * 1.05, max: span * 1.05 });
           } else {
             const ymax = windowMax(view);
-            yRangeRef.current = [0, ymax > 0 ? ymax * 1.05 : 1];
-            u.setScale("y", { min: 0, max: ymax > 0 ? ymax * 1.05 : 1 });
+            const top = ymax > 0 ? ymax * Y_HEADROOM : 1;
+            yRangeRef.current = [0, top];
+            u.setScale("y", { min: 0, max: top });
           }
         }
       };
@@ -1217,8 +1333,9 @@ export const MaldiSpectrumPlot = forwardRef<MaldiSpectrumPlotHandle, MaldiSpectr
                 plot.setScale("y", { min: -span * 1.05, max: span * 1.05 });
               } else {
                 const ymax = windowMax(view);
-                yRangeRef.current = [0, ymax > 0 ? ymax * 1.05 : 1];
-                plot.setScale("y", { min: 0, max: ymax > 0 ? ymax * 1.05 : 1 });
+                const top = ymax > 0 ? ymax * Y_HEADROOM : 1;
+                yRangeRef.current = [0, top];
+                plot.setScale("y", { min: 0, max: top });
               }
             }
           }
@@ -1231,7 +1348,7 @@ export const MaldiSpectrumPlot = forwardRef<MaldiSpectrumPlotHandle, MaldiSpectr
     // Redraw markers when peaks / labels / highlights / measurement / overlay / isolate change.
     useEffect(() => {
       plotRef.current?.redraw();
-    }, [peaks, showLabels, highlightedPeakIds, groupColors, measure, overlaySticks, isolate]);
+    }, [peaks, peakDocIds, showLabels, highlightedPeakIds, groupColors, measure, overlaySticks, isolate]);
 
     // Click-to-measure Δm: collect two m/z clicks, then show their difference.
     useEffect(() => {
@@ -1277,6 +1394,7 @@ export const MaldiSpectrumPlot = forwardRef<MaldiSpectrumPlotHandle, MaldiSpectr
         let nearestDist = 12;
         for (const peak of peaksRef.current) {
           if (peak.accepted === false && !peak.flag) continue;
+          if (!isActiveDocPeak(peak)) continue;
           const d = Math.abs(plot.valToPos(peak.centroid ?? peak.mz, "x") - px);
           if (d <= nearestDist) {
             nearestDist = d;
@@ -1351,6 +1469,7 @@ export const MaldiSpectrumPlot = forwardRef<MaldiSpectrumPlotHandle, MaldiSpectr
             let nearestDist = 8;
             for (const peak of peaksRef.current) {
               if (peak.accepted === false && !peak.flag) continue;
+              if (!isActiveDocPeak(peak)) continue;
               const d = Math.abs(plot.valToPos(peak.centroid ?? peak.mz, "x") - sx);
               if (d <= nearestDist) {
                 nearestDist = d;
@@ -1368,6 +1487,7 @@ export const MaldiSpectrumPlot = forwardRef<MaldiSpectrumPlotHandle, MaldiSpectr
         const hiMz = plot.posToVal(bPx, "x");
         if (mode === "delete") {
           for (const peak of peaksRef.current) {
+            if (!isActiveDocPeak(peak)) continue;
             const m = peak.centroid ?? peak.mz;
             if (m >= loMz && m <= hiMz) onRemovePeakRef.current?.(peak.id);
           }
