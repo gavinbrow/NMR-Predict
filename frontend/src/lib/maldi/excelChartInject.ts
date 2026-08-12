@@ -1,28 +1,37 @@
 /**
- * Inject native Excel scatter charts (with linear trendline + equation + R²
- * label) into an ExcelJS-produced xlsx buffer.
+ * Inject native Excel scatter charts into an ExcelJS-produced xlsx buffer.
+ *
+ * The chart formatting matches a reference workbook (Book1.xlsx) exactly:
+ * no chart title, no legend, no chart border, no plot-area border, Arial 12pt
+ * bold default font, black (`schemeClr tx1`) axis lines at 28575 EMU, black
+ * dotted series line with black circle markers, invisible trendline that shows
+ * only the equation (no R²), X axis titled "Repeat Units (n)", Y axis titled
+ * "m/z", Y gridlines present but transparent, per-series min/max scaling.
  *
  * ExcelJS 4.4.0 has no chart API, so we post-process the generated zip:
  * for every series block we add a chartN.xml part, anchor it on the target
  * worksheet via a new drawing, and wire up the content-types / relationships
- * that OOXML requires. Excel and LibreOffice both render the result and keep
- * the trendline / equation live against the cells.
- *
- * Each chart specification names the sheet, the n-range (x) and the
- * neutral-mass range (y). We emit a scatter plot with markers only, plus a
- * linear trendline (`c:spPr`/`c:trendline`) with `c:trendlineLbl` showing the
- * equation and R², and a chart title.
+ * that OOXML requires.
  */
 
 export interface ChartSpec {
   /** Worksheet name the chart lives on (and the ranges reference). */
   sheetName: string;
-  /** Chart title. */
-  title: string;
+  /** Series name shown in the c:tx element (not visible — no legend — but
+   *  required by the schema and useful for accessibility / object inspection). */
+  seriesName: string;
   /** X-axis (n) range, e.g. "A27:A38". */
   xRange: string;
-  /** Y-axis (neutral mass) range, e.g. "D27:D38". */
+  /** Y-axis (raw m/z) range, e.g. "B27:B38". */
   yRange: string;
+  /** X-axis minimum (min n value for this series). */
+  xMin: number;
+  /** X-axis maximum (max n value for this series). */
+  xMax: number;
+  /** Y-axis minimum (min raw m/z - 500). */
+  yMin: number;
+  /** Y-axis maximum (max raw m/z + 500). */
+  yMax: number;
   /** Zero-based column + row of the top-left cell the chart anchors at. */
   anchorCol: number;
   anchorRow: number;
@@ -53,17 +62,30 @@ function absoluteRange(range: string): string {
   return range.replace(/(\$?)([A-Z]+)(\$?)(\d+)/g, (_m, _d1, col, _d2, row) => `$${col}$${row}`);
 }
 
-/** A chart title / axis title block (CT_Title: tx?, layout?, overlay?, …). */
-function titleXml(text: string, sizeHundredths: number, bold: boolean): string {
-  return `<c:title><c:tx><c:rich><a:bodyPr/><a:lstStyle/><a:p><a:pPr><a:defRPr sz="${sizeHundredths}" b="${bold ? 1 : 0}"/></a:pPr><a:r><a:rPr lang="en-US" sz="${sizeHundredths}" b="${bold ? 1 : 0}"/><a:t>${xmlEscape(text)}</a:t></a:r></a:p></c:rich></c:tx><c:overlay val="0"/></c:title>`;
+/**
+ * An axis title block matching the reference: `<a:rPr lang="en-US"/>` with no
+ * explicit size/bold/color so it inherits the chart-space default (Arial 12pt
+ * bold).  The `c:overlay val="0"` keeps the title inside the plot area.
+ */
+function axisTitleXml(text: string): string {
+  return (
+    `<c:title><c:tx><c:rich><a:bodyPr/><a:lstStyle/>` +
+    `<a:p><a:pPr><a:defRPr/></a:pPr><a:r><a:rPr lang="en-US"/><a:t>${xmlEscape(text)}</a:t></a:r></a:p>` +
+    `</c:rich></c:tx><c:overlay val="0"/></c:title>`
+  );
 }
 
 /**
- * One value axis. The child order below is the CT_ValAx sequence from the OOXML
- * schema — axId, scaling, delete, axPos, majorGridlines?, title?, numFmt?,
- * majorTickMark?, minorTickMark?, tickLblPos?, …, crossAx, crosses?, crossBetween?.
- * Excel validates the sequence strictly: getting `numFmt` and `title` the wrong way
- * round is enough for it to discard the whole drawing on open.
+ * One value axis formatted to match the reference chart exactly:
+ * - 28575 EMU (2.25pt) black (`schemeClr tx1`) axis line
+ * - majorTickMark="out", minorTickMark="none", tickLblPos="nextTo"
+ * - explicit min/max scaling
+ * - optional transparent gridlines (Y axis) or no gridlines (X axis)
+ *
+ * The child order follows CT_ValAx from the OOXML schema:
+ * axId, scaling, delete, axPos, majorGridlines?, title?, numFmt?,
+ * majorTickMark?, minorTickMark?, tickLblPos?, spPr?, crossAx,
+ * crosses?, crossBetween?, majorUnit?
  */
 function valAxXml(
   axId: number,
@@ -72,51 +94,56 @@ function valAxXml(
   title: string,
   numFmt: string,
   sourceLinked: boolean,
-  gridlines: boolean,
+  min: number,
+  max: number,
+  gridlines: "none" | "transparent",
 ): string {
   return (
-    `<c:valAx><c:axId val="${axId}"/><c:scaling><c:orientation val="minMax"/></c:scaling>` +
+    `<c:valAx><c:axId val="${axId}"/>` +
+    `<c:scaling><c:orientation val="minMax"/><c:max val="${max}"/><c:min val="${min}"/></c:scaling>` +
     `<c:delete val="0"/><c:axPos val="${pos}"/>` +
-    (gridlines ? `<c:majorGridlines/>` : "") +
-    titleXml(title, 1000, false) +
+    (gridlines === "transparent"
+      ? `<c:majorGridlines><c:spPr><a:ln><a:noFill/></a:ln></c:spPr></c:majorGridlines>`
+      : "") +
+    axisTitleXml(title) +
     `<c:numFmt formatCode="${xmlEscape(numFmt)}" sourceLinked="${sourceLinked ? 1 : 0}"/>` +
     `<c:majorTickMark val="out"/><c:minorTickMark val="none"/><c:tickLblPos val="nextTo"/>` +
+    `<c:spPr><a:ln w="28575"><a:solidFill><a:schemeClr val="tx1"/></a:solidFill></a:ln></c:spPr>` +
     `<c:crossAx val="${crossAxId}"/><c:crosses val="autoZero"/><c:crossBetween val="midCat"/>` +
     `</c:valAx>`
   );
 }
 
 /**
- * Build the chartN.xml body for one scatter chart with a linear trendline that
- * displays the equation and R² on the chart.
+ * Build the chartN.xml body for one scatter chart, matching the reference
+ * workbook (Book1.xlsx) exactly.
  *
- * Every element here is in schema order and every part is closed. That sounds
- * obvious, but this file is hand-written OOXML with no validator in the loop: a
- * single unclosed `c:spPr` or an out-of-sequence child makes Excel drop the
- * drawing on open ("Removed Part: /xl/drawings/drawingN.xml") rather than report
- * an error, so the charts silently vanish. `excelChartInject.test.ts` asserts the
- * well-formedness and the orderings that previously broke.
+ * Key formatting decisions (all from the reference):
+ * - No chart title (`autoTitleDeleted val="1"`)
+ * - No legend
+ * - Chart space: no border (`spPr` with `noFill` line), Arial 12pt bold default font
+ * - Plot area: no border (`spPr` with `noFill` line)
+ * - Series: black dotted line (`schemeClr tx1`, `prstDash sysDot`), black circle markers
+ * - Trendline: invisible line (`noFill`), equation shown (`dispEq=1`), R² hidden (`dispRSqr=0`)
+ * - X axis: "Repeat Units (n)", General format, 28575 EMU black line, no gridlines
+ * - Y axis: "m/z", integer format, 28575 EMU black line, transparent gridlines
  */
 function buildChartXml(spec: ChartSpec, chartIndex: number): string {
-  // Sheet names are single-quoted in formulas; an apostrophe inside is doubled.
   const sheetRef = `'${spec.sheetName.replace(/'/g, "''")}'!`;
   const xRef = xmlEscape(`${sheetRef}${absoluteRange(spec.xRange)}`);
   const yRef = xmlEscape(`${sheetRef}${absoluteRange(spec.yRange)}`);
-  // Distinct axis ids per chart part keep Excel from associating axes across the
-  // charts it loads from one drawing.
   const xAxId = 100000000 + chartIndex * 2;
   const yAxId = 100000001 + chartIndex * 2;
 
-  // One scatter series: markers only (the series line is switched off so the
-  // dashed red trendline is the only line on the plot), plus a linear trendline
-  // whose label carries the equation and R².
+  // One scatter series: black dotted line, black circle markers, invisible
+  // linear trendline that shows only the equation (no R²).
   const ser =
     `<c:ser><c:idx val="0"/><c:order val="0"/>` +
-    `<c:tx><c:v>Neutral mass vs n</c:v></c:tx>` +
-    `<c:spPr><a:ln w="19050"><a:noFill/></a:ln></c:spPr>` +
-    `<c:marker><c:symbol val="circle"/><c:size val="5"/><c:spPr><a:solidFill><a:srgbClr val="1F77B4"/></a:solidFill><a:ln w="9525"><a:solidFill><a:srgbClr val="1F77B4"/></a:solidFill></a:ln></c:spPr></c:marker>` +
-    `<c:trendline><c:spPr><a:ln w="19050"><a:solidFill><a:srgbClr val="D62728"/></a:solidFill><a:prstDash val="dash"/></a:ln></c:spPr>` +
-    `<c:trendlineType val="linear"/><c:dispRSqr val="1"/><c:dispEq val="1"/>` +
+    `<c:tx><c:v>${xmlEscape(spec.seriesName)}</c:v></c:tx>` +
+    `<c:spPr><a:ln><a:solidFill><a:schemeClr val="tx1"/></a:solidFill><a:prstDash val="sysDot"/></a:ln></c:spPr>` +
+    `<c:marker><c:spPr><a:solidFill><a:schemeClr val="tx1"/></a:solidFill><a:ln><a:solidFill><a:schemeClr val="tx1"/></a:solidFill></a:ln></c:spPr></c:marker>` +
+    `<c:trendline><c:spPr><a:ln><a:noFill/></a:ln></c:spPr>` +
+    `<c:trendlineType val="linear"/><c:dispRSqr val="0"/><c:dispEq val="1"/>` +
     `<c:trendlineLbl><c:layout/><c:numFmt formatCode="General" sourceLinked="0"/></c:trendlineLbl></c:trendline>` +
     `<c:xVal><c:numRef><c:f>${xRef}</c:f></c:numRef></c:xVal>` +
     `<c:yVal><c:numRef><c:f>${yRef}</c:f></c:numRef></c:yVal>` +
@@ -125,19 +152,24 @@ function buildChartXml(spec: ChartSpec, chartIndex: number): string {
   return (
     `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n` +
     `<c:chartSpace xmlns:c="${NS.c}" xmlns:a="${NS.a}" xmlns:r="${NS.r}">` +
-    `<c:lang val="en-US"/><c:roundedCorners val="0"/>` +
+    `<c:date1904 val="0"/><c:lang val="en-US"/><c:roundedCorners val="0"/>` +
+    `<c:style val="2"/>` +
     `<c:chart>` +
-    titleXml(spec.title, 1200, true) +
-    `<c:autoTitleDeleted val="0"/>` +
+    `<c:autoTitleDeleted val="1"/>` +
     `<c:plotArea><c:layout/>` +
     `<c:scatterChart><c:scatterStyle val="lineMarker"/><c:varyColors val="0"/>` +
     ser +
+    `<c:dLbls><c:showLegendKey val="0"/><c:showVal val="0"/><c:showCatName val="0"/><c:showSerName val="0"/><c:showPercent val="0"/><c:showBubbleSize val="0"/></c:dLbls>` +
     `<c:axId val="${xAxId}"/><c:axId val="${yAxId}"/></c:scatterChart>` +
-    valAxXml(xAxId, yAxId, "b", "n (oligomer number)", "General", true, false) +
-    valAxXml(yAxId, xAxId, "l", "Neutral mass (Da)", "0.0000", false, true) +
+    valAxXml(xAxId, yAxId, "b", "Repeat Units (n)", "General", true, spec.xMin, spec.xMax, "none") +
+    valAxXml(yAxId, xAxId, "l", "m/z", "0", false, spec.yMin, spec.yMax, "transparent") +
+    `<c:spPr><a:ln><a:noFill/></a:ln></c:spPr>` +
     `</c:plotArea>` +
-    `<c:plotVisOnly val="1"/><c:dispBlanksAs val="gap"/>` +
-    `</c:chart></c:chartSpace>`
+    `<c:plotVisOnly val="1"/><c:dispBlanksAs val="gap"/><c:showDLblsOverMax val="1"/>` +
+    `</c:chart>` +
+    `<c:spPr><a:ln><a:noFill/></a:ln></c:spPr>` +
+    `<c:txPr><a:bodyPr/><a:lstStyle/><a:p><a:pPr><a:defRPr sz="1200" b="1"><a:latin typeface="Arial" panose="020B0604020202020204" pitchFamily="34" charset="0"/><a:cs typeface="Arial" panose="020B0604020202020204" pitchFamily="34" charset="0"/></a:defRPr></a:pPr><a:endParaRPr lang="en-US"/></a:p></c:txPr>` +
+    `</c:chartSpace>`
   );
 }
 
@@ -410,7 +442,7 @@ export async function injectCharts(
   }
   zip.file("[Content_Types].xml", ctXml);
 
-  // Also ensure the charts subdirectory has a rels part pointing to nothing
+  // Also ensure the charts sub-directory has a rels part pointing to nothing
   // extra (not strictly required). Excel is happy without chartN.xml.rels
   // when the chart has no embedded images.
   const out = await zip.generateAsync({

@@ -50,9 +50,13 @@ describe("excelChartInject", () => {
     const specs: ChartSpec[] = [
       {
         sheetName: "Series",
-        title: "Series 1 — [M+Na]+",
+        seriesName: "Series 1 — [M+Na]+",
         xRange: "A6:A9",
-        yRange: "D6:D9",
+        yRange: "B6:B9",
+        xMin: 3,
+        xMax: 6,
+        yMin: 600,
+        yMax: 2000,
         anchorCol: 8,
         anchorRow: 0,
       },
@@ -94,12 +98,29 @@ describe("excelChartInject", () => {
     expect(chart).toContain("c:trendline");
     expect(chart).toContain("c:trendlineType val=\"linear\"");
     expect(chart).toContain("c:dispEq val=\"1\"");
-    expect(chart).toContain("c:dispRSqr val=\"1\"");
+    // Reference chart format: no R² displayed.
+    expect(chart).toContain("c:dispRSqr val=\"0\"");
     // Ranges are written absolute, the form Excel itself emits.
+    // yRange now references column B (raw m/z), not D (neutral mass).
     expect(chart).toContain("'Series'!$A$6:$A$9");
-    expect(chart).toContain("'Series'!$D$6:$D$9");
+    expect(chart).toContain("'Series'!$B$6:$B$9");
     expect(chart).toContain("<c:valAx");
     expect(chart).not.toContain("<c:catAx");
+    // Reference chart formatting: no chart title, no legend, schemeClr tx1 axes.
+    expect(chart).toContain("c:autoTitleDeleted val=\"1\"");
+    expect(chart).not.toContain("<c:legend");
+    expect(chart).toContain("a:schemeClr val=\"tx1\"");
+    // Axis titles match reference.
+    expect(chart).toContain("Repeat Units (n)");
+    expect(chart).toContain(">m/z<");
+    // Min/max scaling.
+    expect(chart).toContain("<c:min val=\"3\"");
+    expect(chart).toContain("<c:max val=\"6\"");
+    expect(chart).toContain("<c:min val=\"600\"");
+    expect(chart).toContain("<c:max val=\"2000\"");
+    // Arial 12pt bold default font.
+    expect(chart).toContain("sz=\"1200\" b=\"1\"");
+    expect(chart).toContain("typeface=\"Arial\"");
 
     // Round-trip: ExcelJS must be able to re-open the doctored workbook
     // without choking on the injected chart parts.
@@ -113,8 +134,8 @@ describe("excelChartInject", () => {
   // /xl/drawings/drawing2.xml" and render no charts at all.
   it("emits well-formed chart and drawing parts", async () => {
     const after = await injectCharts(await buildSampleWorkbook(), [
-      { sheetName: "Series", title: "S1 — [M+Na]+", xRange: "A6:A9", yRange: "D6:D9", anchorCol: 8, anchorRow: 0 },
-      { sheetName: "Series", title: "S2 — [M+K]+", xRange: "A6:A9", yRange: "D6:D9", anchorCol: 8, anchorRow: 20 },
+      { sheetName: "Series", seriesName: "S1 — [M+Na]+", xRange: "A6:A9", yRange: "B6:B9", xMin: 3, xMax: 6, yMin: 600, yMax: 2000, anchorCol: 8, anchorRow: 0 },
+      { sheetName: "Series", seriesName: "S2 — [M+K]+", xRange: "A6:A9", yRange: "B6:B9", xMin: 3, xMax: 6, yMin: 600, yMax: 2000, anchorCol: 8, anchorRow: 20 },
     ]);
     const zip = await JSZip.loadAsync(after);
     for (const name of Object.keys(zip.files)) {
@@ -136,7 +157,7 @@ describe("excelChartInject", () => {
   // out-of-order children make it discard the whole drawing on open.
   it("orders chart children per the OOXML schema sequences", async () => {
     const after = await injectCharts(await buildSampleWorkbook(), [
-      { sheetName: "Series", title: "S1", xRange: "A6:A9", yRange: "D6:D9", anchorCol: 8, anchorRow: 0 },
+      { sheetName: "Series", seriesName: "S1", xRange: "A6:A9", yRange: "B6:B9", xMin: 3, xMax: 6, yMin: 600, yMax: 2000, anchorCol: 8, anchorRow: 0 },
     ]);
     const zip = await JSZip.loadAsync(after);
     const doc = parseXml(await zip.file("xl/charts/chart1.xml")!.async("string"), "chart1.xml");

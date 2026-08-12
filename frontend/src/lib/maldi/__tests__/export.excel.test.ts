@@ -236,16 +236,27 @@ describe("exportReportExcel — multiple repeat units", () => {
     expect(found).toContain("44.4000");
   });
 
-  it("embeds one chart per exported series, each with its repeat in the title", async () => {
+  it("embeds one chart per exported series", async () => {
     const buf = await buildWorkbook(buildTwoPolymerPayload());
     const zip = await JSZip.loadAsync(buf);
     const charts = Object.keys(zip.files).filter((n) => /^xl\/charts\/chart\d+\.xml$/.test(n));
     expect(charts).toHaveLength(2);
-    const titles = await Promise.all(
-      charts.map(async (n) => (await zip.file(n)!.async("string")).match(/<a:t>([^<]*)<\/a:t>/)![1]),
+    // The reference chart format has no chart title — the series name lives
+    // in c:tx (not visible on the chart since there's no legend, but it's
+    // in the XML for accessibility / object inspection).
+    const names = await Promise.all(
+      charts.map(async (n) => (await zip.file(n)!.async("string")).match(/<c:tx><c:v>([^<]*)<\/c:v><\/c:tx>/)![1]),
     );
-    expect(titles.some((t) => t.includes("22.20 Da"))).toBe(true);
-    expect(titles.some((t) => t.includes("44.40 Da"))).toBe(true);
+    expect(names).toHaveLength(2);
+    // Each chart references column B (raw m/z), not column D (neutral mass).
+    for (const n of charts) {
+      const xml = await zip.file(n)!.async("string");
+      expect(xml).toContain("$B$");
+      expect(xml).not.toContain("$D$");
+      // No chart title in the reference format.
+      expect(xml).toContain("c:autoTitleDeleted val=\"1\"");
+      expect(xml).not.toContain("<c:legend");
+    }
   });
 
   it("anchors the charts so they do not overlap each other", async () => {

@@ -844,6 +844,7 @@ export async function exportReportExcel(payload: ReportPayload): Promise<void> {
       const predictedCol = "E";
       const residualCol = "F";
       const nRange = `${nCol}${firstDataRow}:${nCol}${lastDataRow}`;
+      const rawRange = `${rawCol}${firstDataRow}:${rawCol}${lastDataRow}`;
       const neutralRange = `${neutralCol}${firstDataRow}:${neutralCol}${lastDataRow}`;
       // Absolute refs so dragging/down-filling the data rows never moves the
       // slope/intercept cells (the value lives in C/E, NOT the label cells B/D).
@@ -925,17 +926,25 @@ export async function exportReportExcel(payload: ReportPayload): Promise<void> {
       // or lower when the previous chart still occupies that band.
       const anchorRow = Math.max(headerRow - 6, nextFreeChartRow);
       nextFreeChartRow = anchorRow + CHART_ROWS + 1;
+      // X axis: min/max n value for this series.
+      // Y axis: min raw m/z − 500, max raw m/z + 500.
+      const nValues = points.map((p) => p.n);
+      const rawMzValues = points.map((p) => p.rawMz);
+      const xMin = Math.min(...nValues);
+      const xMax = Math.max(...nValues);
+      const yMin = Math.min(...rawMzValues) - 500;
+      const yMax = Math.max(...rawMzValues) + 500;
       chartSpecs.push({
         sheetName: "Series",
-        // The repeat unit AND the end group are in the title: a sample can carry
-        // several ladders of one repeat unit (two polymers, or one whose ladder
-        // the assignment split), and only the end group tells those apart. With no
-        // adduct there is no end group to name, so the repeat unit stands alone.
-        title: adduct
-          ? `Series ${seriesIndex + 1}${s.label ? ` (${s.label})` : ""} — ${adduct.label} · ${s.repeatMass.toFixed(2)} Da · EG ${s.endGroupMass.toFixed(2)}`
-          : `Series ${seriesIndex + 1}${s.label ? ` (${s.label})` : ""} — ${ADDUCT_UNASSIGNED} · ${s.repeatMass.toFixed(2)} Da`,
+        seriesName: `Series ${seriesIndex + 1}${s.label ? ` (${s.label})` : ""}`,
         xRange: nRange,
-        yRange: neutralRange,
+        // Chart plots raw m/z (column B), not neutral mass — matches the
+        // reference workbook where y values are observed m/z.
+        yRange: rawRange,
+        xMin,
+        xMax,
+        yMin,
+        yMax,
         anchorCol: 8,
         anchorRow,
       });
