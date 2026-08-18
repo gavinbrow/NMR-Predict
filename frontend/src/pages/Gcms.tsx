@@ -642,6 +642,21 @@ const Gcms = () => {
     [bgTraces, docVisibleByRunId, traces],
   );
 
+  /**
+   * Whether there is a chromatogram worth drawing at all.
+   *
+   * Direct-infusion and single-scan acquisitions (a Waters `.raw` shot into the
+   * source, an imported single spectrum) have a time axis one point wide: a
+   * chromatogram of one dot, a zero-width RT scale, and nothing to integrate.
+   * Rather than draw that degenerate panel and offer controls that can only
+   * fail, the workspace gives the whole plot card to the spectrum and gates the
+   * chromatogram-only affordances off this flag.
+   */
+  const hasChromatogram = useMemo(
+    () => visibleChromTraces.some((trace) => trace.rtMin.length >= 2),
+    [visibleChromTraces],
+  );
+
   // "Lock spectra to cursor RT" (pre-existing, cross-DOCUMENT feature — every
   // visible OTHER document's own scan at the live RT) is orthogonal to the
   // single-run slot model above, so it's bolted onto the "live" panel as
@@ -921,6 +936,8 @@ const Gcms = () => {
   // itself is presentational; this state is what survives the round-trip.
   const [predictSmiles, setPredictSmiles] = useState("");
   const [figSubject, setFigSubject] = useState<GcmsFigureSubject>("chromatogram");
+  /** Import setting: centroid vendor continuum data (Waters .raw) on load. */
+  const [centroidOnImport, setCentroidOnImport] = useState(true);
   // Empty set = "include everything currently available" (every visible
   // trace / every resolved spectrum slot); ticking one or more narrows to
   // just those ids. Mirrors MALDI's Figure "Series" picker (`figSeriesIds`).
@@ -1158,6 +1175,7 @@ const Gcms = () => {
         const { runs, errors: loadErrors } = await loadGcmsFiles(
           files,
           (msg, frac) => setProgress({ msg, frac }),
+          { centroid: centroidOnImport },
         );
         setProgress(null);
         setErrors(loadErrors);
@@ -1234,11 +1252,17 @@ const Gcms = () => {
           }
           setDocuments((prev) => [...prev, ...newDocs]);
           setTraces((prev) => [...prev, ...newTraces]);
-          // Make the last opened run active.
-          const lastDoc = newDocs[newDocs.length - 1];
-          if (lastDoc) {
-            setActiveDocId(lastDoc.id);
-            setActiveTraceId(`${lastDoc.id}-tic`);
+          // Activate the FIRST run of the batch, which is also the first row of
+          // the Documents list. One import can now yield several runs — a
+          // Waters `.raw` folder returns one per acquisition function — and
+          // there the primary measurement is function 1 while the last function
+          // is typically the lockspray REFERENCE channel. Landing on the
+          // reference would show the user a lock-mass trace instead of their
+          // sample.
+          const firstDoc = newDocs[0];
+          if (firstDoc) {
+            setActiveDocId(firstDoc.id);
+            setActiveTraceId(`${firstDoc.id}-tic`);
             // Per-document view state is reset by the activeDocId effect
             // (fresh cache entry = defaults).
           }
@@ -1262,7 +1286,7 @@ const Gcms = () => {
         setProgress(null);
       }
     },
-    [documents],
+    [documents, centroidOnImport],
   );
 
   // --- Global drag-and-drop import ------------------------------------------
@@ -1864,6 +1888,14 @@ const Gcms = () => {
   // --- Chromatographic peak detection ---------------------------------------
   const handleDetectPeaks = useCallback(async () => {
     if (!activeTrace) return;
+    // Peak detection needs a time axis. Saying so beats silently reporting
+    // "0 peaks" on a run that never had a chromatogram to integrate.
+    if (!hasChromatogram) {
+      toast.error(
+        "This run is a single scan — there is no chromatogram to integrate. Use the spectrum peak table instead.",
+      );
+      return;
+    }
     setBusy(true);
     try {
       const peaks = await runDetectChromPeaks(activeTrace, peakParams, workerStatus);
@@ -1895,6 +1927,7 @@ const Gcms = () => {
   }, [
     activeTrace,
     activeTraceRun,
+    hasChromatogram,
     peakParams,
     workerStatus,
     undo,
@@ -2115,6 +2148,12 @@ const Gcms = () => {
         return;
       }
       const baseName = activeDoc?.name ?? "gcms";
+      // Every chromatogram export would write an empty or one-row file for a
+      // single-scan run; refuse with a reason rather than hand over a stub.
+      if (!hasChromatogram && (kind === "chromCsv" || kind === "chromPng" || kind === "chromPeakCsv")) {
+        toast.error("This run is a single scan — there is no chromatogram to export.");
+        return;
+      }
       try {
         switch (kind) {
           case "chromCsv": {
@@ -2202,12 +2241,13 @@ const Gcms = () => {
       }
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [activeRun, activeDoc, visibleChromTraces, displayedChromPeaks, displayedSpecPeaks, displayedSpectrumPeakRows, liveSpectrum, exportScale],
+    [activeRun, activeDoc, hasChromatogram, visibleChromTraces, displayedChromPeaks, displayedSpecPeaks, displayedSpectrumPeakRows, liveSpectrum, exportScale],
   );
 
-  /** Build the two-panel report spec from the current chromatogram + spectrum. */
-  function buildReportPanels(): { top: ReportPanelSpec; bottom: ReportPanelSpec } {
-    const top: ReportPanelSpec = {
+  /** Build the report spec. `top` is null when the run has no chromatogram, and
+   *  the spectrum then gets the whole report canvas. */
+  function buildReportPanels(): { top: ReportPanelSpec | null; bottom: ReportPanelSpec } {
+    const top: ReportPanelSpec | null = !hasChromatogram ? null : {
       title: "Chromatogram",
       xLabel: "Retention time (min)",
       traces: visibleChromTraces.map((t) => ({
@@ -2418,6 +2458,8 @@ const Gcms = () => {
             busy={busy}
             progress={progress}
             errors={errors}
+            centroid={centroidOnImport}
+            onCentroidChange={setCentroidOnImport}
           />
         ) : (
           <div className="grid gap-4 lg:grid-cols-[380px_1fr]">
@@ -2429,6 +2471,8 @@ const Gcms = () => {
                   busy={busy}
                   progress={progress}
                   errors={errors}
+                  centroid={centroidOnImport}
+                  onCentroidChange={setCentroidOnImport}
                 />
               </SidebarCard>
               <SidebarCard id="documents" title="Documents" open={isCardOpen("documents")} onOpenChange={(o) => setCardOpenById("documents", o)}>
@@ -2534,7 +2578,17 @@ const Gcms = () => {
               >
                 <Card className="h-full border-border/70 shadow-card" onKeyDown={handlePlotKeyDown} tabIndex={0}>
                   <CardContent className="h-full p-4">
-                    <ResizablePanelGroup direction="vertical" className="h-full min-h-[832px]">
+                    {/* A single-scan / infusion run has no chromatogram to
+                        draw, so the spectrum takes the whole card instead of
+                        sharing it with a one-point plot. `key` forces a fresh
+                        panel group when the split appears or disappears —
+                        ResizablePanelGroup caches its layout by child count. */}
+                    <ResizablePanelGroup
+                      key={hasChromatogram ? "with-chrom" : "spectrum-only"}
+                      direction="vertical"
+                      className="h-full min-h-[832px]"
+                    >
+                      {hasChromatogram && (
                       <ResizablePanel defaultSize={38} minSize={20}>
                         <div className="h-full min-h-0">
                           <ChromatogramPanel
@@ -2562,8 +2616,9 @@ const Gcms = () => {
                           />
                         </div>
                       </ResizablePanel>
-                      <ResizableHandle withHandle />
-                      <ResizablePanel defaultSize={62} minSize={20}>
+                      )}
+                      {hasChromatogram && <ResizableHandle withHandle />}
+                      <ResizablePanel defaultSize={hasChromatogram ? 62 : 100} minSize={20}>
                         <div className="h-full min-h-0">
                           <SpectrumStack
                             panels={spectrumPanels}
@@ -2644,7 +2699,8 @@ const Gcms = () => {
                       <TabsContent value="figure" className="mt-3">
                         <GcmsFigurePanel
                           hasRun={hasRun}
-                          subject={figSubject}
+                          hasChromatogram={hasChromatogram}
+                          subject={hasChromatogram ? figSubject : "spectrum"}
                           onSubjectChange={setFigSubject}
                           candidateTraces={figCandidateTraces}
                           includedTraceIds={figIncludedTraceIds}
@@ -2924,11 +2980,15 @@ function EmptyWorkspace({
   busy,
   progress,
   errors,
+  centroid,
+  onCentroidChange,
 }: {
   onFiles(files: File[]): void;
   busy: boolean;
   progress: { msg: string; frac: number } | null;
   errors: string[];
+  centroid: boolean;
+  onCentroidChange(v: boolean): void;
 }) {
   return (
     <section className="rounded-3xl border-2 border-dashed border-border/70 bg-card/40 p-10 text-center shadow-card">
@@ -2938,9 +2998,10 @@ function EmptyWorkspace({
         </div>
         <h2 className="text-lg font-semibold text-foreground">Drop a GC/MS run to begin</h2>
         <p className="text-sm leading-6 text-muted-foreground">
-          Drop an Agilent <span className="font-mono">.D</span> folder, or mzML / mzXML / MGF /
-          netCDF / CSV / JCAMP files, anywhere on this page. Files are read locally in your browser —
-          never uploaded, never modified.
+          Drop an Agilent <span className="font-mono">.D</span> folder, a Waters{" "}
+          <span className="font-mono">.raw</span> folder, or mzML / mzXML / MGF / netCDF / CSV /
+          JCAMP files, anywhere on this page. Files are read locally in your browser — never
+          uploaded, never modified.
         </p>
         <p className="text-xs text-muted-foreground">
           The reference sample folder is{" "}
@@ -2953,6 +3014,8 @@ function EmptyWorkspace({
             busy={busy}
             progress={progress}
             errors={errors}
+            centroid={centroid}
+            onCentroidChange={onCentroidChange}
           />
         </div>
       </div>

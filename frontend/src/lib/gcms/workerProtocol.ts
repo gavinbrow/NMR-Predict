@@ -13,6 +13,7 @@
 
 import type { ChromPeak, ChromTrace, MassSpectrum, MsRun } from "./types";
 import type { DetectChromPeaksOpts } from "./peaks";
+import type { WatersRawBundle, WatersParseOptions } from "./waters/masslynx";
 
 /**
  * Every GC/MS worker operation: `request` is the payload sent in, `result` is
@@ -32,6 +33,18 @@ export interface WorkerOpMap {
   parseFile: {
     request: { buffer: ArrayBuffer; name: string; sourcePath: string };
     result: { run: MsRun };
+  };
+  /**
+   * Decode one Waters MassLynx `.raw` FOLDER. Unlike `parseFile` this needs the
+   * whole bundle of folder members at once, and it yields one run per
+   * acquisition function. Every ArrayBuffer in the bundle is TRANSFERRED (the
+   * caller's copies are detached) — a continuum `_FUNC001.DAT` is tens of MB.
+   */
+  parseWatersRaw: {
+    // `onProgress` is a function and cannot cross the worker boundary; progress
+    // arrives on the protocol's own progress channel instead.
+    request: { bundle: WatersRawBundle; options?: Omit<WatersParseOptions, "onProgress"> };
+    result: { runs: MsRun[]; errors: string[] };
   };
   /** Extracted-ion chromatogram. */
   buildXic: {

@@ -10,8 +10,12 @@
 //     (so two `.D` folders dropped together are never cross-paired), and returns
 //     one `MsRun` per data file plus a list of `"<filename>: <message>"` errors.
 //
-// Tier-4 vendor raw formats (Thermo/Waters/Sciex/Shimadzu/Bruker/MassHunter) are
-// detected and explained with a "convert to mzML" message rather than throwing.
+// Waters MassLynx `.raw` FOLDERS are read natively: their members are bucketed
+// by directory (keyed on a direct-child `_FUNCnnn.DAT`) and handed to
+// `waters/masslynx.ts`, which returns one run per acquisition function.
+// The remaining Tier-4 vendor raw formats (Thermo/Sciex/Shimadzu/Bruker/
+// MassHunter) are detected and explained with a "convert to mzML" message
+// rather than throwing.
 // `load.ts` stays on the main thread; heavy parsing is delegated to the worker
 // via `callWorker("parseFile", ...)`. `collectDroppedFiles` and the worker are
 // not testable under jsdom, so `loadGcmsFiles` is exercised with synthetic `File`
@@ -33,8 +37,15 @@ import { isNetcdf, readNetcdf } from "./open/netcdf";
 import { parseAndiMs } from "./open/andims";
 import { parseCsvChromatogram, parseJcamp, sniffTextual } from "./open/textual";
 import {
+  decodeWatersText,
+  parseWatersRaw,
+  type WatersParseOptions,
+  type WatersRawBundle,
+} from "./waters/masslynx";
+import {
   callWorker,
   isCancelledError,
+  parseWatersRawInWorker,
   type CallOptions,
 } from "./workerClient";
 
@@ -130,6 +141,32 @@ interface GroupBucket {
   fileNames: string[];
 }
 
+/** Per-batch import settings. Only vendor formats with a choice to make read these. */
+export interface LoadGcmsOptions {
+  /**
+   * Reduce Waters continuum (profile) data to centroids while decoding.
+   * Defaults to true: raw continuum m/z values do not match a vendor peak list
+   * until the profile is centroided, and a profile LC run does not fit in
+   * memory. Set false to keep the profile trace for peak-shape work.
+   */
+  centroid?: boolean;
+  /** Drop centroided peaks below this fraction of the scan's base peak. */
+  centroidRelThreshold?: number;
+}
+
+/** The members of one Waters `.raw` FOLDER, keyed by that folder's path. */
+interface WatersBucket {
+  dir: string;
+  folderName: string;
+  headerTxt: string | null;
+  externInf: string | null;
+  functnsInf: ArrayBuffer | null;
+  functions: Map<number, { idx?: ArrayBuffer | null; dat?: ArrayBuffer | null }>;
+}
+
+/** `_FUNC001.DAT` / `_FUNC001.IDX` — the payload pair for one function. */
+const WATERS_FUNC_FILE = /^_FUNC(\d+)\.(DAT|IDX)$/i;
+
 /** dirname of a forward-slash path: everything before the last "/". */
 function dirname(path: string): string {
   const i = path.lastIndexOf("/");
@@ -192,6 +229,16 @@ async function sniffHead(file: File): Promise<Uint8Array> {
 
 /** Build the "convert to mzML" error message for a Tier-4 vendor raw file. */
 function vendorRawMessage(name: string, vendor: string): string {
+  if (vendor === "Waters") {
+    // Waters IS supported — but only as the folder, which is what actually
+    // holds the data. Something named `.raw` reaching here means the user
+    // handed over a single file instead of the directory.
+    return (
+      `${name}: a Waters .raw is a FOLDER, not a file. Drag the whole ` +
+      `${name} folder onto this panel (or use "Load run folder") so its ` +
+      `_FUNC001.DAT and _FUNC001.IDX come with it.`
+    );
+  }
   return (
     `${name}: ${vendor} raw data is not readable in the browser. Convert it to ` +
     `mzML with ProteoWizard msconvert (msconvert --mzML "${name}") and drop the ` +
@@ -206,7 +253,6 @@ function detectVendorRaw(file: File, head: Uint8Array): string | null {
   const rel = relPath(file);
   const dir = dirname(rel);
   const folderName = dir.length > 0 ? basename(dir) : "";
-  const folderLower = folderName.toLowerCase();
 
   // Thermo .raw — a file whose first bytes are the UTF-16LE string "Finnigan".
   if (lower.endsWith(".raw")) {
@@ -222,14 +268,10 @@ function detectVendorRaw(file: File, head: Uint8Array): string | null {
       }
       if (isFinnigan) return "Thermo";
     }
-    // Waters .raw FOLDER — when the dropped file is inside a .raw folder we
-    // cannot easily detect _FUNC001.DAT here without listing siblings; we
-    // treat any .raw file that is NOT Finnigan as Waters and let the message
-    // guide the user. (A Waters .raw is a folder; its member files are
-    // _FUNC001.DAT etc. — those land here as individual files.)
-    if (!lower.endsWith(".raw") || folderLower.endsWith(".raw")) {
-      return "Waters";
-    }
+    // Not Finnigan, so this is Waters. Members of a real Waters `.raw` folder
+    // never reach here — they are claimed by the `_FUNCnnn.DAT` bucket earlier
+    // in the pass — so anything landing here is a lone file and gets the
+    // "drop the folder" message.
     return "Waters";
   }
 
@@ -269,6 +311,7 @@ function detectVendorRaw(file: File, head: Uint8Array): string | null {
 export async function loadGcmsFiles(
   files: File[],
   onProgress?: (msg: string, frac: number) => void,
+  options?: LoadGcmsOptions,
 ): Promise<{ runs: MsRun[]; errors: string[] }> {
   const runs: MsRun[] = [];
   const errors: string[] = [];
@@ -276,6 +319,27 @@ export async function loadGcmsFiles(
   // Directory-keyed buckets. The implicit bucket "" holds files with no
   // relative path (e.g. picked individually from a flat directory).
   const buckets = new Map<string, GroupBucket>();
+  // Waters `.raw` folders get their own buckets: their members share no naming
+  // convention with the Agilent ones and they produce several runs each.
+  const watersBuckets = new Map<string, WatersBucket>();
+
+  function watersBucketFor(dir: string): WatersBucket {
+    let b = watersBuckets.get(dir);
+    if (!b) {
+      b = {
+        dir,
+        // `dir` is "" when the user picked the folder's files individually
+        // rather than dropping the folder, so there is no name to take.
+        folderName: basename(dir) || dir || "Waters run",
+        headerTxt: null,
+        externInf: null,
+        functnsInf: null,
+        functions: new Map(),
+      };
+      watersBuckets.set(dir, b);
+    }
+    return b;
+  }
 
   function bucketFor(dir: string): GroupBucket {
     let b = buckets.get(dir);
@@ -314,6 +378,18 @@ export async function loadGcmsFiles(
     }
   }
 
+  // A Waters run folder is identified by a direct-child `_FUNCnnn.DAT` payload,
+  // NOT by the `.raw` suffix: `.raw` folders are routinely nested inside a
+  // same-named parent, and Thermo's unrelated `.raw` is a single FILE. Keying
+  // on the payload puts the bucket on the directory that actually holds the
+  // data no matter how the user dragged it in.
+  const watersRoots = new Set<string>();
+  for (const file of files) {
+    if (/^_FUNC\d+\.DAT$/i.test(file.name)) {
+      watersRoots.add(dirname(relPath(file).replace(/\\/g, "/")));
+    }
+  }
+
   // --- Pass 1: classify each file ------------------------------------------
   // Standalone-format files (mzML/mzXML/MGF/CDF/textual/.ch) are parsed
   // immediately. ChemStation MS data + the three companion texts are filed
@@ -323,6 +399,39 @@ export async function loadGcmsFiles(
     try {
       const lower = file.name.toLowerCase();
       const rel = relPath(file).replace(/\\/g, "/");
+
+      // --- Waters `.raw` folder member --------------------------------------
+      // Claimed BEFORE every other test: `_HEADER.TXT` would otherwise be
+      // sniffed as a textual chromatogram, and the rest would be reported as
+      // "unrecognized file type" one by one.
+      const watersDir = dirname(rel);
+      if (watersRoots.has(watersDir)) {
+        const bucket = watersBucketFor(watersDir);
+        const funcMatch = WATERS_FUNC_FILE.exec(file.name);
+        if (funcMatch) {
+          const fnNumber = Number.parseInt(funcMatch[1], 10);
+          let slot = bucket.functions.get(fnNumber);
+          if (!slot) {
+            slot = {};
+            bucket.functions.set(fnNumber, slot);
+          }
+          const buffer = await file.arrayBuffer();
+          if (funcMatch[2].toUpperCase() === "DAT") slot.dat = buffer;
+          else slot.idx = buffer;
+        } else if (lower === "_header.txt") {
+          bucket.headerTxt = decodeWatersText(await file.arrayBuffer());
+        } else if (lower === "_extern.inf") {
+          bucket.externInf = decodeWatersText(await file.arrayBuffer());
+        } else if (lower === "_functns.inf") {
+          bucket.functnsInf = await file.arrayBuffer();
+        }
+        // Anything else in the folder (_INLET.INF, _FUNCnnn.STS, audit trails)
+        // is not needed and is skipped without an error.
+        done += 1;
+        if (onProgress) onProgress(`read ${file.name}`, total > 0 ? done / total : 0);
+        continue;
+      }
+
       const root = vendorRunRoot(rel);
       const isChemStationFolder = root !== null && chemStationRoots.has(root);
       const directRunChild = isChemStationFolder && isDirectChild(rel, root!);
@@ -541,6 +650,68 @@ export async function loadGcmsFiles(
         onProgress(`error combining bucket`, frac);
       }
     }
+  }
+
+  // --- Pass 3: decode the Waters `.raw` folders ----------------------------
+  // Each folder yields ONE RUN PER ACQUISITION FUNCTION, so this pass appends
+  // rather than pushing a single run. A continuum `_FUNC001.DAT` is tens of MB
+  // and decoding it blocks whatever thread it runs on, so it goes to the worker
+  // whenever one exists; under jsdom (tests) it falls back to this thread.
+  const watersList = Array.from(watersBuckets.values()).filter((b) => b.functions.size > 0);
+  for (const bucket of watersList) {
+    const bundle: WatersRawBundle = {
+      folderName: bucket.folderName,
+      sourcePath: bucket.dir,
+      headerTxt: bucket.headerTxt,
+      externInf: bucket.externInf,
+      functnsInf: bucket.functnsInf,
+      functions: bucket.functions,
+    };
+    const parseOptions: Omit<WatersParseOptions, "onProgress"> = {
+      centroid: options?.centroid ?? true,
+      centroidRelThreshold: options?.centroidRelThreshold,
+    };
+    const decodeHere = () =>
+      parseWatersRaw(bundle, {
+        ...parseOptions,
+        onProgress: (frac) => onProgress?.(`decoding ${bucket.folderName}`, frac),
+      });
+    /** True while the bundle's buffers are still ours — a transferred one reads 0. */
+    const buffersIntact = () =>
+      [...bundle.functions.values()].every((f) => (f.dat?.byteLength ?? 0) > 0);
+
+    try {
+      if (typeof Worker === "undefined") {
+        // No worker in this environment (jsdom under test).
+        const result = decodeHere();
+        runs.push(...result.runs);
+        errors.push(...result.errors);
+      } else {
+        try {
+          const result = await parseWatersRawInWorker(bundle, parseOptions, {
+            onProgress: (frac) => onProgress?.(`decoding ${bucket.folderName}`, frac),
+          });
+          runs.push(...result.runs);
+          errors.push(...result.errors);
+        } catch (workerErr) {
+          if (isCancelledError(workerErr)) throw workerErr;
+          // The worker failed to spawn or crashed. If it never got as far as
+          // transferring the buffers they are still readable, so decode on this
+          // thread rather than losing the import — the same main-thread
+          // fallback the rest of the workspace uses when the worker is down.
+          if (!buffersIntact()) throw workerErr;
+          const result = decodeHere();
+          runs.push(...result.runs);
+          errors.push(...result.errors);
+        }
+      }
+    } catch (err) {
+      if (isCancelledError(err)) throw err;
+      errors.push(
+        `${bucket.folderName}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+    if (onProgress) onProgress(`loaded ${bucket.folderName}`, 1);
   }
 
   return { runs, errors };

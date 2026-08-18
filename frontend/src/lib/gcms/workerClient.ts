@@ -15,6 +15,7 @@
 
 import type { ChromPeak, ChromTrace, MassSpectrum, MsRun } from "./types";
 import type { DetectChromPeaksOpts } from "./peaks";
+import type { WatersRawBundle, WatersParseOptions } from "./waters/masslynx";
 import type {
   WorkerOp,
   WorkerRequestMessage,
@@ -149,6 +150,17 @@ export function callWorker<Op extends WorkerOp>(
     if (op === "parseFile") {
       const buffer = (payload as { buffer: ArrayBuffer }).buffer;
       w.postMessage(msg, [buffer]);
+    } else if (op === "parseWatersRaw") {
+      // Every member of the .raw folder is transferred: a continuum
+      // _FUNC001.DAT is tens of MB and must not be structured-cloned.
+      const { bundle } = payload as { bundle: WatersRawBundle };
+      const transfer: ArrayBuffer[] = [];
+      if (bundle.functnsInf) transfer.push(bundle.functnsInf);
+      for (const [, files] of bundle.functions) {
+        if (files.idx) transfer.push(files.idx);
+        if (files.dat) transfer.push(files.dat);
+      }
+      w.postMessage(msg, transfer);
     } else {
       w.postMessage(msg);
     }
@@ -173,6 +185,19 @@ export function parseFile(
   options?: CallOptions,
 ) {
   return callWorker("parseFile", { buffer, name, sourcePath }, options);
+}
+
+/**
+ * Decode one Waters MassLynx `.raw` folder in the worker, yielding one run per
+ * acquisition function. Every ArrayBuffer in `bundle` is TRANSFERRED — the
+ * caller's copies are detached afterwards, so do not reuse them.
+ */
+export function parseWatersRawInWorker(
+  bundle: WatersRawBundle,
+  parseOptions?: Omit<WatersParseOptions, "onProgress">,
+  options?: CallOptions,
+) {
+  return callWorker("parseWatersRaw", { bundle, options: parseOptions }, options);
 }
 
 export function buildXic(

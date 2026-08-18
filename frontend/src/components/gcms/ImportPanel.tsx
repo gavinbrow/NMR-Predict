@@ -14,11 +14,26 @@ interface ImportPanelProps {
   progress?: { msg: string; frac: number } | null;
   /** Per-file errors as `"<filename>: <message>"` strings. */
   errors?: string[];
+  /**
+   * Centroid vendor continuum (profile) data while importing. Applies to
+   * Waters `.raw`, whose TOF data is stored as the digitised peak SHAPE — the
+   * raw profile m/z values do not match a processed peak list until they are
+   * centroided, so this is on by default.
+   */
+  centroid: boolean;
+  onCentroidChange(v: boolean): void;
 }
 
-const ACCEPT = ".ms,.d,.ch,.uv,.mzml,.mzxml,.mgf,.cdf,.nc,.csv,.tsv,.txt,.jdx,.dx";
+const ACCEPT = ".ms,.d,.ch,.uv,.raw,.mzml,.mzxml,.mgf,.cdf,.nc,.csv,.tsv,.txt,.jdx,.dx";
 
-export function ImportPanel({ onFiles, busy, progress, errors }: ImportPanelProps) {
+export function ImportPanel({
+  onFiles,
+  busy,
+  progress,
+  errors,
+  centroid,
+  onCentroidChange,
+}: ImportPanelProps) {
   const folderRef = useRef<HTMLInputElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   const [dragging, setDragging] = useState(false);
@@ -52,7 +67,7 @@ export function ImportPanel({ onFiles, busy, progress, errors }: ImportPanelProp
           onClick={() => folderRef.current?.click()}
         >
           <FolderOpen className="h-4 w-4" />
-          Load .D folder
+          Load run folder (.D / .raw)
         </Button>
         <input
           ref={folderRef}
@@ -96,7 +111,8 @@ export function ImportPanel({ onFiles, busy, progress, errors }: ImportPanelProp
           <div>
             <p className="text-sm font-semibold text-foreground">Add files</p>
             <p className="mt-0.5 text-xs text-muted-foreground">
-              .ms, .ch, .mzml, .mzxml, .mgf, .cdf, .csv — drag &amp; drop or click.
+              Agilent .D, Waters .raw, .mzml, .mzxml, .mgf, .cdf, .csv — drag &amp; drop or
+              click. Vendor runs are folders: drop the whole folder.
             </p>
           </div>
         </button>
@@ -112,6 +128,28 @@ export function ImportPanel({ onFiles, busy, progress, errors }: ImportPanelProp
           }}
         />
       </div>
+
+      {/* Waters TOF data is stored as continuum: the digitised SHAPE of every
+          peak, ~13 samples across. Reading an m/z straight off that profile
+          disagrees with the vendor's processed peak list, so import centroids
+          it by default. Unticking keeps the profile for peak-shape work — at
+          roughly 4x the points. */}
+      <label className="flex cursor-pointer items-start gap-2 rounded-lg border border-border/60 bg-muted/20 p-2.5">
+        <input
+          type="checkbox"
+          checked={centroid}
+          disabled={busy}
+          onChange={(e) => onCentroidChange(e.target.checked)}
+          className="mt-0.5 h-3.5 w-3.5"
+        />
+        <span className="text-[11px] leading-snug">
+          <span className="font-medium text-foreground">Centroid continuum data</span>
+          <span className="block text-muted-foreground">
+            Waters .raw stores profile peaks. Centroiding matches the instrument&rsquo;s own
+            m/z values; untick to keep the raw peak shape.
+          </span>
+        </span>
+      </label>
 
       {progress && (
         <div className="rounded-lg border border-border/60 bg-muted/30 p-2.5 text-[11px] text-muted-foreground">

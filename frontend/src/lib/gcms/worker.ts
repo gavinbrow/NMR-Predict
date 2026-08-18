@@ -34,6 +34,7 @@ import { isNetcdf, readNetcdf } from "./open/netcdf";
 import { isAndiMs } from "./open/andims";
 import { parseAndiMs } from "./open/andims";
 import { parseCsvChromatogram, parseJcamp, sniffTextual } from "./open/textual";
+import { parseWatersRaw } from "./waters/masslynx";
 import { buildXic, buildXics } from "./chrom";
 import { combineScans } from "./chrom";
 import { detectChromPeaks } from "./peaks";
@@ -168,6 +169,14 @@ const handlers: { [Op in WorkerOp]: Handler<Op> } = {
     }
 
     throw new Error(`${name}: unrecognized file type`);
+  },
+
+  parseWatersRaw: (payload, hctx) => {
+    const { runs, errors } = parseWatersRaw(payload.bundle, {
+      ...payload.options,
+      onProgress: (frac, msg) => hctx.reportProgress(frac, msg),
+    });
+    return { runs, errors };
   },
 
   buildXic: (payload) => {

@@ -285,3 +285,138 @@ describe("loadGcmsFiles — grouping & regression", () => {
     expect(runs[0].format).toBe("agilent-ms");
   });
 });
+
+// ---------------------------------------------------------------------------
+// Waters MassLynx `.raw` FOLDERS
+//
+// Built synthetically so these run without the multi-MB vendor fixture; the
+// byte-level decode itself is covered against a real SYNAPT XS acquisition in
+// `masslynx.test.ts`.
+// ---------------------------------------------------------------------------
+
+/** Pack an m/z into the .DAT's 27-bit-mantissa / 5-bit-exponent word. */
+function encodeMz(mz: number): number {
+  let exp = 0;
+  while (Math.round(mz * 2 ** (27 - exp)) > 0x7ffffff && exp < 31) exp += 1;
+  return (((exp & 0x1f) >>> 0) * 2 ** 27 + (Math.round(mz * 2 ** (27 - exp)) & 0x7ffffff)) >>> 0;
+}
+
+/** Pack an intensity into the .DAT's 22-bit-mantissa / 5-bit-exponent word. */
+function encodeIntensity(v: number): number {
+  let exp = 0;
+  while (Math.round(v * 2 ** (21 - exp)) > 0x3fffff && exp < 31) exp += 1;
+  return (((exp & 0x1f) << 22) | (Math.round(v * 2 ** (21 - exp)) & 0x3fffff)) >>> 0;
+}
+
+/** Build a `.raw` folder's files: `scans` is one [mz, intensity][] per scan. */
+function makeWatersFolder(
+  folder: string,
+  scans: [number, number][][],
+  extra: Record<string, string> = {},
+): File[] {
+  const idx = new ArrayBuffer(scans.length * 30);
+  const idxView = new DataView(idx);
+  const total = scans.reduce((a, s) => a + s.length, 0);
+  const dat = new ArrayBuffer(total * 8);
+  const datWords = new Uint32Array(dat);
+
+  let point = 0;
+  scans.forEach((scan, i) => {
+    const base = i * 30;
+    idxView.setUint32(base + 4, scan.length & 0x3fffff, true);
+    idxView.setFloat32(base + 8, scan.reduce((a, p) => a + p[1], 0), true);
+    idxView.setFloat32(base + 12, 0.1 * (i + 1), true);
+    idxView.setUint32(base + 22, point * 8, true);
+    for (const [mz, intensity] of scan) {
+      datWords[point * 2] = encodeIntensity(intensity);
+      datWords[point * 2 + 1] = encodeMz(mz);
+      point += 1;
+    }
+  });
+
+  const files = [
+    makeFile(idx, "_FUNC001.IDX", `${folder}/_FUNC001.IDX`),
+    makeFile(dat, "_FUNC001.DAT", `${folder}/_FUNC001.DAT`),
+  ];
+  for (const [name, content] of Object.entries(extra)) {
+    files.push(makeFile(content, name, `${folder}/${name}`));
+  }
+  return files;
+}
+
+/** A three-sample profile peak centred on `mz`, as continuum data would store it. */
+function profilePeak(mz: number, height: number): [number, number][] {
+  return [
+    [mz - 0.01, height / 4],
+    [mz, height],
+    [mz + 0.01, height / 4],
+  ];
+}
+
+describe("loadGcmsFiles — Waters .raw folders", () => {
+  it("decodes a .raw folder into a run instead of rejecting its members one by one", async () => {
+    const files = makeWatersFolder("6169_DAC_3.raw", [
+      [...profilePeak(200, 1000), ...profilePeak(300, 500)],
+      [...profilePeak(200, 800), ...profilePeak(300, 900)],
+    ]);
+    const { runs, errors } = await loadGcmsFiles(files);
+    expect(errors).toEqual([]);
+    expect(runs).toHaveLength(1);
+    expect(runs[0].format).toBe("waters-raw");
+    // The folder name, minus the suffix, names the run.
+    expect(runs[0].name).toBe("6169_DAC_3");
+    expect(runs[0].scanCount).toBe(2);
+    // Centroided by default: three profile samples per peak become one peak.
+    expect(runs[0].pointCount).toBe(4);
+    expect(runs[0].basePeakMz[0]).toBeCloseTo(200, 3);
+    expect(runs[0].basePeakMz[1]).toBeCloseTo(300, 3);
+  });
+
+  it("keeps every profile sample when centroiding is turned off", async () => {
+    const files = makeWatersFolder("x.raw", [profilePeak(200, 1000)]);
+    const { runs } = await loadGcmsFiles(files, undefined, { centroid: false });
+    expect(runs[0].pointCount).toBe(3);
+  });
+
+  it("reads the folder's metadata and ignores members it does not need", async () => {
+    const files = makeWatersFolder("x.raw", [profilePeak(200, 1000)], {
+      "_HEADER.TXT": "$$ Instrument: SYNAPT-XS\r\n$$ Sample Description: my sample\r\n",
+      "_extern.inf": "Polarity\t\tES+\r\nFunction Parameters - Function 1 - TOF MS FUNCTION\r\n",
+      // Present in every real .raw and deliberately unused — must not error.
+      "_INLET.INF": "inlet method text",
+      "_FUNC001.STS": "scan stats",
+      "_HISTORY.INF": "history",
+    });
+    const { runs, errors } = await loadGcmsFiles(files);
+    expect(errors).toEqual([]);
+    expect(runs[0].meta.instrument).toBe("SYNAPT-XS");
+    expect(runs[0].meta.sample).toBe("my sample");
+    expect(runs[0].meta.ionization).toBe("ESI");
+    expect(runs[0].meta.polarity).toBe("+");
+    expect(runs[0].meta.scanMode).toBe("TOF MS FUNCTION");
+  });
+
+  it("does not cross-pair two .raw folders dropped together", async () => {
+    const { runs, errors } = await loadGcmsFiles([
+      ...makeWatersFolder("a.raw", [profilePeak(200, 1000)]),
+      ...makeWatersFolder("b.raw", [profilePeak(400, 2000), profilePeak(400, 2000)]),
+    ]);
+    expect(errors).toEqual([]);
+    expect(runs.map((r) => [r.name, r.scanCount])).toEqual([
+      ["a", 1],
+      ["b", 2],
+    ]);
+  });
+
+  it("tells the user to drop the FOLDER when handed a lone .raw file", async () => {
+    const notFinnigan = new Uint8Array(64);
+    notFinnigan[0] = 0x41;
+    const { runs, errors } = await loadGcmsFiles([
+      makeFile(notFinnigan.buffer, "sample.raw", "sample.raw"),
+    ]);
+    expect(runs).toEqual([]);
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toContain("FOLDER");
+    expect(errors[0]).not.toContain("msconvert");
+  });
+});

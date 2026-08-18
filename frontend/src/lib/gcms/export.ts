@@ -598,7 +598,18 @@ function layoutPanel(
   };
 }
 
-function twoPanels(top: ReportPanelSpec, bottom: ReportPanelSpec, width: number, height: number) {
+/**
+ * Lay out the report's panels. `top` is null for a run with no chromatogram
+ * (a direct-infusion or single-scan acquisition), in which case the spectrum
+ * gets the whole canvas instead of half of it above an empty frame.
+ */
+function twoPanels(
+  top: ReportPanelSpec | null,
+  bottom: ReportPanelSpec,
+  width: number,
+  height: number,
+) {
+  if (!top) return { topL: null, botL: layoutPanel(bottom, 0, 0, width, height) };
   const panelH = (height - GUTTER) / 2;
   const topL = layoutPanel(top, 0, 0, width, panelH);
   const botL = layoutPanel(bottom, 0, panelH + GUTTER, width, height - panelH - GUTTER);
@@ -698,7 +709,7 @@ function svgPanel(p: PanelLayout, theme: ReportTheme): string {
 }
 
 export function renderReportSvg(
-  top: ReportPanelSpec,
+  top: ReportPanelSpec | null,
   bottom: ReportPanelSpec,
   opts: { width: number; height: number; theme: ReportTheme },
 ): string {
@@ -706,7 +717,7 @@ export function renderReportSvg(
   const { topL, botL } = twoPanels(top, bottom, width, height);
   const body =
     `<rect x="0" y="0" width="${width}" height="${height}" fill="${theme.bg}"/>` +
-    svgPanel(topL, theme) +
+    (topL ? svgPanel(topL, theme) : "") +
     svgPanel(botL, theme);
   return (
     `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" ` +
@@ -825,7 +836,7 @@ function canvasPanel(ctx: CanvasRenderingContext2D, p: PanelLayout, theme: Repor
 }
 
 export function renderReportPng(
-  top: ReportPanelSpec,
+  top: ReportPanelSpec | null,
   bottom: ReportPanelSpec,
   opts: { width: number; height: number; scale: number; theme: ReportTheme },
 ): string {
@@ -840,7 +851,7 @@ export function renderReportPng(
   ctx.fillStyle = theme.bg;
   ctx.fillRect(0, 0, width, height);
   const { topL, botL } = twoPanels(top, bottom, width, height);
-  canvasPanel(ctx, topL, theme);
+  if (topL) canvasPanel(ctx, topL, theme);
   canvasPanel(ctx, botL, theme);
   return canvas.toDataURL("image/png");
 }

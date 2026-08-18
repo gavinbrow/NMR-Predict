@@ -22,7 +22,16 @@ export interface MsRun {
   id: string;                    // crypto.randomUUID()
   name: string;                  // "ACSDCPD.D"
   sourcePath: string;            // folder/path for the panel title line
-  format: "agilent-ms" | "agilent-ch" | "mzml" | "mzxml" | "mgf" | "andi" | "csv" | "jcamp";
+  format:
+    | "agilent-ms"
+    | "agilent-ch"
+    | "waters-raw"
+    | "mzml"
+    | "mzxml"
+    | "mgf"
+    | "andi"
+    | "csv"
+    | "jcamp";
   detector: "ms" | "uv" | "fid"; // "ms" => has scans; others are chromatogram-only
 
   // per-scan, length = scanCount

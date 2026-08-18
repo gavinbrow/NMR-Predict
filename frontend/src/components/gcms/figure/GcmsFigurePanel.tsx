@@ -8,6 +8,12 @@ import type { ChromTrace } from "@/lib/gcms/types";
 interface GcmsFigurePanelProps {
   /** Whether any run is open at all (gates the empty state). */
   hasRun: boolean;
+  /**
+   * Whether the workspace has a chromatogram worth drawing. False for
+   * direct-infusion / single-scan runs, which makes the "Chromatogram" and
+   * "Both" figure subjects unselectable.
+   */
+  hasChromatogram: boolean;
 
   // --- What goes into the figure (WP6 Include strip). All state is owned by
   //     the host (`Gcms.tsx`) so switching tabs never discards an
@@ -122,6 +128,7 @@ const SUBJECTS: { value: GcmsFigureSubject; label: string }[] = [
  */
 export function GcmsFigurePanel({
   hasRun,
+  hasChromatogram,
   subject,
   onSubjectChange,
   candidateTraces,
@@ -165,18 +172,30 @@ export function GcmsFigurePanel({
       <div className="flex flex-wrap items-center gap-x-5 gap-y-2 rounded-2xl border border-border/60 bg-card px-4 py-3 shadow-card">
         <span className="text-xs font-semibold text-foreground">Include</span>
         <div className="flex items-center gap-3">
-          {SUBJECTS.map((s) => (
-            <label key={s.value} className="flex items-center gap-1.5 text-xs text-foreground">
-              <input
-                type="radio"
-                name="gcms-figure-subject"
-                checked={subject === s.value}
-                onChange={() => onSubjectChange(s.value)}
-                className="h-3.5 w-3.5"
-              />
-              {s.label}
-            </label>
-          ))}
+          {SUBJECTS.map((s) => {
+            // A single-scan / infusion run has no chromatogram, so the two
+            // subjects that would draw one are offered but not selectable.
+            const unavailable = !hasChromatogram && s.value !== "spectrum";
+            return (
+              <label
+                key={s.value}
+                title={unavailable ? "This run is a single scan — it has no chromatogram." : undefined}
+                className={`flex items-center gap-1.5 text-xs ${
+                  unavailable ? "cursor-not-allowed text-muted-foreground" : "text-foreground"
+                }`}
+              >
+                <input
+                  type="radio"
+                  name="gcms-figure-subject"
+                  checked={subject === s.value}
+                  disabled={unavailable}
+                  onChange={() => onSubjectChange(s.value)}
+                  className="h-3.5 w-3.5"
+                />
+                {s.label}
+              </label>
+            );
+          })}
         </div>
         <ToggleLine id="fig-label-peaks" label="Label peaks" checked={labelPeaks} onChange={onLabelPeaksChange} />
         {subject === "spectrum" && candidateSpectra.length >= 2 && (
