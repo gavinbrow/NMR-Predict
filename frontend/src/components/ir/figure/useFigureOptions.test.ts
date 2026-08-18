@@ -14,6 +14,14 @@ function data(yLabel: string, xLabel = "m/z"): FigureData {
   };
 }
 
+/** The same data set with peak labels anchored at the given m/z values. */
+function withPeaks(xs: number[]): FigureData {
+  return {
+    ...data("Intensity"),
+    peakLabels: xs.map((x, i) => ({ id: `p${i}:${x}`, x, y: 1, text: String(x) })),
+  };
+}
+
 describe("useFigureOptions", () => {
   it("starts with auto axis bounds", () => {
     const { result } = renderHook(() => useFigureOptions(data("Intensity")));
@@ -83,5 +91,52 @@ describe("useFigureOptions", () => {
     rerender({ d: data("Rel. intensity (%)") });
     expect(result.current[0].y.label).toBe("My own label");
     expect(result.current[0].y.max).toBeNull();
+  });
+
+  // --- auto peak-label decimals ------------------------------------------------
+  //
+  // The seed is read at mount, when a mass-spec host's Figure tab has no file
+  // open yet, so the precision has to be re-derived once the labels arrive.
+
+  it("derives peak-label decimals once labels appear", () => {
+    const { result, rerender } = renderHook(({ d }) => useFigureOptions(d, { autoPeakLabelDecimals: 4 }), {
+      initialProps: { d: data("Intensity") },
+    });
+    expect(result.current[0].peakLabels.decimals).toBe(2); // shared default, nothing to measure
+
+    rerender({ d: withPeaks([337.2857123, 338.289112]) });
+    expect(result.current[0].peakLabels.decimals).toBe(4);
+  });
+
+  it("re-derives when a run of different precision is opened", () => {
+    const { result, rerender } = renderHook(({ d }) => useFigureOptions(d, { autoPeakLabelDecimals: 4 }), {
+      initialProps: { d: withPeaks([337.2857123]) },
+    });
+    expect(result.current[0].peakLabels.decimals).toBe(4);
+
+    // A nominal-mass quadrupole run: whole-number m/z, so ".0000" would be four
+    // digits of invention.
+    rerender({ d: withPeaks([43, 91, 105]) });
+    expect(result.current[0].peakLabels.decimals).toBe(0);
+  });
+
+  it("stops re-deriving once the user picks a precision", () => {
+    const { result, rerender } = renderHook(({ d }) => useFigureOptions(d, { autoPeakLabelDecimals: 4 }), {
+      initialProps: { d: withPeaks([337.2857123]) },
+    });
+    act(() => {
+      const [options, setOptions] = result.current;
+      setOptions({ ...options, peakLabels: { ...options.peakLabels, decimals: 1 } });
+    });
+    rerender({ d: withPeaks([43, 91]) });
+    expect(result.current[0].peakLabels.decimals).toBe(1);
+  });
+
+  it("leaves decimals alone for hosts that did not ask for the auto rule", () => {
+    const { result, rerender } = renderHook(({ d }) => useFigureOptions(d), {
+      initialProps: { d: data("Intensity") },
+    });
+    rerender({ d: withPeaks([337.2857123]) });
+    expect(result.current[0].peakLabels.decimals).toBe(2);
   });
 });

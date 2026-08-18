@@ -6,6 +6,7 @@ import {
   formatTick,
   mergeSavedFigureOptions,
   niceTicks,
+  peakLabelDecimalsFromData,
   pickVisibleLabels,
   reconcileFigureOptions,
   reconcilePeakLabelOverrides,
@@ -434,6 +435,49 @@ describe("default & reconcile options", () => {
   });
 });
 
+/** `makeData` plus peak labels at the given anchor values. */
+function withPeaks(xs: number[], extra: Partial<{ customText: boolean }> = {}): FigureData {
+  return {
+    ...makeData(["a"]),
+    peakLabels: xs.map((x, i) => ({ id: `p${i}`, x, y: 1, text: String(x), ...extra })),
+  };
+}
+
+describe("peakLabelDecimalsFromData", () => {
+  it("reports the places the data actually carries", () => {
+    expect(peakLabelDecimalsFromData(withPeaks([43, 91, 105]), 4)).toBe(0);
+    expect(peakLabelDecimalsFromData(withPeaks([43.05, 91.1]), 4)).toBe(2);
+  });
+
+  it("takes the most precise label, not the last one", () => {
+    expect(peakLabelDecimalsFromData(withPeaks([100, 337.28, 55.5]), 4)).toBe(2);
+  });
+
+  it("caps a computed TOF centroid at the requested maximum", () => {
+    // The real shape of a centroid: an intensity-weighted mean, so a double with
+    // as many places as it takes to round-trip.
+    expect(peakLabelDecimalsFromData(withPeaks([337.2857123456789]), 4)).toBe(4);
+    expect(peakLabelDecimalsFromData(withPeaks([337.2857123456789]), 2)).toBe(2);
+  });
+
+  it("returns null when there is nothing to measure", () => {
+    expect(peakLabelDecimalsFromData(makeData(["a"]), 4)).toBeNull();
+    expect(peakLabelDecimalsFromData(withPeaks([]), 4)).toBeNull();
+    // Custom text is never reformatted by Decimals, so its anchor says nothing
+    // about the precision on show (GC/MS's stacked figure projects an RT onto
+    // the m/z axis and keeps the real RT as text).
+    expect(peakLabelDecimalsFromData(withPeaks([0.123456789], { customText: true }), 4)).toBeNull();
+  });
+
+  it("treats exponent-form anchors as full precision", () => {
+    expect(peakLabelDecimalsFromData(withPeaks([1e-7]), 4)).toBe(4);
+  });
+
+  it("ignores non-finite anchors", () => {
+    expect(peakLabelDecimalsFromData(withPeaks([NaN, 43.5]), 4)).toBe(1);
+  });
+});
+
 describe("defaultFigureOptions — host seed", () => {
   it("layers a host's own defaults over the shared ones", () => {
     const seed = {
@@ -458,6 +502,31 @@ describe("defaultFigureOptions — host seed", () => {
     expect(o.titleFontSize).toBe(18);
     expect(o.peakLabels.decimals).toBe(2);
     expect(o.x.gridColor).toBe("#e2e8f0");
+  });
+
+  it("derives peak-label decimals from the data when the seed asks for it", () => {
+    const seed = { autoPeakLabelDecimals: 4 };
+    expect(defaultFigureOptions(withPeaks([43, 91]), seed).peakLabels.decimals).toBe(0);
+    expect(defaultFigureOptions(withPeaks([337.2857123]), seed).peakLabels.decimals).toBe(4);
+  });
+
+  it("keeps the seeded decimals until there are labels to measure", () => {
+    // Both mass-spec hosts mount their Figure tab before any file is open, so
+    // the auto rule has nothing to read at seed time; `useFigureOptions`
+    // re-derives it once the labels arrive.
+    const o = defaultFigureOptions(makeData(["a"]), {
+      autoPeakLabelDecimals: 4,
+      peakLabels: { decimals: 1 },
+    });
+    expect(o.peakLabels.decimals).toBe(1);
+  });
+
+  it("lets the auto cap win over a pinned seed decimals", () => {
+    const o = defaultFigureOptions(withPeaks([43.05]), {
+      autoPeakLabelDecimals: 4,
+      peakLabels: { decimals: 1 },
+    });
+    expect(o.peakLabels.decimals).toBe(2);
   });
 
   it("keeps the shared defaults when no seed is given", () => {

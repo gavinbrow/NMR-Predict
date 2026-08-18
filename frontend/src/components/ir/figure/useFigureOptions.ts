@@ -1,6 +1,7 @@
 import { useCallback, useRef, useState } from "react";
 import {
   defaultFigureOptions,
+  peakLabelDecimalsFromData,
   reconcileFigureOptions,
   reconcilePeakLabelOverrides,
   type FigureData,
@@ -32,12 +33,20 @@ export function useFigureOptions(
   // visibility — that touch wins over the auto-seed below (WP0b). Any change
   // touching `peakLabels.show` counts; everything else passes through untouched.
   // The current options are read through a ref so the setter stays stable.
+  // Same idea for Decimals, which `seed.autoPeakLabelDecimals` otherwise keeps
+  // re-deriving from the data below: once the user picks a precision, it is
+  // theirs and no later file changes it.
   const userToggledPeakLabels = useRef(false);
+  const userSetDecimals = useRef(false);
+  const autoDecimals = useRef(seed?.autoPeakLabelDecimals);
   const optionsRef = useRef(options);
   optionsRef.current = options;
   const setOptionsTracked = useCallback((next: FigureOptions) => {
     if (next.peakLabels.show !== optionsRef.current.peakLabels.show) {
       userToggledPeakLabels.current = true;
+    }
+    if (next.peakLabels.decimals !== optionsRef.current.peakLabels.decimals) {
+      userSetDecimals.current = true;
     }
     setOptions(next);
   }, []);
@@ -52,6 +61,12 @@ export function useFigureOptions(
   // Drop peak-label overrides whose peak id is gone (peaks re-pick with fresh
   // ids). Keyed on the label-id set so it only runs when the labels actually
   // change, and it leaves options untouched when nothing needs pruning.
+  //
+  // The same key drives the auto-decimals re-derivation for hosts that asked
+  // for one: the precision a peak label deserves is a property of the FILE, and
+  // the file is not loaded yet when the options are first seeded. Re-deriving
+  // on every label change (rather than only the first) is what lets a nominal
+  // GC/MS run and a TOF run opened after it each read correctly.
   const [labelKey, setLabelKey] = useState(() =>
     (data.peakLabels ?? []).map((p) => p.id).join("|"),
   );
@@ -60,9 +75,13 @@ export function useFigureOptions(
     setLabelKey(currentLabelKey);
     setOptions((prev) => {
       const overrides = reconcilePeakLabelOverrides(prev.peakLabels.overrides, data);
-      return overrides === prev.peakLabels.overrides
+      const cap = autoDecimals.current;
+      const derived =
+        cap != null && !userSetDecimals.current ? peakLabelDecimalsFromData(data, cap) : null;
+      const decimals = derived ?? prev.peakLabels.decimals;
+      return overrides === prev.peakLabels.overrides && decimals === prev.peakLabels.decimals
         ? prev
-        : { ...prev, peakLabels: { ...prev.peakLabels, overrides } };
+        : { ...prev, peakLabels: { ...prev.peakLabels, overrides, decimals } };
     });
   }
 

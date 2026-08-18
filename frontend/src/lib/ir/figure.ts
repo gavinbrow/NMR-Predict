@@ -375,6 +375,46 @@ export interface FigureOptionSeed {
   axisBold?: boolean;
   legend?: Partial<LegendOptions>;
   peakLabels?: Partial<PeakLabelOptions>;
+  /**
+   * Derive `peakLabels.decimals` from the data instead of pinning it, capped at
+   * this many places. See {@link peakLabelDecimalsFromData}. Wins over
+   * `peakLabels.decimals` whenever the data actually has labels to measure.
+   *
+   * This is for hosts whose precision is a property of the FILE, not of the
+   * host: a GC/MS run can be nominal-mass quadrupole data (m/z 43, 91) or TOF
+   * data resolved to 337.2858, and neither a fixed 0 nor a fixed 4 reads well
+   * on the other. `useFigureOptions` re-derives it as the label set changes.
+   */
+  autoPeakLabelDecimals?: number;
+}
+
+/**
+ * The decimal places the data itself carries, capped at `max` — the precision a
+ * peak label can show without either inventing digits or dropping real ones.
+ *
+ * Measured off each label's anchor value via `String(x)`, which prints the
+ * shortest decimal that round-trips: an m/z of exactly 43.05 reports 2, while a
+ * computed TOF centroid (337.28571…) reports far more and so lands on the cap.
+ * Values in exponent form are treated as full precision — they are far from the
+ * magnitudes a peak label is written in, so guessing low would lose digits.
+ *
+ * `customText` labels are skipped: `decimals` never reformats those, and their
+ * anchor may not even be the quantity on show — GC/MS's stacked figure projects
+ * a retention time onto the spectrum's m/z axis and keeps the real RT as text,
+ * so measuring that anchor would report a precision nothing is drawn at.
+ */
+export function peakLabelDecimalsFromData(data: FigureData, max: number): number | null {
+  let best: number | null = null;
+  for (const p of data.peakLabels ?? []) {
+    if (p.customText || !Number.isFinite(p.x)) continue;
+    const s = String(p.x);
+    if (s.includes("e") || s.includes("E")) return max;
+    const dot = s.indexOf(".");
+    const places = dot < 0 ? 0 : s.length - dot - 1;
+    if (best === null || places > best) best = places;
+    if (best >= max) return max;
+  }
+  return best;
 }
 
 /** Initial options seeded from the data (labels, palette colours, style hints),
@@ -390,6 +430,10 @@ export function defaultFigureOptions(data: FigureData, seed: FigureOptionSeed = 
   const hasSticks = data.series.some((s) => s.styleHints?.kind === "sticks");
   const legendCap = hasSticks ? 40 : 12;
   const showGrid = seed.showGrid ?? true;
+  const autoDecimals =
+    seed.autoPeakLabelDecimals == null
+      ? null
+      : peakLabelDecimalsFromData(data, seed.autoPeakLabelDecimals);
   return {
     title: "",
     titleFontSize: 18,
@@ -434,6 +478,12 @@ export function defaultFigureOptions(data: FigureData, seed: FigureOptionSeed = 
       colorBySeries: false,
       overrides: {},
       ...seed.peakLabels,
+      // After the seed spread: an auto cap is a stronger statement than a pinned
+      // default. It only applies once there are labels to measure — a host that
+      // mounts its figure before any data (MALDI's and GC/MS's Figure tabs are
+      // built from empty state) keeps the seeded value until then, and
+      // `useFigureOptions` re-derives this when the labels arrive.
+      ...(autoDecimals === null ? {} : { decimals: autoDecimals }),
     },
   };
 }

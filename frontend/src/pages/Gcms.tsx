@@ -19,6 +19,7 @@ import { DocumentsPanel } from "@/components/gcms/DocumentsPanel";
 import { ExportPanel, type ExportKind } from "@/components/gcms/ExportPanel";
 import { GcmsFigurePanel } from "@/components/gcms/figure/GcmsFigurePanel";
 import { useFigureOptions } from "@/components/ir/figure/useFigureOptions";
+import type { FigureOptionSeed } from "@/lib/ir/figure";
 import { FragmentPanel } from "@/components/gcms/FragmentPanel";
 import { ImportPanel } from "@/components/gcms/ImportPanel";
 import { MetadataPanel } from "@/components/gcms/MetadataPanel";
@@ -132,6 +133,36 @@ const DEFAULT_PEAK_PARAMS: DetectChromPeaksOpts = {
   thresholdPct: 5,
   minWidthScans: 13,
   baseline: "valley",
+};
+
+/**
+ * Figure-maker starting point, deliberately the same one MALDI uses
+ * (`MALDI_FIGURE_SEED` in `Maldi.tsx`): Times New Roman at 800×600, no
+ * gridlines, a transparent background, bold axes, 10× PNG export, and dense
+ * diagonal peak labels. Both sections produce the same kind of object — a mass
+ * spectrum destined for a manuscript — so they should not start from two
+ * different-looking places. Every value stays one click away in the maker.
+ *
+ * Decimals is the one deliberate difference. MALDI pins 1 place because a
+ * polymer ladder is quoted as 1143.8; a GC/MS run has no single right answer —
+ * a nominal-mass quadrupole scan is m/z 43 and a TOF centroid is 337.2858 — so
+ * it is derived from the data instead, capped at the 4 places accurate-mass
+ * work is reported to. See `peakLabelDecimalsFromData`.
+ */
+const GCMS_FIGURE_SEED: FigureOptionSeed = {
+  fontFamily: "Times New Roman",
+  width: 800,
+  height: 600,
+  pngScale: 10,
+  showGrid: false,
+  background: "transparent",
+  axisBold: true,
+  peakLabels: { rotation: -45, maxLabels: 40, minGap: 6 },
+  autoPeakLabelDecimals: 4,
+  // The shared default only turns the legend on for data that already has
+  // several series, and this hook is seeded from an empty figure long before
+  // any run is open — so without this the legend would default off forever.
+  legend: { show: true },
 };
 
 /**
@@ -1116,8 +1147,8 @@ const Gcms = () => {
       }),
     [figIncludedSpectra, figShownSpecPeaks, figLabelPeaks, figStackSpectra, figSpectrumSourceName],
   );
-  const [chromFigureOptions, setChromFigureOptions] = useFigureOptions(chromFigureData);
-  const [specFigureOptions, setSpecFigureOptions] = useFigureOptions(specFigureData);
+  const [chromFigureOptions, setChromFigureOptions] = useFigureOptions(chromFigureData, GCMS_FIGURE_SEED);
+  const [specFigureOptions, setSpecFigureOptions] = useFigureOptions(specFigureData, GCMS_FIGURE_SEED);
   // The "both" subject builds ONE stacked figure (chromatogram above the
   // spectrum, sharing a single normalized x-axis) so the user gets a single
   // FigureMaker UI and a single exported image — what the bug report asked
@@ -1142,7 +1173,7 @@ const Gcms = () => {
       figSpectrumSourceName,
     ],
   );
-  const [bothFigureOptions, setBothFigureOptions] = useFigureOptions(bothFigureData);
+  const [bothFigureOptions, setBothFigureOptions] = useFigureOptions(bothFigureData, GCMS_FIGURE_SEED);
 
   const handleToggleFigTrace = useCallback((id: string) => {
     setFigIncludedTraceIds((prev) => {
