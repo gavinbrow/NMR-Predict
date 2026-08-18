@@ -34,7 +34,10 @@ export function FigurePopout({ data, label = "Make figure" }: { data: FigureData
             Style the plot and export it as a publication-quality SVG or PNG.
           </DialogDescription>
         </DialogHeader>
-        <FigureMaker data={data} options={options} onChange={setOptions} />
+        {/* No fullscreen toggle here: this dialog is already 94vh × 96vw, and a
+            second overlay would have to escape the dialog's DOM (and its focus
+            trap) to cover it. */}
+        <FigureMaker data={data} options={options} onChange={setOptions} allowFullscreen={false} />
       </DialogContent>
     </Dialog>
   );

@@ -3,6 +3,7 @@ import {
   autoRange,
   decimateMinMax,
   defaultFigureOptions,
+  fitFigureBox,
   formatTick,
   mergeSavedFigureOptions,
   niceTicks,
@@ -442,6 +443,43 @@ function withPeaks(xs: number[], extra: Partial<{ customText: boolean }> = {}): 
     peakLabels: xs.map((x, i) => ({ id: `p${i}`, x, y: 1, text: String(x), ...extra })),
   };
 }
+
+describe("fitFigureBox", () => {
+  const figure = { width: 800, height: 600 };
+
+  it("fills the width when the area is tall", () => {
+    expect(fitFigureBox({ w: 400, h: 900 }, figure)).toEqual({ width: 400, height: 300 });
+  });
+
+  it("fills the height when the area is wide", () => {
+    expect(fitFigureBox({ w: 2000, h: 300 }, figure)).toEqual({ width: 400, height: 300 });
+  });
+
+  it("always keeps the figure's aspect ratio", () => {
+    for (const area of [
+      { w: 1, h: 10_000 },
+      { w: 10_000, h: 1 },
+      { w: 733, h: 519 },
+    ]) {
+      const box = fitFigureBox(area, figure)!;
+      expect(box.width / box.height).toBeCloseTo(800 / 600, 10);
+      expect(box.width).toBeLessThanOrEqual(area.w + 1e-9);
+      expect(box.height).toBeLessThanOrEqual(area.h + 1e-9);
+    }
+  });
+
+  it("scales up past the figure's nominal size", () => {
+    // Fullscreen exists to look closer; the preview is vector, so magnifying it
+    // shows the same figure rather than a differently-proportioned one.
+    expect(fitFigureBox({ w: 2400, h: 1800 }, figure)).toEqual({ width: 2400, height: 1800 });
+  });
+
+  it("returns null until the area has been measured", () => {
+    expect(fitFigureBox({ w: 0, h: 0 }, figure)).toBeNull();
+    expect(fitFigureBox({ w: 800, h: 0 }, figure)).toBeNull();
+    expect(fitFigureBox({ w: 800, h: 600 }, { width: 0, height: 0 })).toBeNull();
+  });
+});
 
 describe("peakLabelDecimalsFromData", () => {
   it("reports the places the data actually carries", () => {

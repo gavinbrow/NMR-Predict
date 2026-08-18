@@ -626,6 +626,29 @@ export function formatTick(value: number, decimals: number): string {
   return /^-0(\.0*)?$/.test(s) ? s.slice(1) : s;
 }
 
+/**
+ * The largest box with the figure's aspect ratio that fits inside `area`.
+ *
+ * The fullscreen preview needs this because `max-height` on an inline `<svg>`
+ * clamps the height WITHOUT narrowing the width: the element box stops matching
+ * the viewBox and the drawing letterboxes inside it. That is not only ugly —
+ * `FigureSvg` maps pointer coordinates through the element's bounding box, so a
+ * letterboxed figure takes drag-zooms and label drags at the wrong place.
+ *
+ * Scaling UP is allowed: the preview is vector and every font size scales with
+ * it, so a magnified preview is the same figure, just bigger. Returns null when
+ * the area has not been measured yet (zero width or height).
+ */
+export function fitFigureBox(
+  area: { w: number; h: number },
+  figure: { width: number; height: number },
+): { width: number; height: number } | null {
+  if (!(area.w > 0) || !(area.h > 0)) return null;
+  if (!(figure.width > 0) || !(figure.height > 0)) return null;
+  const scale = Math.min(area.w / figure.width, area.h / figure.height);
+  return { width: figure.width * scale, height: figure.height * scale };
+}
+
 /** Finite [min, max] of the values; [0, 1] when there are none. */
 export function autoRange(values: number[]): [number, number] {
   let lo = Infinity;
