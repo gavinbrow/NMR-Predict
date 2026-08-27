@@ -20,10 +20,25 @@ const NEW_FIXTURE = resolve(
 );
 const newPresent = existsSync(NEW_FIXTURE);
 
-describe.skipIf(!present)("real DATA.MS file", () => {
-  const buf = readFileSync(FIXTURE);
+/**
+ * Parse a fixture, or return null when it isn't on disk.
+ *
+ * `describe.skipIf(...)` skips the tests but STILL EVALUATES the describe body
+ * at collection time, so reading the file directly there throws ENOENT and
+ * fails the whole suite whenever a fixture is absent — which is the normal
+ * state, since these multi-megabyte instrument files are gitignored. Returning
+ * null keeps collection safe; nothing dereferences it, because every `it` that
+ * would is skipped.
+ */
+function loadFixture(path: string, name: string): ReturnType<typeof parseChemStationMs> {
+  if (!existsSync(path)) return null as unknown as ReturnType<typeof parseChemStationMs>;
+  const buf = readFileSync(path);
   const ab = buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength);
-  const run = parseChemStationMs(ab, { name: "DATA.MS", sourcePath: FIXTURE });
+  return parseChemStationMs(ab, { name, sourcePath: path });
+}
+
+describe.skipIf(!present)("real DATA.MS file", () => {
+  const run = loadFixture(FIXTURE, "DATA.MS");
 
   it("parses 3306 scans", () => {
     expect(run.scanCount).toBe(3306);
@@ -86,9 +101,7 @@ describe.skipIf(!present)("real DATA.MS file", () => {
 });
 
 describe.skipIf(!newPresent)("real ACSDCPD_50_1.D DATA.MS file", () => {
-  const buf = readFileSync(NEW_FIXTURE);
-  const ab = buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength);
-  const run = parseChemStationMs(ab, { name: "ACSDCPD_50_1.D", sourcePath: NEW_FIXTURE });
+  const run = loadFixture(NEW_FIXTURE, "ACSDCPD_50_1.D");
 
   it("parses the complete 27 minute run", () => {
     expect(run.scanCount).toBe(20_330);

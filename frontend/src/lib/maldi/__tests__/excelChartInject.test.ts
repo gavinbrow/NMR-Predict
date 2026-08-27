@@ -215,3 +215,103 @@ describe("excelChartInject", () => {
     await expect(reopened.xlsx.load(after)).resolves.toBeDefined();
   });
 });
+
+/**
+ * The multi-series / style / axis-title options the TGA workspace needs. These
+ * are all opt-in: the MALDI cases above pin the defaults, and these pin that
+ * every override actually reaches the chart XML.
+ */
+describe("excelChartInject — multi-series specs", () => {
+  async function chartXmlFor(spec: ChartSpec): Promise<string> {
+    const after = await injectCharts(await buildSampleWorkbook(), [spec]);
+    const zip = await JSZip.loadAsync(after);
+    return zip.file("xl/charts/chart1.xml")!.async("string");
+  }
+
+  const base = {
+    sheetName: "Series",
+    seriesName: "ignored",
+    xRange: "",
+    yRange: "",
+    xMin: 0,
+    xMax: 600,
+    yMin: 0,
+    yMax: 100,
+    anchorCol: 8,
+    anchorRow: 1,
+  } satisfies Omit<ChartSpec, "series">;
+
+  it("emits one c:ser per entry, indexed and ordered", async () => {
+    const chart = await chartXmlFor({
+      ...base,
+      series: [
+        { name: "Run A", xRange: "A6:A9", yRange: "B6:B9" },
+        { name: "Run B", xRange: "A6:A9", yRange: "D6:D9" },
+      ],
+    });
+    const doc = parseXml(chart, "chart1.xml");
+    const sers = [...doc.getElementsByTagName("c:ser")];
+    expect(sers).toHaveLength(2);
+    expect(sers.map((e) => e.getElementsByTagName("c:idx")[0].getAttribute("val"))).toEqual([
+      "0",
+      "1",
+    ]);
+    expect(chart).toContain("Run A");
+    expect(chart).toContain("Run B");
+    // Each series keeps its own y range.
+    expect(chart).toContain("'Series'!$B$6:$B$9");
+    expect(chart).toContain("'Series'!$D$6:$D$9");
+  });
+
+  it("colours a series with an explicit srgbClr instead of the theme's tx1", async () => {
+    const chart = await chartXmlFor({
+      ...base,
+      series: [{ name: "Run A", xRange: "A6:A9", yRange: "B6:B9", color: "#2563EB" }],
+    });
+    expect(chart).toContain('<a:srgbClr val="2563EB"/>');
+  });
+
+  it("honours the style overrides: solid line, no markers, no trendline, legend on", async () => {
+    const chart = await chartXmlFor({
+      ...base,
+      series: [{ name: "Run A", xRange: "A6:A9", yRange: "B6:B9" }],
+      style: { line: "solid", markers: false, trendline: false, legend: true },
+    });
+    expect(chart).not.toContain("prstDash");
+    expect(chart).toContain('<c:symbol val="none"/>');
+    expect(chart).not.toContain("<c:trendline>");
+    expect(chart).toContain("<c:legend>");
+  });
+
+  it("uses the per-spec axis titles and number formats", async () => {
+    const chart = await chartXmlFor({
+      ...base,
+      series: [{ name: "Run A", xRange: "A6:A9", yRange: "B6:B9" }],
+      xTitle: "Temperature (°C)",
+      yTitle: "Weight (%)",
+      xNumFmt: "0",
+      yNumFmt: "0.000",
+    });
+    expect(chart).toContain("Temperature (");
+    expect(chart).toContain("Weight (%)");
+    expect(chart).toContain('formatCode="0.000"');
+    expect(chart).not.toContain("Repeat Units (n)");
+  });
+
+  it("still produces a package Excel can reopen", async () => {
+    const after = await injectCharts(await buildSampleWorkbook(), [
+      {
+        ...base,
+        series: [
+          { name: "Run A", xRange: "A6:A9", yRange: "B6:B9", color: "2563EB" },
+          { name: "Run B", xRange: "A6:A9", yRange: "D6:D9", color: "DC2626" },
+        ],
+        style: { line: "solid", markers: false, trendline: false, legend: true },
+        xTitle: "Temperature (°C)",
+        yTitle: "Weight (%)",
+      },
+    ]);
+    const reopened = new ExcelJS.Workbook();
+    await expect(reopened.xlsx.load(after)).resolves.toBeDefined();
+  });
+});

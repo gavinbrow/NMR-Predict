@@ -66,7 +66,7 @@ const CHECKER: React.CSSProperties = {
 };
 
 const PREVIEW_HINT =
-  "Scroll to scale the y-axis (bring peaks up / down) · drag to zoom in · double-click to reset · drag the legend to move it.";
+  "Scroll over the plot to scale both y-axes, or over one axis to scale just that one · drag to zoom in · double-click to reset · drag the legend to move it.";
 
 /**
  * The figure editor: live WYSIWYG preview + export bar on the left, the full
@@ -209,11 +209,23 @@ export function FigureMaker({
 
   // Drag-zoom on the preview writes manual axis bounds; legend drags write a
   // custom legend position. Both live in `options`, so exports match the screen.
-  const handleZoom = (next: { x?: { min: number; max: number }; y?: { min: number; max: number } }) =>
+  // Drag-zoom acts on the primary x and y only — a box drawn over the plot has
+  // no sensible reading on a second, independent y-scale. Wheel-scale does
+  // reach y2: over the plot it scales both axes together, over a gutter only
+  // that axis (see `FigureSvg`'s wheel handler).
+  const handleZoom = (next: {
+    x?: { min: number; max: number };
+    y?: { min: number; max: number };
+    y2?: { min: number; max: number };
+  }) =>
     onChange({
       ...options,
       x: next.x ? { ...options.x, min: next.x.min, max: next.x.max } : options.x,
       y: next.y ? { ...options.y, min: next.y.min, max: next.y.max } : options.y,
+      y2:
+        next.y2 && options.y2
+          ? { ...options.y2, min: next.y2.min, max: next.y2.max }
+          : options.y2,
     });
   const handleLegendMove = (custom: { x: number; y: number }) =>
     onChange({ ...options, legend: { ...options.legend, custom } });
@@ -221,12 +233,14 @@ export function FigureMaker({
     options.x.min !== null ||
     options.x.max !== null ||
     options.y.min !== null ||
-    options.y.max !== null;
+    options.y.max !== null ||
+    (options.y2 != null && (options.y2.min !== null || options.y2.max !== null));
   const resetZoom = () =>
     onChange({
       ...options,
       x: { ...options.x, min: null, max: null },
       y: { ...options.y, min: null, max: null },
+      y2: options.y2 ? { ...options.y2, min: null, max: null } : options.y2,
     });
 
   // `className` differs between the two layouts: inline the SVG fills the column

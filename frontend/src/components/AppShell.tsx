@@ -93,6 +93,13 @@ export function AppShell({
               >
                 Tensile
               </NavLink>
+              <NavLink
+                to="/tga"
+                className={navLinkClassName}
+                activeClassName={navLinkActiveClassName}
+              >
+                TGA
+              </NavLink>
             </nav>
           </div>
 

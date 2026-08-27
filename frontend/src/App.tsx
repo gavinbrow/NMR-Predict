@@ -13,6 +13,7 @@ import Maldi from "./pages/Maldi.tsx";
 import NotFound from "./pages/NotFound.tsx";
 import SpectrumAnalysis from "./pages/SpectrumAnalysis.tsx";
 import Tensile from "./pages/Tensile.tsx";
+import Tga from "./pages/Tga.tsx";
 
 const queryClient = new QueryClient();
 
@@ -30,6 +31,7 @@ const KEEP_ALIVE: { path: string; element: JSX.Element }[] = [
   { path: "/gcms", element: <Gcms /> },
   { path: "/ir", element: <IrKinetics /> },
   { path: "/tensile", element: <Tensile /> },
+  { path: "/tga", element: <Tga /> },
 ];
 const KEEP_ALIVE_PATHS = new Set(KEEP_ALIVE.map((route) => route.path));
 

@@ -116,6 +116,13 @@ const Home = () => {
           title="Tensile analysis"
           description="Drop zwickRoell/Instron tensile Excel exports, extract modulus, strength, yield and toughness, compare multiple files, and export to Excel and PDF."
         />
+        <WorkspaceCard
+          href="/tga"
+          icon={Activity}
+          eyebrow="Thermal"
+          title="TGA analysis"
+          description="Drop TA Q50 and TRIOS thermogravimetric files, compute Td/onset/DTG/residue, overlay runs, and build publication figures with a secondary axis."
+        />
       </section>
     </AppShell>
   );

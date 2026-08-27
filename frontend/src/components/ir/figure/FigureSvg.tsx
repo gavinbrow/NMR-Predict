@@ -41,6 +41,143 @@ function rankOf(p: PeakLabelDatum): number {
 const Y_SCALE_IN = 0.8;
 const Y_SCALE_OUT = 1.25;
 
+/** Plot-area bounds a label is clamped inside. */
+interface LabelBounds {
+  marginLeft: number;
+  marginTop: number;
+  plotW: number;
+  plotH: number;
+}
+
+/** The estimated axis-aligned box (pre-rotation) of a drawn peak label.
+ *  `x`/`y` are the clamped draw anchor; `middle` is the text-anchor mode. */
+interface LabelBoxRect {
+  x: number;
+  y: number;
+  middle: boolean;
+  left: number;
+  right: number;
+  top: number;
+  bottom: number;
+}
+
+/**
+ * Where a label draws at the given nudge. Text width is *estimated* from the
+ * glyph count — never measured with `getBBox`, which would race the exporter's
+ * two-rAF settle — so the declutter pass, the renderer and the pointer hit-test
+ * all agree by construction.
+ */
+function labelBoxAt(
+  p: { anchorPx: number; apexY: number; text: string },
+  dx: number,
+  dy: number,
+  pl: { fontSize: number; rotation: number; offset: number },
+  b: LabelBounds,
+): LabelBoxRect {
+  const x = clamp(p.anchorPx + dx, b.marginLeft, b.marginLeft + b.plotW);
+  // Rotated text extends vertically by its (horizontal) text width: -90° grows
+  // upward from the anchor, +90° downward. Peak labels render outside the clip
+  // group, so clamp the anchor by the rotated extent to keep the whole glyph
+  // inside the figure frame.
+  const textW = p.text.length * pl.fontSize * 0.6;
+  const rotated = pl.rotation !== 0;
+  const upExt = rotated ? (pl.rotation < 0 ? textW : 0) : pl.fontSize;
+  const downExt = rotated ? (pl.rotation < 0 ? 0 : textW) : 0;
+  const y = clamp(p.apexY - pl.offset + dy, b.marginTop + upExt, b.marginTop + b.plotH - downExt);
+  const halfW = textW / 2;
+  const middle = pl.rotation === 0;
+  return {
+    x,
+    y,
+    middle,
+    left: middle ? x - halfW - 2 : x - 2,
+    right: middle ? x + halfW + 2 : x + halfW * 2 + 2,
+    top: y - pl.fontSize * 0.9,
+    bottom: y + pl.fontSize * 0.3,
+  };
+}
+
+/** Overlapping area of two label boxes (0 when they clear each other), used
+ *  both as the collision test and as the tie-break when nothing is free. */
+function overlapArea(a: LabelBoxRect, b: LabelBoxRect, pad: number): number {
+  const w = Math.min(a.right + pad, b.right + pad) - Math.max(a.left - pad, b.left - pad);
+  const h = Math.min(a.bottom + pad, b.bottom + pad) - Math.max(a.top - pad, b.top - pad);
+  return w > 0 && h > 0 ? w * h : 0;
+}
+
+/**
+ * Vertical steps tried on each side of a colliding label. 40 steps of ~1.5 line
+ * heights reaches the whole of a 600px-tall figure from anywhere in it, which is
+ * what a TGA overlay of half a dozen runs needs — its callouts all crowd into
+ * the same 150px of x.
+ */
+const DECLUTTER_STEPS = 40;
+
+/**
+ * Push overlapping labels apart vertically (see {@link PeakLabelOptions.declutter}).
+ *
+ * `minGap` thins labels that crowd in x, which is the right tool for a
+ * spectrum's peak ladder — but it can't help a figure whose labels are all
+ * pinned (custom text bypasses thinning), which is exactly a TGA overlay's
+ * onset/Td/Tmax callouts across several runs. Labels the user has placed by
+ * hand keep their spot and act as fixed obstacles; the rest get the first free
+ * slot above (then below) their anchor.
+ */
+function declutterLabels<T extends { anchorPx: number; apexY: number; text: string; dx: number; dy: number; fixed: boolean }>(
+  items: T[],
+  pl: { fontSize: number; rotation: number; offset: number },
+  b: LabelBounds,
+): T[] {
+  if (items.length < 2) return items;
+  // A full line height plus the box padding, so one step always clears a
+  // neighbour outright — a shorter step leaves a sliver of overlap that the
+  // search then has to spend candidates escaping.
+  const step = Math.max(2, pl.fontSize * 1.5);
+  const placed: LabelBoxRect[] = [];
+  const out = new Map<T, number>();
+
+  // Hand-placed labels first: they never move, so everything else works around
+  // where the user put them.
+  for (const it of items) {
+    if (!it.fixed) continue;
+    placed.push(labelBoxAt(it, it.dx, it.dy, pl, b));
+  }
+  // Top-down (then left-to-right) so the packing fills the plot in reading
+  // order and stays stable as the view changes.
+  const free = items.filter((it) => !it.fixed).sort((a, c) => a.apexY - c.apexY || a.anchorPx - c.anchorPx);
+  for (const it of free) {
+    let chosen = it.dy;
+    let chosenBox = labelBoxAt(it, it.dx, it.dy, pl, b);
+    // Track the least-bad placement too: past a certain density no arrangement
+    // is collision-free, and "wherever it started" is a much worse answer than
+    // "wherever it overlaps least".
+    let bestCost = Infinity;
+    let settled = false;
+    for (let k = 0; k <= DECLUTTER_STEPS && !settled; k += 1) {
+      // Upward first (labels already sit above their anchor), then down.
+      for (const dy of k === 0 ? [it.dy] : [it.dy - k * step, it.dy + k * step]) {
+        const box = labelBoxAt(it, it.dx, dy, pl, b);
+        let cost = 0;
+        for (const q of placed) cost += overlapArea(box, q, 1);
+        if (cost === 0) {
+          chosen = dy;
+          chosenBox = box;
+          settled = true;
+          break;
+        }
+        if (cost < bestCost) {
+          bestCost = cost;
+          chosen = dy;
+          chosenBox = box;
+        }
+      }
+    }
+    placed.push(chosenBox);
+    out.set(it, chosen);
+  }
+  return items.map((it) => (out.has(it) ? { ...it, dy: out.get(it)! } : it));
+}
+
 /** A drag in progress on the interactive preview. Coordinates are viewBox px. */
 type Drag =
   | { kind: "zoom"; x0: number; y0: number; x1: number; y1: number }
@@ -78,7 +215,15 @@ export interface FigureSvgProps {
   /** Enable drag-to-zoom on the plot and drag-to-move on the legend. */
   interactive?: boolean;
   /** A drag-zoom committed a new range (an axis is omitted if barely dragged). */
-  onZoom?: (next: { x?: { min: number; max: number }; y?: { min: number; max: number } }) => void;
+  onZoom?: (next: {
+    x?: { min: number; max: number };
+    y?: { min: number; max: number };
+    /** The secondary y2 axis, when the figure has one. Drag-zoom acts on the
+     *  primary y only — y2 keeps its own (auto or manual) range, because trying
+     *  to couple two independent scales through one gesture is worse than leaving
+     *  them independent. Wheel-scale is primary-y-only for the same reason. */
+    y2?: { min: number; max: number };
+  }) => void;
   /** Scrolling fully back out asks the host to clear manual bounds (auto fit). */
   onResetZoom?: () => void;
   /** The legend was dropped; position is the box top-left as plot-area fractions. */
@@ -134,20 +279,47 @@ export function FigureSvg({
       .map((st) => ({ st, sd: data.series.find((s) => s.id === st.id) }))
       .filter((p): p is { st: SeriesStyle; sd: FigureSeriesData } => p.st.visible && !!p.sd);
 
+    // Partition by axis: the left ("y") is the IR/MALDI/GC-MS default; the
+    // right ("y2") only exists when the host supplied a y2Label AND at least one
+    // visible series claims it. When no series uses y2, the right axis is not
+    // drawn even if `options.y2` is set — hiding those series hides the axis,
+    // with no extra visibility flag to track.
+    const primary = visible.filter((v) => (v.st.axis ?? "y") === "y");
+    const secondary = visible.filter((v) => v.st.axis === "y2");
+    const hasY2 = !!options.y2 && secondary.length > 0;
+
     // Series may carry their own x (mass-spectra overlays / stick series); the
     // x-axis spans the union, falling back to the shared grid when none do.
     const anyOwnX = visible.some((v) => v.sd.x);
     const xValues = anyOwnX ? visible.flatMap((v) => v.sd.x ?? data.x) : data.x;
-    const yValues = visible.flatMap((v) =>
+    const yValues = primary.flatMap((v) =>
+      v.sd.baseline == null ? v.sd.y : [...v.sd.y, v.sd.baseline],
+    );
+    const y2Values = secondary.flatMap((v) =>
       v.sd.baseline == null ? v.sd.y : [...v.sd.y, v.sd.baseline],
     );
     const xAxis = resolveAxis(options.x, xValues);
     const yAxis = resolveAxis(options.y, yValues);
+    // The secondary axis resolves against the secondary series only. When the
+    // host has no y2 series, `y2Values` is empty and `resolveAxis` falls back to
+    // [0, 1] — but we never read the result because `hasY2` is false.
+    const y2Axis = hasY2 ? resolveAxis(options.y2!, y2Values) : null;
 
     // Margins sized from the fonts and what's shown on each side.
     const titleH = options.title ? options.titleFontSize * 1.6 : 0;
     const marginTop = 14 + titleH;
-    const marginRight = 16;
+    // The right margin grows when a y2 axis is drawn, mirroring the left
+    // margin's tick + label arithmetic. Without y2 it stays 16 — the exact
+    // value every IR/MALDI/GC-MS figure already uses, so those hosts render
+    // byte-identically to before.
+    const marginRightBase = 16;
+    const y2TickChars =
+      hasY2 && options.y2!.showTickLabels
+        ? Math.max(1, ...y2Axis!.ticks.map((t) => formatTick(t, y2Axis!.decimals).length))
+        : 0;
+    const y2TickW = hasY2 && options.y2!.showTickLabels ? y2TickChars * options.tickFontSize * 0.62 + 10 : 0;
+    const y2LabelW = hasY2 && options.y2!.label ? options.axisFontSize * 1.6 : 0;
+    const marginRight = marginRightBase + (hasY2 ? y2TickW + y2LabelW : 0);
     const xTickH = options.x.showTickLabels ? options.tickFontSize * 1.5 : 6;
     const xLabelH = options.x.label ? options.axisFontSize * 1.8 : 0;
     const marginBottom = 10 + xTickH + xLabelH;
@@ -166,23 +338,33 @@ export function FigureSvg({
     const sx = (v: number) =>
       marginLeft + ((options.reversedX ? xAxis.hi - v : v - xAxis.lo) / xSpan) * plotW;
     const sy = (v: number) => marginTop + ((yAxis.hi - v) / ySpan) * plotH;
+    // The secondary y-scale. Mirrors `sy` but over the y2 range. When there is
+    // no y2 axis, this is never read (no series uses it).
+    const y2Span = y2Axis ? y2Axis.hi - y2Axis.lo : 1;
+    const sy2 = (v: number) => marginTop + ((y2Axis!.hi - v) / y2Span) * plotH;
     // Stems grow from the zero line when it is in view, else from the axis floor.
     const stickBaseY = sy(yAxis.lo <= 0 && yAxis.hi >= 0 ? 0 : yAxis.lo);
+    const stickBaseY2 = y2Axis
+      ? sy2(y2Axis.lo <= 0 && y2Axis.hi >= 0 ? 0 : y2Axis.lo)
+      : stickBaseY;
 
     const paths = visible.map(({ st, sd }) => {
       const ownX = sd.x ?? data.x;
+      const onY2 = st.axis === "y2";
+      const syThis = onY2 && hasY2 ? sy2 : sy;
+      const baseThis = onY2 && hasY2 ? stickBaseY2 : stickBaseY;
       // A uniform stick colour paints every stem one colour so the series
       // colours live only in the labels and the legend ("colour the labels, not
       // the spectrum"). Line series always keep their own colour.
       const color = st.kind === "sticks" && options.stickColor ? options.stickColor : st.color;
       if (st.kind === "sticks") {
         // Stems are the sparse peak set already — never decimated.
-        const baseY = sd.baseline == null ? stickBaseY : sy(sd.baseline);
-        const d = sticksPathD(ownX, sd.y, sx, sy, baseY);
+        const baseY = sd.baseline == null ? baseThis : syThis(sd.baseline);
+        const d = sticksPathD(ownX, sd.y, sx, syThis, baseY);
         const markers =
           st.markers && sd.y.length <= MARKER_LIMIT
             ? ownX
-                .map((xv, i) => ({ cx: sx(xv), cy: sy(sd.y[i]), ok: Number.isFinite(xv) && Number.isFinite(sd.y[i]) }))
+                .map((xv, i) => ({ cx: sx(xv), cy: syThis(sd.y[i]), ok: Number.isFinite(xv) && Number.isFinite(sd.y[i]) }))
                 .filter((p) => p.ok)
             : [];
         return { st, d, markers, color };
@@ -205,20 +387,35 @@ export function FigureSvg({
           ys = dec.y;
         }
       }
-      const d = st.lineStyle !== "none" ? seriesPathD(xs, ys, sx, sy) : "";
+      const d = st.lineStyle !== "none" ? seriesPathD(xs, ys, sx, syThis) : "";
       const markers =
         st.markers && ys.length <= MARKER_LIMIT
           ? xs
-              .map((xv, i) => ({ cx: sx(xv), cy: sy(ys[i]), ok: Number.isFinite(xv) && Number.isFinite(ys[i]) }))
+              .map((xv, i) => ({ cx: sx(xv), cy: syThis(ys[i]), ok: Number.isFinite(xv) && Number.isFinite(ys[i]) }))
               .filter((p) => p.ok)
           : [];
       return { st, d, markers, color };
     });
 
-    return { visible, xAxis, yAxis, marginTop, marginLeft, plotW, plotH, paths, sx, sy };
+    return {
+      visible,
+      hasY2,
+      xAxis,
+      yAxis,
+      y2Axis,
+      marginTop,
+      marginRight,
+      marginLeft,
+      plotW,
+      plotH,
+      paths,
+      sx,
+      sy,
+      sy2,
+    };
   }, [data, options, decimate]);
 
-  const { visible, xAxis, yAxis, marginTop, marginLeft, plotW, plotH, paths } = fig;
+  const { visible, hasY2, xAxis, yAxis, y2Axis, marginTop, marginRight, marginLeft, plotW, plotH, paths } = fig;
   const { width, height } = options;
   const axisWeight = options.axisBold ? 700 : 400;
 
@@ -418,11 +615,19 @@ export function FigureSvg({
         // thinning so an edit can't make them vanish.
         const pinned = !!ov || custom || p.id === selectedLabelId;
         const anchorPx = fig.sx(p.x);
+        // A label whose owning series is on the right-hand y2 axis anchors
+        // against that axis; otherwise the left. Treated as left when there is
+        // no owning series, or no y2 axis is in use.
+        const owningStyle = p.seriesId
+          ? options.series.find((s) => s.id === p.seriesId)
+          : undefined;
+        const useY2 = !!owningStyle && owningStyle.axis === "y2" && hasY2;
+        const apexY = useY2 ? fig.sy2(p.y) : fig.sy(p.y);
         return {
           id: p.id,
           px: anchorPx, // thinning key (min-gap uses the anchor position)
           anchorPx,
-          apexY: fig.sy(p.y),
+          apexY,
           dx: ov?.dx ?? 0,
           dy: ov?.dy ?? 0,
           // Rank by the host's priority when it supplied one (a stacked
@@ -432,6 +637,8 @@ export function FigureSvg({
           text,
           color,
           pinned,
+          // A hand-placed label is never moved by the declutter pass.
+          fixed: !!ov,
         };
       })
       // A pinned/"force show" label must still sit in the x-window and carry a
@@ -443,11 +650,26 @@ export function FigureSvg({
           p.anchorPx >= marginLeft - eps &&
           p.anchorPx <= marginLeft + plotW + eps,
       );
+    const picked = pickVisibleLabels(projected, pl.maxLabels, pl.minGap);
     return {
-      drawn: pickVisibleLabels(projected, pl.maxLabels, pl.minGap),
+      drawn: pl.declutter
+        ? declutterLabels(picked, pl, { marginLeft, marginTop, plotW, plotH })
+        : picked,
       candidates: projected.length,
     };
-  }, [data.peakLabels, options.peakLabels, fig, marginLeft, plotW, seriesColorById, selectedLabelId]);
+  }, [
+    data.peakLabels,
+    options.peakLabels,
+    options.series,
+    fig,
+    hasY2,
+    marginLeft,
+    marginTop,
+    plotW,
+    plotH,
+    seriesColorById,
+    selectedLabelId,
+  ]);
   const peakLabelEls = peakLabels.drawn;
 
   // Report drawn-vs-thinned counts to the host (used to surface "N hidden").
@@ -458,43 +680,14 @@ export function FigureSvg({
     });
   }, [onLabelStats, peakLabels]);
 
-  // Estimated axis-aligned hit/label box (pre-rotation) for a projected label at
-  // the given nudge — shared by the renderer and the pointer hit-test so they
-  // never drift. Text width is *estimated* from the glyph count (never measured
-  // with getBBox, which would race the exporter's two-rAF settle). `x`/`y` are
-  // the clamped draw anchor; `middle` is the text-anchor mode.
+  // Where a label draws at the given nudge — the renderer, the pointer
+  // hit-test and the declutter pass all go through `labelBoxAt`, so they can
+  // never drift apart.
   const labelBox = (
     p: { anchorPx: number; apexY: number; text: string },
     dx: number,
     dy: number,
-  ) => {
-    const pl = options.peakLabels;
-    const x = clamp(p.anchorPx + dx, marginLeft, marginLeft + plotW);
-    // Rotated text extends vertically by its (horizontal) text width: -90°
-    // grows upward from the anchor, +90° downward. Peak labels render outside
-    // the clip group, so clamp the anchor by the rotated extent to keep the
-    // whole glyph inside the figure frame.
-    const textW = p.text.length * pl.fontSize * 0.6;
-    const rotated = pl.rotation !== 0;
-    const upExt = rotated ? (pl.rotation < 0 ? textW : 0) : pl.fontSize;
-    const downExt = rotated ? (pl.rotation < 0 ? 0 : textW) : 0;
-    const y = clamp(
-      p.apexY - pl.offset + dy,
-      marginTop + upExt,
-      marginTop + plotH - downExt,
-    );
-    const halfW = (p.text.length * pl.fontSize * 0.6) / 2;
-    const middle = pl.rotation === 0;
-    return {
-      x,
-      y,
-      middle,
-      left: middle ? x - halfW - 2 : x - 2,
-      right: middle ? x + halfW + 2 : x + halfW * 2 + 2,
-      top: y - pl.fontSize * 0.9,
-      bottom: y + pl.fontSize * 0.3,
-    };
-  };
+  ) => labelBoxAt(p, dx, dy, options.peakLabels, { marginLeft, marginTop, plotW, plotH });
 
   // Hit-test the (already drawn) labels top-most first, un-rotating the pointer
   // into each label's local frame so rotated labels test correctly.
@@ -543,21 +736,39 @@ export function FigureSvg({
   };
   const invY = (vy: number) => yAxis.hi - ((vy - marginTop) / plotH) * (yAxis.hi - yAxis.lo);
 
-  // Scroll = scale the intensity (y) axis with its floor pinned, so peaks grow
-  // and shrink from the baseline — the same gesture as the live MALDI viewer
+  // Scroll = scale an intensity axis with its floor pinned, so curves grow and
+  // shrink from the baseline — the same gesture as the live MALDI viewer
   // (scroll up → smaller max → taller peaks, revealing small ones; down →
-  // shorter). The x-axis is left to drag-to-zoom. Kept in a ref + native
-  // non-passive listener so we can preventDefault the page scroll over the plot.
+  // shorter). WHERE the pointer is decides WHICH axis moves: over the plot it
+  // scales both y-axes together (so a TGA figure's mass curve and its DTG keep
+  // their relative sizes), over the left gutter only the primary, over the
+  // right gutter only y2. The x-axis is left to drag-to-zoom. Kept in a ref +
+  // native non-passive listener so we can preventDefault the page scroll.
   wheelRef.current = (e: WheelEvent) => {
     if (!interactive || !onZoom || e.deltaY === 0) return;
     const { vx, vy } = clientToVb(e.clientX, e.clientY);
-    const inPlot =
-      vx >= marginLeft && vx <= marginLeft + plotW && vy >= marginTop && vy <= marginTop + plotH;
-    if (!inPlot) return;
+    // A generous band around the plot rows, so the gutters are easy to hit.
+    if (vy < marginTop - 8 || vy > marginTop + plotH + 8) return;
+    const overPlot = vx >= marginLeft && vx <= marginLeft + plotW;
+    const overLeftAxis = vx >= 0 && vx < marginLeft;
+    const overRightAxis = hasY2 && vx > marginLeft + plotW && vx <= width;
+    if (!overPlot && !overLeftAxis && !overRightAxis) return;
     e.preventDefault();
-    const floor = yAxis.lo;
-    const max = floor + (yAxis.hi - floor) * (e.deltaY < 0 ? Y_SCALE_IN : Y_SCALE_OUT);
-    if (max > floor) onZoom({ y: { min: floor, max } });
+    const factor = e.deltaY < 0 ? Y_SCALE_IN : Y_SCALE_OUT;
+    const scaled = (axis: { lo: number; hi: number }) => {
+      const max = axis.lo + (axis.hi - axis.lo) * factor;
+      return max > axis.lo ? { min: axis.lo, max } : null;
+    };
+    const next: { y?: { min: number; max: number }; y2?: { min: number; max: number } } = {};
+    if (overPlot || overLeftAxis) {
+      const y = scaled(yAxis);
+      if (y) next.y = y;
+    }
+    if ((overPlot || overRightAxis) && y2Axis) {
+      const y2 = scaled(y2Axis);
+      if (y2) next.y2 = y2;
+    }
+    if (next.y || next.y2) onZoom(next);
   };
 
   useEffect(() => {
@@ -577,16 +788,21 @@ export function FigureSvg({
       const hit = hitTestLabel(vx, vy);
       if (hit) {
         svgRef.current?.setPointerCapture(e.pointerId);
-        const ov = options.peakLabels.overrides[hit.id];
+        // Start from the placement the label is DRAWN at, not from its stored
+        // override — with declutter on those differ, and seeding from the
+        // override would make the label jump the instant it is grabbed.
+        const drawn = peakLabelEls.find((p) => p.id === hit.id);
+        const dx0 = drawn?.dx ?? options.peakLabels.overrides[hit.id]?.dx ?? 0;
+        const dy0 = drawn?.dy ?? options.peakLabels.overrides[hit.id]?.dy ?? 0;
         setDrag({
           kind: "label",
           id: hit.id,
           startX: vx,
           startY: vy,
-          dx0: ov?.dx ?? 0,
-          dy0: ov?.dy ?? 0,
-          dx: ov?.dx ?? 0,
-          dy: ov?.dy ?? 0,
+          dx0,
+          dy0,
+          dx: dx0,
+          dy: dy0,
           moved: false,
         });
         onLabelSelect?.(hit.id);
@@ -658,7 +874,11 @@ export function FigureSvg({
       const dx = Math.abs(drag.x1 - drag.x0);
       const dy = Math.abs(drag.y1 - drag.y0);
       if (dx >= DRAG_MIN || dy >= DRAG_MIN) {
-        const next: { x?: { min: number; max: number }; y?: { min: number; max: number } } = {};
+        const next: {
+          x?: { min: number; max: number };
+          y?: { min: number; max: number };
+          y2?: { min: number; max: number };
+        } = {};
         if (dx >= DRAG_MIN) {
           const a = invX(drag.x0);
           const b = invX(drag.x1);
@@ -742,6 +962,21 @@ export function FigureSvg({
               stroke={options.y.gridColor}
               strokeWidth={options.y.gridWidth}
               strokeDasharray={dashArray(options.y.gridStyle, options.y.gridWidth)}
+            />
+          ))}
+        {/* Secondary y2 gridlines — off by default; two gridded axes
+            double-draw, so this only renders when the user turns it on. */}
+        {hasY2 && options.y2!.showGrid &&
+          y2Axis!.ticks.map((t) => (
+            <line
+              key={`gy2${t}`}
+              x1={marginLeft}
+              x2={marginLeft + plotW}
+              y1={fig.sy2(t)}
+              y2={fig.sy2(t)}
+              stroke={options.y2!.gridColor}
+              strokeWidth={options.y2!.gridWidth}
+              strokeDasharray={dashArray(options.y2!.gridStyle, options.y2!.gridWidth)}
             />
           ))}
 
@@ -838,6 +1073,37 @@ export function FigureSvg({
           </g>
         ))}
 
+        {/* Y2 (right-hand) ticks + labels — mirrors the left, drawing ticks
+            outside the frame and labels to their right. Rendered only when a
+            y2 axis is in use (host supplied y2Label and at least one visible
+            series claims it); without y2 the block is absent, so IR/MALDI/GC-MS
+            produce byte-identical markup to before. */}
+        {hasY2 &&
+          y2Axis!.ticks.map((t) => (
+            <g key={`ty2${t}`}>
+              <line
+                x1={marginLeft + plotW}
+                x2={marginLeft + plotW + 5}
+                y1={fig.sy2(t)}
+                y2={fig.sy2(t)}
+                stroke={options.frameColor}
+                strokeWidth={options.frameWidth}
+              />
+              {options.y2!.showTickLabels && (
+                <text
+                  x={marginLeft + plotW + 8}
+                  y={fig.sy2(t) + options.tickFontSize * 0.35}
+                  textAnchor="start"
+                  fontSize={options.tickFontSize}
+                  fontWeight={axisWeight}
+                  fill={options.axisColor}
+                >
+                  {formatTick(t, y2Axis!.decimals)}
+                </text>
+              )}
+            </g>
+          ))}
+
         {/* Axis labels + title */}
         {options.x.label && (
           <text
@@ -862,6 +1128,21 @@ export function FigureSvg({
             transform={`rotate(-90 ${10 + options.axisFontSize * 0.8} ${marginTop + plotH / 2})`}
           >
             {options.y.label}
+          </text>
+        )}
+        {/* Y2 axis label, rotated +90° at the far right so it reads
+            bottom-to-top on the correct side. */}
+        {hasY2 && options.y2!.label && (
+          <text
+            x={width - 10 - options.axisFontSize * 0.8}
+            y={marginTop + plotH / 2}
+            textAnchor="middle"
+            fontSize={options.axisFontSize}
+            fontWeight={axisWeight}
+            fill={options.axisColor}
+            transform={`rotate(90 ${width - 10 - options.axisFontSize * 0.8} ${marginTop + plotH / 2})`}
+          >
+            {options.y2!.label}
           </text>
         )}
         {options.title && (

@@ -14,16 +14,66 @@
  * that OOXML requires.
  */
 
+/** One plotted series inside a {@link ChartSpec}. Supplying `series` lets a
+ *  chart carry several curves; a spec without it is the original single-series
+ *  form and keeps working unchanged. */
+export interface ChartSeriesSpec {
+  /** Series name in `c:tx` (also the legend entry, when a legend is shown). */
+  name: string;
+  /** X values range, e.g. "A27:A38", on {@link sheet} (default: the spec's own). */
+  xRange: string;
+  /** Y values range, e.g. "B27:B38", on {@link sheet} (default: the spec's own). */
+  yRange: string;
+  /**
+   * Worksheet the ranges live on, when it is not the sheet the chart is
+   * anchored to. Lets one chart plot several curves that each keep their data
+   * on their own sheet — which is how the TGA workbook charts every point of
+   * every run without duplicating the data next to the chart.
+   */
+  sheet?: string;
+  /** Line/marker colour as `RRGGBB` (no leading #). Defaults to the theme's
+   *  `tx1` (black), which is what the MALDI reference workbook uses. */
+  color?: string;
+}
+
+/** Per-chart formatting. Every field defaults to the MALDI reference
+ *  workbook's value, so a spec that omits `style` renders byte-identically to
+ *  before this option existed. */
+export interface ChartStyle {
+  /** `"dotted"` is the reference's `sysDot`; `"solid"` draws a plain line. */
+  line: "solid" | "dotted";
+  /** Draw point markers (the reference shows black circles). */
+  markers: boolean;
+  /** Add the invisible linear trendline that displays only its equation. */
+  trendline: boolean;
+  /** Smooth the line (`c:smooth val="1"`). */
+  smooth: boolean;
+  /** Show a legend on the right — off in the reference (single series). */
+  legend: boolean;
+}
+
+const DEFAULT_STYLE: ChartStyle = {
+  line: "dotted",
+  markers: true,
+  trendline: true,
+  smooth: false,
+  legend: false,
+};
+
 export interface ChartSpec {
   /** Worksheet name the chart lives on (and the ranges reference). */
   sheetName: string;
   /** Series name shown in the c:tx element (not visible — no legend — but
-   *  required by the schema and useful for accessibility / object inspection). */
+   *  required by the schema and useful for accessibility / object inspection).
+   *  Ignored when `series` is supplied. */
   seriesName: string;
-  /** X-axis (n) range, e.g. "A27:A38". */
+  /** X-axis (n) range, e.g. "A27:A38". Ignored when `series` is supplied. */
   xRange: string;
-  /** Y-axis (raw m/z) range, e.g. "B27:B38". */
+  /** Y-axis (raw m/z) range, e.g. "B27:B38". Ignored when `series` is supplied. */
   yRange: string;
+  /** Two or more curves on one chart. When present this SUPERSEDES
+   *  `seriesName` / `xRange` / `yRange`. */
+  series?: ChartSeriesSpec[];
   /** X-axis minimum (min n value for this series). */
   xMin: number;
   /** X-axis maximum (max n value for this series). */
@@ -32,6 +82,16 @@ export interface ChartSpec {
   yMin: number;
   /** Y-axis maximum (max raw m/z + 500). */
   yMax: number;
+  /** X-axis title. Defaults to the MALDI reference's "Repeat Units (n)". */
+  xTitle?: string;
+  /** Y-axis title. Defaults to the MALDI reference's "m/z". */
+  yTitle?: string;
+  /** X-axis number format. Defaults to "General" (source-linked). */
+  xNumFmt?: string;
+  /** Y-axis number format. Defaults to "0". */
+  yNumFmt?: string;
+  /** Formatting overrides; each field defaults to the MALDI reference's value. */
+  style?: Partial<ChartStyle>;
   /** Zero-based column + row of the top-left cell the chart anchors at. */
   anchorCol: number;
   anchorRow: number;
@@ -129,25 +189,51 @@ function valAxXml(
  * - Y axis: "m/z", integer format, 28575 EMU black line, transparent gridlines
  */
 function buildChartXml(spec: ChartSpec, chartIndex: number): string {
-  const sheetRef = `'${spec.sheetName.replace(/'/g, "''")}'!`;
-  const xRef = xmlEscape(`${sheetRef}${absoluteRange(spec.xRange)}`);
-  const yRef = xmlEscape(`${sheetRef}${absoluteRange(spec.yRange)}`);
+  const sheetRefFor = (name: string) => `'${name.replace(/'/g, "''")}'!`;
+  const sheetRef = sheetRefFor(spec.sheetName);
   const xAxId = 100000000 + chartIndex * 2;
   const yAxId = 100000001 + chartIndex * 2;
+  const style: ChartStyle = { ...DEFAULT_STYLE, ...spec.style };
+  const seriesList: ChartSeriesSpec[] = spec.series?.length
+    ? spec.series
+    : [{ name: spec.seriesName, xRange: spec.xRange, yRange: spec.yRange }];
 
-  // One scatter series: black dotted line, black circle markers, invisible
-  // linear trendline that shows only the equation (no R²).
-  const ser =
-    `<c:ser><c:idx val="0"/><c:order val="0"/>` +
-    `<c:tx><c:v>${xmlEscape(spec.seriesName)}</c:v></c:tx>` +
-    `<c:spPr><a:ln><a:solidFill><a:schemeClr val="tx1"/></a:solidFill><a:prstDash val="sysDot"/></a:ln></c:spPr>` +
-    `<c:marker><c:spPr><a:solidFill><a:schemeClr val="tx1"/></a:solidFill><a:ln><a:solidFill><a:schemeClr val="tx1"/></a:solidFill></a:ln></c:spPr></c:marker>` +
-    `<c:trendline><c:spPr><a:ln><a:noFill/></a:ln></c:spPr>` +
-    `<c:trendlineType val="linear"/><c:dispRSqr val="0"/><c:dispEq val="1"/>` +
-    `<c:trendlineLbl><c:layout/><c:numFmt formatCode="General" sourceLinked="0"/></c:trendlineLbl></c:trendline>` +
-    `<c:xVal><c:numRef><c:f>${xRef}</c:f></c:numRef></c:xVal>` +
-    `<c:yVal><c:numRef><c:f>${yRef}</c:f></c:numRef></c:yVal>` +
-    `<c:smooth val="0"/></c:ser>`;
+  /** Solid fill for a series' colour: the theme's tx1 (black) unless the series
+   *  names an explicit RRGGBB. */
+  const fillXml = (color?: string) =>
+    color
+      ? `<a:srgbClr val="${color.replace(/^#/, "").toUpperCase()}"/>`
+      : `<a:schemeClr val="tx1"/>`;
+
+  // Scatter series. The defaults reproduce the MALDI reference exactly: black
+  // dotted line, black circle markers, and an invisible linear trendline that
+  // displays only its equation (no R²).
+  const ser = seriesList
+    .map((s, i) => {
+      const ref = s.sheet ? sheetRefFor(s.sheet) : sheetRef;
+      const xRef = xmlEscape(`${ref}${absoluteRange(s.xRange)}`);
+      const yRef = xmlEscape(`${ref}${absoluteRange(s.yRange)}`);
+      const fill = fillXml(s.color);
+      return (
+        `<c:ser><c:idx val="${i}"/><c:order val="${i}"/>` +
+        `<c:tx><c:v>${xmlEscape(s.name)}</c:v></c:tx>` +
+        `<c:spPr><a:ln><a:solidFill>${fill}</a:solidFill>` +
+        (style.line === "dotted" ? `<a:prstDash val="sysDot"/>` : "") +
+        `</a:ln></c:spPr>` +
+        (style.markers
+          ? `<c:marker><c:spPr><a:solidFill>${fill}</a:solidFill><a:ln><a:solidFill>${fill}</a:solidFill></a:ln></c:spPr></c:marker>`
+          : `<c:marker><c:symbol val="none"/></c:marker>`) +
+        (style.trendline
+          ? `<c:trendline><c:spPr><a:ln><a:noFill/></a:ln></c:spPr>` +
+            `<c:trendlineType val="linear"/><c:dispRSqr val="0"/><c:dispEq val="1"/>` +
+            `<c:trendlineLbl><c:layout/><c:numFmt formatCode="General" sourceLinked="0"/></c:trendlineLbl></c:trendline>`
+          : "") +
+        `<c:xVal><c:numRef><c:f>${xRef}</c:f></c:numRef></c:xVal>` +
+        `<c:yVal><c:numRef><c:f>${yRef}</c:f></c:numRef></c:yVal>` +
+        `<c:smooth val="${style.smooth ? 1 : 0}"/></c:ser>`
+      );
+    })
+    .join("");
 
   return (
     `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n` +
@@ -161,10 +247,31 @@ function buildChartXml(spec: ChartSpec, chartIndex: number): string {
     ser +
     `<c:dLbls><c:showLegendKey val="0"/><c:showVal val="0"/><c:showCatName val="0"/><c:showSerName val="0"/><c:showPercent val="0"/><c:showBubbleSize val="0"/></c:dLbls>` +
     `<c:axId val="${xAxId}"/><c:axId val="${yAxId}"/></c:scatterChart>` +
-    valAxXml(xAxId, yAxId, "b", "Repeat Units (n)", "General", true, spec.xMin, spec.xMax, "none") +
-    valAxXml(yAxId, xAxId, "l", "m/z", "0", false, spec.yMin, spec.yMax, "transparent") +
+    valAxXml(
+      xAxId,
+      yAxId,
+      "b",
+      spec.xTitle ?? "Repeat Units (n)",
+      spec.xNumFmt ?? "General",
+      spec.xNumFmt == null,
+      spec.xMin,
+      spec.xMax,
+      "none",
+    ) +
+    valAxXml(
+      yAxId,
+      xAxId,
+      "l",
+      spec.yTitle ?? "m/z",
+      spec.yNumFmt ?? "0",
+      false,
+      spec.yMin,
+      spec.yMax,
+      "transparent",
+    ) +
     `<c:spPr><a:ln><a:noFill/></a:ln></c:spPr>` +
     `</c:plotArea>` +
+    (style.legend ? `<c:legend><c:legendPos val="r"/><c:overlay val="0"/></c:legend>` : "") +
     `<c:plotVisOnly val="1"/><c:dispBlanksAs val="gap"/><c:showDLblsOverMax val="1"/>` +
     `</c:chart>` +
     `<c:spPr><a:ln><a:noFill/></a:ln></c:spPr>` +

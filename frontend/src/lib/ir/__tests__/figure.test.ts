@@ -612,3 +612,73 @@ describe("mergeSavedFigureOptions", () => {
     expect(mergeSavedFigureOptions(b, null)).toBe(b);
   });
 });
+
+describe("secondary y2 axis (WP5)", () => {
+  function y2Data(): FigureData {
+    return {
+      x: [0, 1, 2],
+      series: [
+        { id: "tga", label: "weight %", y: [100, 90, 50], styleHints: { axis: "y" } },
+        { id: "dtg", label: "DTG", y: [-0.1, -1, -0.2], styleHints: { axis: "y2", lineStyle: "dashed" } },
+      ],
+      xLabel: "Temperature (°C)",
+      yLabel: "Weight (%)",
+      y2Label: "Deriv. weight (%/°C)",
+    };
+  }
+
+  it("defaultFigureOptions leaves y2 null with no y2Label (every IR/MALDI/GC-MS host)", () => {
+    const opts = defaultFigureOptions(makeData(["a"]));
+    expect(opts.y2).toBeUndefined();
+  });
+
+  it("defaultFigureOptions builds a y2 axis when the data carries a y2Label", () => {
+    const opts = defaultFigureOptions(y2Data());
+    expect(opts.y2).toBeDefined();
+    expect(opts.y2!.label).toBe("Deriv. weight (%/°C)");
+    // Grid is off by default for y2 — two gridded axes double-draw the plot.
+    expect(opts.y2!.showGrid).toBe(false);
+  });
+
+  it("defaultSeriesStyle honours a styleHints.axis of y2", () => {
+    const data = y2Data();
+    const opts = defaultFigureOptions(data);
+    expect(opts.series[0].axis).toBe("y");
+    expect(opts.series[1].axis).toBe("y2");
+  });
+
+  it("a host seed can override the y2 label and turn its grid on", () => {
+    const opts = defaultFigureOptions(y2Data(), {
+      y2: { label: "dW/dT", showGrid: true },
+    });
+    expect(opts.y2!.label).toBe("dW/dT");
+    expect(opts.y2!.showGrid).toBe(true);
+  });
+
+  it("mergeSavedFigureOptions merges a saved y2 one level deep", () => {
+    const base = defaultFigureOptions(y2Data());
+    const saved = { y2: { ...base.y2, label: "saved", min: 0 } } as Partial<typeof base>;
+    const merged = mergeSavedFigureOptions(base, saved);
+    expect(merged.y2!.label).toBe("saved");
+    expect(merged.y2!.min).toBe(0);
+    // fields saved didn't mention fall back to base
+    expect(merged.y2!.showGrid).toBe(base.y2!.showGrid);
+  });
+
+  it("mergeSavedFigureOptions restores y2 from base when a record omits it", () => {
+    const base = defaultFigureOptions(y2Data());
+    const saved = { ...base } as unknown as Record<string, unknown>;
+    delete saved.y2;
+    const merged = mergeSavedFigureOptions(base, saved as Partial<typeof base>);
+    expect(merged.y2).toBeDefined();
+    expect(merged.y2!.label).toBe(base.y2!.label);
+  });
+
+  it("reconcileFigureOptions preserves a y2 axis across a data update", () => {
+    const prev = defaultFigureOptions(y2Data());
+    expect(prev.y2).toBeDefined();
+    const next = reconcileFigureOptions(prev, y2Data());
+    expect(next.y2).toBeDefined();
+    expect(next.y2!.label).toBe(prev.y2!.label);
+  });
+});

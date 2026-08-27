@@ -217,3 +217,29 @@ export async function downloadStackedFigurePng(
   if (!blob) throw new Error("PNG encoding failed");
   triggerDownload(blob, filename);
 }
+
+/**
+ * Rasterize the figure to a PNG **data URL** at `scale`× resolution, instead of
+ * downloading it. Same offscreen full-resolution render as
+ * {@link downloadFigurePng} — this variant exists so a report generator (the
+ * TGA PDF, say) can embed the exact figure the user styled without a round trip
+ * through the filesystem.
+ */
+export async function figurePngDataUrl(
+  data: FigureData,
+  options: FigureOptions,
+  scale = 2,
+): Promise<string> {
+  const { svg, cleanup } = await renderOffscreenFigure(data, options);
+  try {
+    const blob = await figureSvgToPng(svg, scale);
+    return await new Promise<string>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result));
+      reader.onerror = () => reject(new Error("Failed to encode figure PNG"));
+      reader.readAsDataURL(blob);
+    });
+  } finally {
+    cleanup();
+  }
+}

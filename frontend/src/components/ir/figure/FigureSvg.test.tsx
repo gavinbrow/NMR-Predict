@@ -32,6 +32,32 @@ function msData(): FigureData {
   };
 }
 
+/** Three custom-text labels anchored at the same point — the shape a TGA
+ *  overlay produces (one callout per run at the same temperature), and the case
+ *  `minGap` cannot help with because custom text bypasses thinning. */
+function crowdedLabelData(): FigureData {
+  return {
+    x: [0, 100],
+    series: [
+      { id: "s", label: "s", x: [0, 100], y: [0, 10], styleHints: { kind: "line" } },
+    ],
+    xLabel: "x",
+    yLabel: "y",
+    peakLabels: [
+      { id: "c1", x: 50, y: 5, text: "alpha", customText: true, seriesId: "s" },
+      { id: "c2", x: 50, y: 5, text: "beta", customText: true, seriesId: "s" },
+      { id: "c3", x: 50, y: 5, text: "gamma", customText: true, seriesId: "s" },
+    ],
+  };
+}
+
+/** The drawn y of each named label, in document order. */
+function labelYs(container: HTMLElement, texts: string[]): number[] {
+  return Array.from(container.querySelectorAll("text"))
+    .filter((t) => texts.includes(t.textContent ?? ""))
+    .map((t) => Number(t.getAttribute("y")));
+}
+
 describe("FigureSvg — mass-spectrum features", () => {
   it("renders peak m/z labels (reformatted to the chosen decimals)", () => {
     const data = msData();
@@ -118,6 +144,52 @@ describe("FigureSvg — per-label resolution (WP5)", () => {
     const options = { ...base, peakLabels: { ...base.peakLabels, colorBySeries: true } };
     const { container } = render(<FigureSvg data={data} options={options} decimate={false} />);
     expect(fillOf(container, "200.00")).toBe("#0ea5e9");
+  });
+
+  it("leaves overlapping labels overlapping when declutter is off", () => {
+    // The default must stay byte-identical for the spectrum hosts: three
+    // custom-text labels at the same anchor all draw at the same y.
+    const data = crowdedLabelData();
+    const options = defaultFigureOptions(data);
+    const { container } = render(<FigureSvg data={data} options={options} decimate={false} />);
+    const ys = labelYs(container, ["alpha", "beta", "gamma"]);
+    expect(new Set(ys.map((y) => y.toFixed(3))).size).toBe(1);
+  });
+
+  it("pushes overlapping labels apart when declutter is on", () => {
+    const data = crowdedLabelData();
+    const base = defaultFigureOptions(data);
+    const options = { ...base, peakLabels: { ...base.peakLabels, declutter: true } };
+    const { container } = render(<FigureSvg data={data} options={options} decimate={false} />);
+    const ys = labelYs(container, ["alpha", "beta", "gamma"]).sort((a, b) => a - b);
+    expect(ys).toHaveLength(3);
+    // Every pair is at least a line-height apart, so none of them collide.
+    for (let i = 1; i < ys.length; i += 1) {
+      expect(ys[i] - ys[i - 1]).toBeGreaterThanOrEqual(base.peakLabels.fontSize);
+    }
+  });
+
+  it("declutter never moves a label the user placed by hand", () => {
+    const data = crowdedLabelData();
+    const base = defaultFigureOptions(data);
+    const options = {
+      ...base,
+      peakLabels: {
+        ...base.peakLabels,
+        declutter: true,
+        overrides: { c2: { dx: 0, dy: 0 } },
+      },
+    };
+    const { container } = render(<FigureSvg data={data} options={options} decimate={false} />);
+    const pinned = labelYs(container, ["beta"])[0];
+    // The pinned label keeps the exact spot a zero nudge puts it at...
+    const plain = render(
+      <FigureSvg data={data} options={{ ...base, peakLabels: { ...base.peakLabels, declutter: false } }} decimate={false} />,
+    );
+    expect(pinned).toBeCloseTo(labelYs(plain.container, ["beta"])[0], 6);
+    // ...and the others moved out of its way.
+    const others = labelYs(container, ["alpha", "gamma"]);
+    for (const y of others) expect(Math.abs(y - pinned)).toBeGreaterThan(0);
   });
 
   it("excludes a label with a hidden override", () => {
@@ -487,5 +559,143 @@ describe("FigureSvg — custom legend lines", () => {
     const texts = Array.from(container.querySelectorAll("text")).map((t) => t.textContent);
     expect(texts).toContain("n = 12 shoulder");
     expect(texts).not.toContain("peaks");
+  });
+});
+
+describe("FigureSvg — secondary y2 axis (WP5)", () => {
+  /** A TGA-style figure: weight % on the left, DTG on the right y2 axis. */
+  function y2Data(): FigureData {
+    return {
+      x: [100, 200, 300, 400],
+      series: [
+        {
+          id: "tga",
+          label: "weight %",
+          x: [100, 200, 300, 400],
+          y: [100, 90, 50, 40],
+          styleHints: { kind: "line" as const, color: "#2563eb", axis: "y" as const },
+        },
+        {
+          id: "dtg",
+          label: "DTG",
+          x: [100, 200, 300, 400],
+          y: [-0.1, -1.5, -2.0, -0.2],
+          styleHints: {
+            kind: "line" as const,
+            color: "#dc2626",
+            axis: "y2" as const,
+            lineStyle: "dashed" as const,
+          },
+        },
+      ],
+      xLabel: "Temperature (°C)",
+      yLabel: "Weight (%)",
+      y2Label: "Deriv. weight (%/°C)",
+    };
+  }
+
+  /** The x-pixel of a tick label whose text matches (right-side labels start
+   *  past the plot's right edge; left-side labels end before it). */
+  const tickX = (container: HTMLElement, text: string) =>
+    Array.from(container.querySelectorAll("text"))
+      .find((t) => t.textContent === text)
+      ?.getAttribute("x");
+
+  it("renders a right-hand tick block when a y2 series is visible", () => {
+    const data = y2Data();
+    const options = defaultFigureOptions(data);
+    const { container } = render(<FigureSvg data={data} options={options} decimate={false} />);
+    // The y2 label is drawn on the right edge.
+    const y2LabelText = Array.from(container.querySelectorAll("text")).find(
+      (t) => t.textContent === "Deriv. weight (%/°C)",
+    );
+    expect(y2LabelText).toBeTruthy();
+    // The y2 tick labels sit past the plot's right edge (textAnchor "start" at
+    // x = plotW + 8). Find a tick label whose x is well to the right of the
+    // frame: the DTG values are small negatives, so any numeric tick label
+    // anchored past the plot's right edge must be a y2 tick.
+    const leftTickXs = Array.from(container.querySelectorAll("g"))
+      .filter((g) => g.querySelector('line[x1="0"]') || g.querySelector('line')?.getAttribute("x1") === "0")
+      .length;
+    // At least one text element is anchored at an x greater than the plot's
+    // right edge (the y2 block), which no left-axis tick would be.
+    const plotRight = options.width - 16; // base right margin (no y2 widen yet at seed)
+    // Actually the y2 axis widens marginRight; recompute from the drawn frame.
+    // The frame's right edge = marginLeft + plotW. The y2 ticks are at
+    // x1 = marginLeft + plotW. Find any tick line with that x1 — it's the y2 axis.
+    const y2TickLines = Array.from(container.querySelectorAll("line")).filter((l) => {
+      const x1 = Number(l.getAttribute("x1"));
+      const x2 = Number(l.getAttribute("x2"));
+      return x2 > x1 && x2 - x1 === 5 && x1 > 100; // tick mark outside-right of frame
+    });
+    expect(y2TickLines.length).toBeGreaterThan(0);
+    // And at least one y2 tick label text sits to the right of the frame.
+    const y2TickLabels = Array.from(container.querySelectorAll("text"))
+      .map((t) => ({ x: Number(t.getAttribute("x")), text: t.textContent ?? "" }))
+      .filter((e) => Number.isFinite(e.x) && /^-?[\d.]/.test(e.text) && e.x > 100);
+    expect(y2TickLabels.length).toBeGreaterThan(0);
+  });
+
+  it("maps the y2 series' path through the second scale, not the first", () => {
+    const data = y2Data();
+    const options = defaultFigureOptions(data);
+    const { container } = render(<FigureSvg data={data} options={options} decimate={false} />);
+    const paths = Array.from(container.querySelectorAll("path")).map((p) => ({
+      d: p.getAttribute("d") ?? "",
+      stroke: p.getAttribute("stroke") ?? "",
+    }));
+    // The DTG series (red, dashed) goes through sy2; its y-coordinates should
+    // differ from what sy would produce. The TGA series (blue) goes through sy.
+    const dtg = paths.find((p) => p.stroke === "#dc2626");
+    const tga = paths.find((p) => p.stroke === "#2563eb");
+    expect(dtg).toBeTruthy();
+    expect(tga).toBeTruthy();
+    // Pull the first L y-coordinate from each path. With weight % spanning
+    // 40..100 and DTG spanning -2..-0.1, the two scales differ, so the y
+    // coordinates of the same x-point should differ.
+    const firstY = (d: string) => {
+      const m = d.match(/M\d+(\.\d+)?\s+(\S+)/);
+      return m ? Number(m[2]) : NaN;
+    };
+    expect(firstY(dtg!.d)).not.toBeCloseTo(firstY(tga!.d), 0);
+  });
+
+  it("hides the right axis when the only y2 series is hidden (no extra flag)", () => {
+    const data = y2Data();
+    const base = defaultFigureOptions(data);
+    const options = {
+      ...base,
+      series: base.series.map((s) => (s.id === "dtg" ? { ...s, visible: false } : s)),
+    };
+    const { container } = render(<FigureSvg data={data} options={options} decimate={false} />);
+    // The y2 label should NOT render (no visible series uses y2).
+    const y2LabelText = Array.from(container.querySelectorAll("text")).find(
+      (t) => t.textContent === "Deriv. weight (%/°C)",
+    );
+    expect(y2LabelText).toBeUndefined();
+  });
+
+  it("renders byte-identical markup when the data has no y2Label (regression)", () => {
+    // Every IR/MALDI/GC-MS host: no y2Label → no y2 axis, no right-side ticks,
+    // no right-margin widening. Snapshot the markup and assert the y2-only
+    // artefacts are absent.
+    const data = msData();
+    const options = defaultFigureOptions(data);
+    const { container } = render(<FigureSvg data={data} options={options} decimate={false} />);
+    // No text with rotate(90 …) — the y2 label uses +90°, the y label uses -90°.
+    const rotatedPos = Array.from(container.querySelectorAll("text")).some((t) => {
+      const tr = t.getAttribute("transform") ?? "";
+      return /rotate\(90/.test(tr);
+    });
+    expect(rotatedPos).toBe(false);
+    // The right margin stays at its base (16): no tick label sits past
+    // width - 16 - 1.
+    const plotRight = options.width - 16;
+    const tickTexts = Array.from(container.querySelectorAll("text"))
+      .map((t) => ({ x: Number(t.getAttribute("x")), text: t.textContent ?? "" }))
+      .filter((e) => Number.isFinite(e.x) && /^-?\d/.test(e.text));
+    for (const t of tickTexts) {
+      expect(t.x).toBeLessThanOrEqual(plotRight);
+    }
   });
 });

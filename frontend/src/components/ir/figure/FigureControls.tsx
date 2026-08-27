@@ -119,8 +119,8 @@ function NumField({
   max?: number;
 }) {
   return (
-    <div className="grid gap-1">
-      <Label className="text-[11px] text-muted-foreground">{label}</Label>
+    <div className="grid min-w-0 gap-1">
+      <Label className="truncate text-[11px] text-muted-foreground">{label}</Label>
       <Input
         type="number"
         step={step}
@@ -128,7 +128,7 @@ function NumField({
         max={max}
         value={Number.isFinite(value) ? value : ""}
         onChange={(e) => onChange(Number(e.target.value))}
-        className="h-8"
+        className="h-8 min-w-0"
       />
     </div>
   );
@@ -400,12 +400,15 @@ function SeriesRow({
   style,
   onPatch,
   showKind,
+  showAxisPicker,
   indent,
 }: {
   style: SeriesStyle;
   onPatch: (p: Partial<SeriesStyle>) => void;
   /** Expose the line/sticks toggle (spectrum-style figures only). */
   showKind?: boolean;
+  /** Expose the left/right y-axis picker (only when a y2 axis exists). */
+  showAxisPicker?: boolean;
   /** Nudge the row right so it reads as belonging to the heading above it. */
   indent?: boolean;
 }) {
@@ -415,19 +418,22 @@ function SeriesRow({
         indent ? " ml-4" : ""
       }`}
     >
-      <div className="flex items-center gap-2">
+      {/* Wraps rather than overflows: the panel is only ~340px wide, and at that
+          width a row of [visible][colour][name][kind][axis] used to run off the
+          edge and clip the last control's text. */}
+      <div className="flex min-w-0 flex-wrap items-center gap-2">
         <input
           type="checkbox"
           checked={style.visible}
           onChange={(e) => onPatch({ visible: e.target.checked })}
-          className="h-3.5 w-3.5"
+          className="h-3.5 w-3.5 shrink-0"
           title="Visible"
         />
         <ColorField value={style.color} onChange={(v) => onPatch({ color: v })} />
         <Input
           value={style.label}
           onChange={(e) => onPatch({ label: e.target.value })}
-          className="h-8 min-w-0 flex-1 text-xs"
+          className="h-8 min-w-[6rem] flex-1 text-xs"
           title={style.label}
         />
         {showKind && (
@@ -444,8 +450,24 @@ function SeriesRow({
             </SelectContent>
           </Select>
         )}
+        {showAxisPicker && (
+          <Select
+            value={style.axis ?? "y"}
+            onValueChange={(v) => onPatch({ axis: v as "y" | "y2" })}
+          >
+            <SelectTrigger className="h-8 w-24 shrink-0" title="Plot on the left or right y-axis">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="y">Left Y</SelectItem>
+              <SelectItem value="y2">Right Y</SelectItem>
+            </SelectContent>
+          </Select>
+        )}
       </div>
-      <div className="grid grid-cols-4 items-end gap-2">
+      {/* auto-fit columns: four across on a wide panel, two when it narrows —
+          never four squeezed ones with their labels cut off. */}
+      <div className="grid grid-cols-[repeat(auto-fit,minmax(74px,1fr))] items-end gap-2">
         <NumField
           label="Width"
           value={style.lineWidth}
@@ -453,7 +475,7 @@ function SeriesRow({
           step={0.5}
           min={0.5}
         />
-        <div className="grid gap-1">
+        <div className="grid min-w-0 gap-1">
           <Label className="text-[11px] text-muted-foreground">Line</Label>
           <Select
             value={style.lineStyle}
@@ -612,6 +634,8 @@ export function FigureControls({
   const patch = (p: Partial<FigureOptions>) => onChange({ ...options, ...p });
   const patchAxis = (key: "x" | "y", p: Partial<AxisOptions>) =>
     onChange({ ...options, [key]: { ...options[key], ...p } });
+  const patchY2 = (p: Partial<AxisOptions>) =>
+    onChange({ ...options, y2: options.y2 ? { ...options.y2, ...p } : options.y2 });
   const patchSeries = (id: string, p: Partial<SeriesStyle>) =>
     onChange({
       ...options,
@@ -746,7 +770,12 @@ export function FigureControls({
   // per-series grids (mass-spectra overlays) when any series carries its own x.
   const visibleIds = new Set(options.series.filter((s) => s.visible).map((s) => s.id));
   const visibleSeries = data.series.filter((s) => visibleIds.has(s.id));
-  const yValues = visibleSeries.flatMap((s) => s.y);
+  const yValues = visibleSeries
+    .filter((s) => (options.series.find((st) => st.id === s.id)?.axis ?? "y") === "y")
+    .flatMap((s) => s.y);
+  const y2Values = visibleSeries
+    .filter((s) => options.series.find((st) => st.id === s.id)?.axis === "y2")
+    .flatMap((s) => s.y);
   const xValues = visibleSeries.some((s) => s.x)
     ? visibleSeries.flatMap((s) => s.x ?? data.x)
     : data.x;
@@ -940,6 +969,12 @@ export function FigureControls({
         <AxisControls axis={options.y} values={yValues} onPatch={(p) => patchAxis("y", p)} />
       </Section>
 
+      {options.y2 && (
+        <Section title="Y2 axis (right)" defaultOpen={false}>
+          <AxisControls axis={options.y2} values={y2Values} onPatch={patchY2} />
+        </Section>
+      )}
+
       <Section title="Series" caption={`${options.series.length} series`}>
         <div className="grid gap-3">
           {/* Bulk control: set every series' line width in one go. */}
@@ -980,6 +1015,7 @@ export function FigureControls({
                         key={s.id}
                         style={s}
                         showKind={msMode}
+                        showAxisPicker={!!options.y2}
                         indent={g.label !== undefined}
                         onPatch={(p) => patchSeries(s.id, p)}
                       />
@@ -1103,6 +1139,17 @@ export function FigureControls({
                   checked={options.peakLabels.colorBySeries}
                   onChange={(v) => patchPeakLabels({ colorBySeries: v })}
                 />
+                <div>
+                  <CheckLine
+                    label="Avoid overlapping labels"
+                    checked={options.peakLabels.declutter}
+                    onChange={(v) => patchPeakLabels({ declutter: v })}
+                  />
+                  <p className="pl-6 text-[11px] text-muted-foreground">
+                    Nudges labels up or down until they clear each other. A label you have
+                    dragged keeps the spot you put it in.
+                  </p>
+                </div>
                 {/* Sticks in one colour + labels by series = a monochrome
                     spectrum with a colour-coded annotation layer. */}
                 <div className="flex flex-wrap items-center gap-2">

@@ -1,5 +1,6 @@
 import { useCallback, useRef, useState } from "react";
 import {
+  defaultAxisOptions,
   defaultFigureOptions,
   peakLabelDecimalsFromData,
   reconcileFigureOptions,
@@ -99,21 +100,66 @@ export function useFigureOptions(
   // figure looked like it had ignored the new file. Drop the bounds on the axis
   // whose unit moved, and only that one: an m/z window stays meaningful when the
   // intensity unit changes underneath it.
-  const [hostLabels, setHostLabels] = useState(() => ({ x: data.xLabel, y: data.yLabel }));
-  if (hostLabels.x !== data.xLabel || hostLabels.y !== data.yLabel) {
+  //
+  // The secondary y2 axis follows the same rule: when the host's y2Label changes
+  // (or appears / disappears), reset that axis to auto and follow the new label.
+  const [hostLabels, setHostLabels] = useState(() => ({
+    x: data.xLabel,
+    y: data.yLabel,
+    y2: data.y2Label ?? "",
+  }));
+  const y2Prev = hostLabels.y2;
+  const y2Now = data.y2Label ?? "";
+  const xChanged = hostLabels.x !== data.xLabel;
+  const yChanged = hostLabels.y !== data.yLabel;
+  const y2Changed = y2Prev !== y2Now;
+  if (xChanged || yChanged || y2Changed) {
     const prevLabels = hostLabels;
-    const xChanged = prevLabels.x !== data.xLabel;
-    const yChanged = prevLabels.y !== data.yLabel;
-    setHostLabels({ x: data.xLabel, y: data.yLabel });
-    setOptions((prev) => ({
-      ...prev,
-      x: xChanged
-        ? { ...prev.x, label: prev.x.label === prevLabels.x ? data.xLabel : prev.x.label, min: null, max: null }
-        : prev.x,
-      y: yChanged
-        ? { ...prev.y, label: prev.y.label === prevLabels.y ? data.yLabel : prev.y.label, min: null, max: null }
-        : prev.y,
-    }));
+    setHostLabels({ x: data.xLabel, y: data.yLabel, y2: y2Now });
+    setOptions((prev) => {
+      const next = { ...prev };
+      // Left y-axis: follow the host's label (when the user hasn't rewritten it)
+      // and clear any manual range captured in the old unit.
+      next.y = yChanged
+        ? {
+            ...prev.y,
+            label: prev.y.label === prevLabels.y ? data.yLabel : prev.y.label,
+            min: null,
+            max: null,
+          }
+        : prev.y;
+      // Right y2 axis: appears/disappears with the host's y2Label, and follows a
+      // label change the same way y does. Seeded from the shared default so the
+      // host's preferences (Times New Roman, bold axes, …) carry across the
+      // transition, the same way `defaultFigureOptions` would build it.
+      if (y2Changed) {
+        if (y2Now) {
+          const seed = defaultFigureOptions(data, {});
+          const seeded = seed.y2 ?? defaultAxisOptions(y2Now, false);
+          next.y2 = prev.y2
+            ? {
+                ...seeded,
+                // Keep the user's label only if they haven't rewritten it; a
+                // host-driven label change should still flow through.
+                label: prev.y2.label === y2Prev ? y2Now : prev.y2.label,
+                min: null,
+                max: null,
+              }
+            : seeded;
+        } else {
+          next.y2 = undefined;
+        }
+      }
+      next.x = xChanged
+        ? {
+            ...prev.x,
+            label: prev.x.label === prevLabels.x ? data.xLabel : prev.x.label,
+            min: null,
+            max: null,
+          }
+        : prev.x;
+      return next;
+    });
   }
 
   // Re-seed peakLabels.show when labels first appear (WP0b). defaultFigureOptions

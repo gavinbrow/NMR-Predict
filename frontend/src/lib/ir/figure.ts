@@ -39,7 +39,7 @@ export interface FigureSeriesData {
   group?: string;
   /** Host-suggested initial styling (e.g. scatter vs dashed fit line, sticks). */
   styleHints?: Partial<
-    Pick<SeriesStyle, "color" | "lineWidth" | "lineStyle" | "markers" | "markerSize" | "kind">
+    Pick<SeriesStyle, "color" | "lineWidth" | "lineStyle" | "markers" | "markerSize" | "kind" | "axis">
   >;
 }
 
@@ -118,6 +118,14 @@ export interface FigureData {
   series: FigureSeriesData[];
   xLabel: string;
   yLabel: string;
+  /**
+   * Right-hand (secondary) y-axis label. When present, the figure maker builds
+   * a second y axis (`options.y2`) and lets a series declare
+   * {@link SeriesStyle.axis} `"y2"` to draw against it. Absent for every host
+   * that has no second axis (IR, MALDI, GC/MS) — the right axis is purely
+   * data-driven, so those hosts render byte-identically to before.
+   */
+  y2Label?: string;
   /** Seed for the reversed-x option (IR convention: high cm⁻¹ on the left). */
   reversedX?: boolean;
   /** File-name stem for downloads (e.g. "ir_overlay"). */
@@ -157,6 +165,11 @@ export interface AxisOptions {
   gridStyle: GridStyle;
 }
 
+/** Which y-axis a series is plotted against. `"y"` (left, the default) or
+ *  `"y2"` (the optional right-hand secondary axis). Absent on every host that
+ *  has no `y2Label`, so the existing IR/MALDI/GC-MS figures are unchanged. */
+export type SeriesAxis = "y" | "y2";
+
 export interface SeriesStyle {
   id: string;
   label: string;
@@ -169,6 +182,8 @@ export interface SeriesStyle {
   markerSize: number;
   /** Connected line vs. vertical stems (defaults to "line"). */
   kind: SeriesKind;
+  /** Which y-axis this series is drawn against. Defaults to the left ("y"). */
+  axis: SeriesAxis;
 }
 
 /** Styling for the data-anchored peak labels (see {@link PeakLabelDatum}). */
@@ -196,6 +211,16 @@ export interface PeakLabelOptions {
    * {@link PeakLabelDatum.color} still wins over both.
    */
   colorBySeries: boolean;
+  /**
+   * Nudge auto-placed labels vertically so their boxes don't overlap each other.
+   * {@link minGap} only thins labels that are close in x, which is enough for a
+   * spectrum's ladder but not for a figure whose labels are all pinned (custom
+   * text bypasses thinning) — a TGA overlay draws an onset/Td/Tmax callout per
+   * run and they land on top of one another. Off by default so the spectrum
+   * hosts render exactly as before; a label the user has dragged is never moved
+   * by this and instead acts as a fixed obstacle.
+   */
+  declutter: boolean;
   /**
    * Figure-only per-label overrides (placement nudge + hide), keyed by
    * {@link PeakLabelDatum.id}. A label carrying an override — or a custom
@@ -307,6 +332,13 @@ export interface FigureOptions {
   axisBold: boolean;
   x: AxisOptions;
   y: AxisOptions;
+  /**
+   * Right-hand secondary y-axis. Present only when the data supplies a
+   * {@link FigureData.y2Label} (or a host seeds one); every IR/MALDI/GC-MS
+   * figure has this `undefined` and renders exactly as before. Gridlines are
+   * off by default for y2 — two gridded axes double-draw the same plot.
+   */
+  y2?: AxisOptions | null;
   series: SeriesStyle[];
   legend: LegendOptions;
   /** Data-anchored peak labels (m/z values etc.); inert unless the host supplies
@@ -325,7 +357,7 @@ export const PALETTE = [
 
 export const FONT_FAMILIES = ["Arial", "Times New Roman", "Georgia", "Courier New"];
 
-function defaultAxisOptions(label: string, showGrid: boolean): AxisOptions {
+export function defaultAxisOptions(label: string, showGrid: boolean): AxisOptions {
   return {
     label,
     min: null,
@@ -352,6 +384,7 @@ function defaultSeriesStyle(s: FigureSeriesData, index: number): SeriesStyle {
     markers: hints.markers ?? false,
     markerSize: hints.markerSize ?? 4,
     kind: hints.kind ?? "line",
+    axis: hints.axis ?? "y",
   };
 }
 
@@ -375,6 +408,12 @@ export interface FigureOptionSeed {
   axisBold?: boolean;
   legend?: Partial<LegendOptions>;
   peakLabels?: Partial<PeakLabelOptions>;
+  /**
+   * Host-supplied overrides for the optional right-hand (y2) axis. Only applied
+   * when the data carries a {@link FigureData.y2Label}; absent hosts never get
+   * a y2 axis, so this is inert for IR/MALDI/GC-MS.
+   */
+  y2?: Partial<AxisOptions>;
   /**
    * Derive `peakLabels.decimals` from the data instead of pinning it, capped at
    * this many places. See {@link peakLabelDecimalsFromData}. Wins over
@@ -453,6 +492,14 @@ export function defaultFigureOptions(data: FigureData, seed: FigureOptionSeed = 
     axisBold: seed.axisBold ?? false,
     x: defaultAxisOptions(data.xLabel, showGrid),
     y: defaultAxisOptions(data.yLabel, showGrid),
+    // The right-hand secondary axis exists only when the data carries a
+    // y2Label — IR/MALDI/GC-MS never set one, so their options are byte-for-byte
+    // the same as before (no `y2` key at all). Grid is off for y2 by default:
+    // two gridded axes double-draw the same plot area. A host's `seed.y2`
+    // patches the seeded axis (label overrides, a manual range, etc.).
+    y2: data.y2Label
+      ? { ...defaultAxisOptions(data.y2Label, false), ...seed.y2 }
+      : undefined,
     series: data.series.map(defaultSeriesStyle),
     legend: {
       show: data.series.length > 1 && data.series.length <= legendCap,
@@ -476,6 +523,7 @@ export function defaultFigureOptions(data: FigureData, seed: FigureOptionSeed = 
       maxLabels: 25,
       minGap: 26,
       colorBySeries: false,
+      declutter: false,
       overrides: {},
       ...seed.peakLabels,
       // After the seed spread: an auto cap is a stronger statement than a pinned
@@ -505,11 +553,21 @@ export function mergeSavedFigureOptions(
   saved: Partial<FigureOptions> | null | undefined,
 ): FigureOptions {
   if (!saved) return base;
+  // The right-hand y2 axis is optional on both sides: a saved record may predate
+  // y2 (older snapshot), and a host may have closed the only series using it.
+  // Merge only when one side actually has one; otherwise inherit the base.
+  const y2 =
+    saved.y2 === undefined
+      ? base.y2
+      : saved.y2 && base.y2
+        ? { ...base.y2, ...saved.y2 }
+        : saved.y2 ?? base.y2;
   return {
     ...base,
     ...saved,
     x: { ...base.x, ...saved.x },
     y: { ...base.y, ...saved.y },
+    y2,
     series: saved.series ?? base.series,
     legend: {
       ...base.legend,

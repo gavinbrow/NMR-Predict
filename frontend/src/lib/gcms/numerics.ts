@@ -73,11 +73,19 @@ export function nearestIndex(arr: Float64Array, v: number): number {
  * `ml-savitzky-golay` dependency; when the series is too short for the window
  * (or the window is less than 5 after clamping) it returns a copy of the input.
  * `polynomial` defaults to 2.
+ *
+ * `derivative` (default 0) is passed straight through to `ml-savitzky-golay`:
+ * 0 = smooth, 1 = first derivative (gradient), 2 = second derivative
+ * (curvature). The endpoint-replicate padding keeps the output the same length
+ * as the input for every derivative order, so callers plotting the derivative
+ * alongside the original x-grid stay aligned. The existing GC/MS callers all
+ * use the default (0) and are unchanged.
  */
 export function smoothSG(
   y: Float64Array,
   window: number,
   polynomial = 2,
+  derivative = 0,
 ): Float64Array {
   const n = y.length;
   if (n === 0) return new Float64Array(0);
@@ -106,7 +114,7 @@ export function smoothSG(
   try {
     const out = savitzkyGolay(padded, h, {
       windowSize: w,
-      derivative: 0,
+      derivative,
       polynomial,
       pad: "none",
       padValue: "replicate",

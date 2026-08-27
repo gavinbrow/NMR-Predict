@@ -31,5 +31,9 @@ frontend/*.tgz
 
 backend/.pytest_cache/
 
+# TGA sample files (~20 MB of .tri/.xls fixtures) — kept out of the repo for the
+# same reason GCMS Example/ was.
+TGA Test/
+
 # Benchmark reports — keep the dir (.gitkeep) but ignore generated output.
 
