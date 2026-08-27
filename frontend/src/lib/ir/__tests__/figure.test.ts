@@ -11,6 +11,7 @@ import {
   pickVisibleLabels,
   reconcileFigureOptions,
   reconcilePeakLabelOverrides,
+  MAX_ABSENT_PEAK_LABEL_OVERRIDES,
   resolveAxis,
   seriesPathD,
   sticksPathD,
@@ -330,20 +331,57 @@ describe("reconcilePeakLabelOverrides", () => {
     peakLabels: ids.map((id) => ({ id, x: 1, y: 1, text: "1" })),
   });
 
-  it("drops overrides whose peak id is gone and keeps survivors", () => {
+  it("keeps a placement while its label is away, and hands it back on return", () => {
+    // Labels toggled off, a run hidden, an axis mode that withholds a marker:
+    // the label returns under the same id, and a hand placement has to survive
+    // the round trip or every drag is lost the moment the figure is touched.
     const prev = { a: { dx: 5 }, b: { hidden: true } };
-    expect(reconcilePeakLabelOverrides(prev, dataWith(["a"]))).toEqual({ a: { dx: 5 } });
+    const away = reconcilePeakLabelOverrides(prev, dataWith(["a"]));
+    expect(away).toEqual(prev);
+    expect(reconcilePeakLabelOverrides(away, dataWith(["a", "b"]))).toEqual(prev);
   });
 
-  it("returns the same object reference when nothing is dropped", () => {
+  it("returns the same object reference when nothing needs evicting", () => {
     const prev = { a: { dx: 5 } };
     expect(reconcilePeakLabelOverrides(prev, dataWith(["a", "b"]))).toBe(prev);
   });
 
-  it("drops everything when the data supplies no peak labels", () => {
+  it("keeps placements when the data supplies no peak labels at all", () => {
+    // The whole label set going away is the "turn labels off" case, not a
+    // signal that every peak was re-picked.
     const prev = { a: { dx: 5 } };
     const data: FigureData = { x: [0], series: [], xLabel: "m/z", yLabel: "I" };
-    expect(reconcilePeakLabelOverrides(prev, data)).toEqual({});
+    expect(reconcilePeakLabelOverrides(prev, data)).toBe(prev);
+  });
+
+  it("evicts the oldest absent overrides once they pass the cap", () => {
+    // A host that re-picks peaks mints fresh ids every time, so entries for
+    // dead ids would otherwise accumulate for the life of the workspace.
+    const n = MAX_ABSENT_PEAK_LABEL_OVERRIDES + 3;
+    const prev: Record<string, { dx: number }> = {};
+    for (let i = 0; i < n; i += 1) prev[`p${i}`] = { dx: i };
+    const next = reconcilePeakLabelOverrides(prev, dataWith([]));
+    expect(Object.keys(next)).toHaveLength(MAX_ABSENT_PEAK_LABEL_OVERRIDES);
+    // Oldest first: the three earliest placements go, the newest all stay.
+    expect(next.p0).toBeUndefined();
+    expect(next.p2).toBeUndefined();
+    expect(next.p3).toEqual({ dx: 3 });
+    expect(next[`p${n - 1}`]).toEqual({ dx: n - 1 });
+  });
+
+  it("never evicts an override whose label is on the figure", () => {
+    // Four past the cap, two of them still in view: only absent entries count
+    // towards the cap, so exactly the two oldest ABSENT ones are evicted.
+    const n = MAX_ABSENT_PEAK_LABEL_OVERRIDES + 4;
+    const prev: Record<string, { dx: number }> = {};
+    for (let i = 0; i < n; i += 1) prev[`p${i}`] = { dx: i };
+    // p0 and p1 are the oldest, and would be first out — but they are in view.
+    const next = reconcilePeakLabelOverrides(prev, dataWith(["p0", "p1"]));
+    expect(next.p0).toEqual({ dx: 0 });
+    expect(next.p1).toEqual({ dx: 1 });
+    expect(next.p2).toBeUndefined();
+    expect(next.p3).toBeUndefined();
+    expect(next.p4).toEqual({ dx: 4 });
   });
 });
 

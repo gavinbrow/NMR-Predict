@@ -59,9 +59,13 @@ export function useFigureOptions(
     setOptions((prev) => reconcileFigureOptions(prev, data));
   }
 
-  // Drop peak-label overrides whose peak id is gone (peaks re-pick with fresh
-  // ids). Keyed on the label-id set so it only runs when the labels actually
-  // change, and it leaves options untouched when nothing needs pruning.
+  // Reconcile peak-label overrides against the new label set. Placements are
+  // kept for ids that are only momentarily absent — labels toggled off, a run
+  // hidden, an axis mode that withholds a marker — so a label dragged into
+  // place is still there when it comes back; only a host that re-picks peaks
+  // into fresh ids sheds anything, and only past a cap. Keyed on the label-id
+  // set so it runs when the labels actually change, and it leaves options
+  // untouched when nothing needs evicting.
   //
   // The same key drives the auto-decimals re-derivation for hosts that asked
   // for one: the precision a peak label deserves is a property of the FILE, and

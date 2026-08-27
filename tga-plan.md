@@ -714,3 +714,42 @@ way to say which axis you mean. Over the plot the wheel scales both y-axes
 together; over the left gutter only the primary; over the right gutter only y2.
 `TgaPlot` does the same, holding a per-axis gain that multiplies the auto-fitted
 span so a scaled axis keeps auto-fitting as the x-window changes.
+
+### 7.9 A trio of Excel charts per sample, and overlaid
+
+§WP8 shipped exactly two native charts, both overlays. A multi-sample export was
+therefore only readable as a comparison — to look at one sample you had to edit
+a chart's series. Every run now carries its own trio on its own data sheet
+(anchored clear of the data, at column G, or K when the thinned chart columns of
+§7.7 are present), and the `Charts` sheet carries the same trio with every run
+overlaid. Each trio is weight %, derivative weight, and the two **combined**.
+
+The combined chart is why §WP8's "two separate charts rather than one
+secondary-axis chart" no longer holds. On a shared axis the derivative — around
+0.1 %/°C against a weight running 0–100 — draws as a flat line on zero, so the
+combined chart needs a real secondary axis. `excelChartInject` gained it:
+`ChartSeriesSpec.axis: "y" | "y2"` splits the series into a second
+`c:scatterChart` group with its own axis pair, whose y sits at the right
+(`axPos="r"`, crossing at `max`) and whose x is a hidden duplicate of the
+primary — the structure Excel itself writes. `ChartSeriesSpec.dash` dashes the
+secondary curves so a run's pair reads as one colour in two line styles. A spec
+with no `y2` series still emits the single-group markup, which is what keeps
+MALDI's output unchanged.
+
+### 7.10 A dragged label keeps the spot you put it in
+
+`reconcilePeakLabelOverrides` dropped every override whose label id was absent
+from the current `FigureData`. That is right for a host that re-picks peaks into
+fresh `crypto.randomUUID()` ids, but it also fired on every *momentary* absence:
+turning Label markers off, hiding a run, switching the x-axis to Time (which
+withholds the temperature markers). Each of those emptied the label set, so the
+placements went with it and every callout snapped back to its default the moment
+the figure was reconfigured.
+
+Overrides are now kept for absent ids — the case a user actually notices — and
+the dead entries a re-picking host leaves behind are bounded instead
+(`MAX_ABSENT_PEAK_LABEL_OVERRIDES`, evicted oldest-first). Nothing at that level
+can tell a label that is coming back from one that never will, and only one of
+those two mistakes is visible. It also fixes a quieter bug: MALDI reconciles a
+restored project's overrides against the figure data at restore time, before the
+peaks are re-detected, which used to throw the saved placements away.

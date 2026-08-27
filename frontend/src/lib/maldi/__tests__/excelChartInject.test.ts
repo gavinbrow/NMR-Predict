@@ -315,3 +315,116 @@ describe("excelChartInject — multi-series specs", () => {
     await expect(reopened.xlsx.load(after)).resolves.toBeDefined();
   });
 });
+
+/**
+ * A combined chart plots two quantities of very different magnitude together —
+ * a TGA weight % over 0–100 and its derivative around 0.1 — which OOXML
+ * expresses as a SECOND `c:scatterChart` group carrying its own axis pair. Get
+ * that structure wrong and Excel does not complain, it silently drops the whole
+ * chart, so the shape is asserted here rather than left to the eye.
+ */
+describe("excelChartInject — secondary axis", () => {
+  async function chartDocFor(spec: ChartSpec) {
+    const after = await injectCharts(await buildSampleWorkbook(), [spec]);
+    const zip = await JSZip.loadAsync(after);
+    const xml = await zip.file("xl/charts/chart1.xml")!.async("string");
+    return { xml, doc: parseXml(xml, "chart1.xml") };
+  }
+
+  const base = {
+    sheetName: "Series",
+    seriesName: "ignored",
+    xRange: "",
+    yRange: "",
+    xMin: 0,
+    xMax: 600,
+    yMin: 0,
+    yMax: 100,
+    anchorCol: 8,
+    anchorRow: 1,
+  } satisfies Omit<ChartSpec, "series">;
+
+  const weight = { name: "Run A", xRange: "A6:A9", yRange: "B6:B9", color: "2563EB" };
+  const deriv = {
+    name: "Run A — deriv.",
+    xRange: "A6:A9",
+    yRange: "D6:D9",
+    color: "2563EB",
+    axis: "y2" as const,
+    dash: true,
+  };
+
+  it("leaves a chart with no y2 series at one group and two axes", async () => {
+    const { doc } = await chartDocFor({ ...base, series: [weight] });
+    expect(doc.getElementsByTagName("c:scatterChart")).toHaveLength(1);
+    expect(doc.getElementsByTagName("c:valAx")).toHaveLength(2);
+  });
+
+  it("splits y2 series into their own group against a right-hand axis", async () => {
+    const { xml, doc } = await chartDocFor({
+      ...base,
+      series: [weight, deriv],
+      yTitle: "Weight (%)",
+      y2Title: "Deriv. weight (%/°C)",
+      y2Min: -0.01,
+      y2Max: 0.12,
+      y2NumFmt: "0.000",
+      style: { line: "solid", markers: false, trendline: false, legend: true },
+    });
+    const groups = [...doc.getElementsByTagName("c:scatterChart")];
+    expect(groups).toHaveLength(2);
+    // One series each, and the second group's idx continues the first's, since
+    // idx/order are numbered across the whole chart rather than per group.
+    expect(groups.map((g) => g.getElementsByTagName("c:ser").length)).toEqual([1, 1]);
+    const idx = [...doc.getElementsByTagName("c:idx")].map((e) => e.getAttribute("val"));
+    expect(idx).toEqual(["0", "1"]);
+
+    // Four axes, all with distinct ids, and every crossAx resolving to one.
+    const axes = [...doc.getElementsByTagName("c:valAx")];
+    expect(axes).toHaveLength(4);
+    const ids = axes.map((ax) => ax.getElementsByTagName("c:axId")[0].getAttribute("val"));
+    expect(new Set(ids).size).toBe(4);
+    for (const ax of axes) {
+      expect(ids).toContain(ax.getElementsByTagName("c:crossAx")[0].getAttribute("val"));
+    }
+    // Each group names the pair it plots against, and the two pairs are disjoint.
+    const pairs = groups.map((g) =>
+      [...g.getElementsByTagName("c:axId")].map((e) => e.getAttribute("val")),
+    );
+    expect(pairs[0].some((v) => pairs[1].includes(v))).toBe(false);
+
+    // The secondary y sits at the right, crossing its x at the far end; that x
+    // is a hidden duplicate that exists only to complete the pair.
+    const pos = (ax: Element) => ax.getElementsByTagName("c:axPos")[0].getAttribute("val");
+    const del = (ax: Element) => ax.getElementsByTagName("c:delete")[0].getAttribute("val");
+    expect(axes.map(pos)).toEqual(["b", "l", "r", "b"]);
+    expect(axes.map(del)).toEqual(["0", "0", "0", "1"]);
+    expect(axes[2].getElementsByTagName("c:crosses")[0].getAttribute("val")).toBe("max");
+
+    // The right axis is scaled and titled independently of the left one.
+    expect(xml).toContain('<c:max val="0.12"/><c:min val="-0.01"/>');
+    expect(xml).toContain("Deriv. weight (");
+    expect(xml).toContain("Weight (%)");
+    // …and its curve is dashed, so a pair sharing one colour still reads apart.
+    expect(xml).toContain('<a:prstDash val="dash"/>');
+  });
+
+  it("falls back to a single group when every series asks for the right axis", async () => {
+    const { doc } = await chartDocFor({ ...base, series: [deriv, { ...deriv, name: "Run B" }] });
+    // Nothing to be secondary TO — an empty primary group would be invalid XML.
+    expect(doc.getElementsByTagName("c:scatterChart")).toHaveLength(1);
+    expect(doc.getElementsByTagName("c:valAx")).toHaveLength(2);
+    expect(doc.getElementsByTagName("c:ser")).toHaveLength(2);
+  });
+
+  it("still produces a package Excel can reopen", async () => {
+    const after = await injectCharts(await buildSampleWorkbook(), [
+      { ...base, series: [weight, deriv], y2Min: 0, y2Max: 1 },
+    ]);
+    const reopened = new ExcelJS.Workbook();
+    await expect(reopened.xlsx.load(after)).resolves.toBeDefined();
+    const zip = await JSZip.loadAsync(after);
+    const ct = await zip.file("[Content_Types].xml")!.async("string");
+    expect(ct).toContain("/xl/charts/chart1.xml");
+  });
+});

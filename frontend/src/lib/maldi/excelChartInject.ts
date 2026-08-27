@@ -34,6 +34,17 @@ export interface ChartSeriesSpec {
   /** Line/marker colour as `RRGGBB` (no leading #). Defaults to the theme's
    *  `tx1` (black), which is what the MALDI reference workbook uses. */
   color?: string;
+  /**
+   * Which value axis this curve is measured against. `"y2"` puts it on a
+   * secondary, right-hand axis with its own scaling — the only way to draw two
+   * quantities of wildly different magnitude on one chart (a TGA weight % runs
+   * 0-100, its derivative ~0.1 %/degC, and on a shared axis the derivative is a
+   * flat line on zero). Absent or `"y"` means the primary left axis.
+   */
+  axis?: "y" | "y2";
+  /** Dash this series' line, whatever the chart's own line style — used to tell
+   *  a secondary-axis curve apart from the primary one it sits on top of. */
+  dash?: boolean;
 }
 
 /** Per-chart formatting. Every field defaults to the MALDI reference
@@ -90,6 +101,15 @@ export interface ChartSpec {
   xNumFmt?: string;
   /** Y-axis number format. Defaults to "0". */
   yNumFmt?: string;
+  /** Secondary (right-hand) y-axis title. Only drawn when some series in
+   *  {@link series} sets `axis: "y2"`. */
+  y2Title?: string;
+  /** Secondary y-axis minimum. Defaults to 0. */
+  y2Min?: number;
+  /** Secondary y-axis maximum. Defaults to 1. */
+  y2Max?: number;
+  /** Secondary y-axis number format. Defaults to "General" (source-linked). */
+  y2NumFmt?: string;
   /** Formatting overrides; each field defaults to the MALDI reference's value. */
   style?: Partial<ChartStyle>;
   /** Zero-based column + row of the top-left cell the chart anchors at. */
@@ -135,6 +155,27 @@ function axisTitleXml(text: string): string {
   );
 }
 
+/** Everything one value axis needs. An object rather than a positional list
+ *  because a combined chart needs four of these, and two of them differ from
+ *  the primary pair only by a flag. */
+interface ValAxSpec {
+  axId: number;
+  crossAxId: number;
+  pos: "b" | "l" | "r";
+  title: string;
+  numFmt: string;
+  sourceLinked: boolean;
+  min: number;
+  max: number;
+  gridlines: "none" | "transparent";
+  /** A secondary group's shadow x-axis exists only so that group has an axis
+   *  pair of its own; Excel hides it with `c:delete` and it carries no title. */
+  deleted?: boolean;
+  /** `"max"` crosses the paired axis at its far end — what puts a secondary
+   *  y-axis on the right-hand edge of the plot. */
+  crosses?: "autoZero" | "max";
+}
+
 /**
  * One value axis formatted to match the reference chart exactly:
  * - 28575 EMU (2.25pt) black (`schemeClr tx1`) axis line
@@ -147,29 +188,22 @@ function axisTitleXml(text: string): string {
  * majorTickMark?, minorTickMark?, tickLblPos?, spPr?, crossAx,
  * crosses?, crossBetween?, majorUnit?
  */
-function valAxXml(
-  axId: number,
-  crossAxId: number,
-  pos: "b" | "l",
-  title: string,
-  numFmt: string,
-  sourceLinked: boolean,
-  min: number,
-  max: number,
-  gridlines: "none" | "transparent",
-): string {
+function valAxXml(ax: ValAxSpec): string {
+  const deleted = ax.deleted === true;
   return (
-    `<c:valAx><c:axId val="${axId}"/>` +
-    `<c:scaling><c:orientation val="minMax"/><c:max val="${max}"/><c:min val="${min}"/></c:scaling>` +
-    `<c:delete val="0"/><c:axPos val="${pos}"/>` +
-    (gridlines === "transparent"
+    `<c:valAx><c:axId val="${ax.axId}"/>` +
+    `<c:scaling><c:orientation val="minMax"/><c:max val="${ax.max}"/><c:min val="${ax.min}"/></c:scaling>` +
+    `<c:delete val="${deleted ? 1 : 0}"/><c:axPos val="${ax.pos}"/>` +
+    (ax.gridlines === "transparent"
       ? `<c:majorGridlines><c:spPr><a:ln><a:noFill/></a:ln></c:spPr></c:majorGridlines>`
       : "") +
-    axisTitleXml(title) +
-    `<c:numFmt formatCode="${xmlEscape(numFmt)}" sourceLinked="${sourceLinked ? 1 : 0}"/>` +
-    `<c:majorTickMark val="out"/><c:minorTickMark val="none"/><c:tickLblPos val="nextTo"/>` +
+    (deleted ? "" : axisTitleXml(ax.title)) +
+    `<c:numFmt formatCode="${xmlEscape(ax.numFmt)}" sourceLinked="${ax.sourceLinked ? 1 : 0}"/>` +
+    (deleted
+      ? `<c:majorTickMark val="none"/><c:minorTickMark val="none"/><c:tickLblPos val="none"/>`
+      : `<c:majorTickMark val="out"/><c:minorTickMark val="none"/><c:tickLblPos val="nextTo"/>`) +
     `<c:spPr><a:ln w="28575"><a:solidFill><a:schemeClr val="tx1"/></a:solidFill></a:ln></c:spPr>` +
-    `<c:crossAx val="${crossAxId}"/><c:crosses val="autoZero"/><c:crossBetween val="midCat"/>` +
+    `<c:crossAx val="${ax.crossAxId}"/><c:crosses val="${ax.crosses ?? "autoZero"}"/><c:crossBetween val="midCat"/>` +
     `</c:valAx>`
   );
 }
@@ -187,16 +221,32 @@ function valAxXml(
  * - Trendline: invisible line (`noFill`), equation shown (`dispEq=1`), R² hidden (`dispRSqr=0`)
  * - X axis: "Repeat Units (n)", General format, 28575 EMU black line, no gridlines
  * - Y axis: "m/z", integer format, 28575 EMU black line, transparent gridlines
+ *
+ * Series marked `axis: "y2"` are split into a second `c:scatterChart` group with
+ * its own axis pair, which is how OOXML expresses a secondary axis: that group's
+ * y-axis sits at the right (`axPos="r"`, crossing at `max`) and its x-axis is a
+ * hidden duplicate of the primary one. A chart with no such series produces the
+ * single-group markup it always did.
  */
 function buildChartXml(spec: ChartSpec, chartIndex: number): string {
   const sheetRefFor = (name: string) => `'${name.replace(/'/g, "''")}'!`;
   const sheetRef = sheetRefFor(spec.sheetName);
-  const xAxId = 100000000 + chartIndex * 2;
-  const yAxId = 100000001 + chartIndex * 2;
+  // Four ids reserved per chart, since a combined one needs two axis pairs.
+  // They only have to be unique within a single chart part.
+  const base = 100000000 + chartIndex * 4;
+  const xAxId = base;
+  const yAxId = base + 1;
+  const x2AxId = base + 2;
+  const y2AxId = base + 3;
   const style: ChartStyle = { ...DEFAULT_STYLE, ...spec.style };
   const seriesList: ChartSeriesSpec[] = spec.series?.length
     ? spec.series
     : [{ name: spec.seriesName, xRange: spec.xRange, yRange: spec.yRange }];
+  const secondary = seriesList.filter((s) => s.axis === "y2");
+  // A chart whose every series asks for the right axis has nothing to be
+  // secondary to — draw them all on the primary rather than emit an empty group.
+  const split = secondary.length > 0 && secondary.length < seriesList.length;
+  const primary = split ? seriesList.filter((s) => s.axis !== "y2") : seriesList;
 
   /** Solid fill for a series' colour: the theme's tx1 (black) unless the series
    *  names an explicit RRGGBB. */
@@ -207,33 +257,40 @@ function buildChartXml(spec: ChartSpec, chartIndex: number): string {
 
   // Scatter series. The defaults reproduce the MALDI reference exactly: black
   // dotted line, black circle markers, and an invisible linear trendline that
-  // displays only its equation (no R²).
-  const ser = seriesList
-    .map((s, i) => {
-      const ref = s.sheet ? sheetRefFor(s.sheet) : sheetRef;
-      const xRef = xmlEscape(`${ref}${absoluteRange(s.xRange)}`);
-      const yRef = xmlEscape(`${ref}${absoluteRange(s.yRange)}`);
-      const fill = fillXml(s.color);
-      return (
-        `<c:ser><c:idx val="${i}"/><c:order val="${i}"/>` +
-        `<c:tx><c:v>${xmlEscape(s.name)}</c:v></c:tx>` +
-        `<c:spPr><a:ln><a:solidFill>${fill}</a:solidFill>` +
-        (style.line === "dotted" ? `<a:prstDash val="sysDot"/>` : "") +
-        `</a:ln></c:spPr>` +
-        (style.markers
-          ? `<c:marker><c:spPr><a:solidFill>${fill}</a:solidFill><a:ln><a:solidFill>${fill}</a:solidFill></a:ln></c:spPr></c:marker>`
-          : `<c:marker><c:symbol val="none"/></c:marker>`) +
-        (style.trendline
-          ? `<c:trendline><c:spPr><a:ln><a:noFill/></a:ln></c:spPr>` +
-            `<c:trendlineType val="linear"/><c:dispRSqr val="0"/><c:dispEq val="1"/>` +
-            `<c:trendlineLbl><c:layout/><c:numFmt formatCode="General" sourceLinked="0"/></c:trendlineLbl></c:trendline>`
-          : "") +
-        `<c:xVal><c:numRef><c:f>${xRef}</c:f></c:numRef></c:xVal>` +
-        `<c:yVal><c:numRef><c:f>${yRef}</c:f></c:numRef></c:yVal>` +
-        `<c:smooth val="${style.smooth ? 1 : 0}"/></c:ser>`
-      );
-    })
-    .join("");
+  // displays only its equation (no R²). `idx`/`order` are chart-wide, so the
+  // secondary group's numbering continues the primary group's.
+  const serXml = (s: ChartSeriesSpec, i: number) => {
+    const ref = s.sheet ? sheetRefFor(s.sheet) : sheetRef;
+    const xRef = xmlEscape(`${ref}${absoluteRange(s.xRange)}`);
+    const yRef = xmlEscape(`${ref}${absoluteRange(s.yRange)}`);
+    const fill = fillXml(s.color);
+    const dash = s.dash ? "dash" : style.line === "dotted" ? "sysDot" : null;
+    return (
+      `<c:ser><c:idx val="${i}"/><c:order val="${i}"/>` +
+      `<c:tx><c:v>${xmlEscape(s.name)}</c:v></c:tx>` +
+      `<c:spPr><a:ln><a:solidFill>${fill}</a:solidFill>` +
+      (dash ? `<a:prstDash val="${dash}"/>` : "") +
+      `</a:ln></c:spPr>` +
+      (style.markers
+        ? `<c:marker><c:spPr><a:solidFill>${fill}</a:solidFill><a:ln><a:solidFill>${fill}</a:solidFill></a:ln></c:spPr></c:marker>`
+        : `<c:marker><c:symbol val="none"/></c:marker>`) +
+      (style.trendline
+        ? `<c:trendline><c:spPr><a:ln><a:noFill/></a:ln></c:spPr>` +
+          `<c:trendlineType val="linear"/><c:dispRSqr val="0"/><c:dispEq val="1"/>` +
+          `<c:trendlineLbl><c:layout/><c:numFmt formatCode="General" sourceLinked="0"/></c:trendlineLbl></c:trendline>`
+        : "") +
+      `<c:xVal><c:numRef><c:f>${xRef}</c:f></c:numRef></c:xVal>` +
+      `<c:yVal><c:numRef><c:f>${yRef}</c:f></c:numRef></c:yVal>` +
+      `<c:smooth val="${style.smooth ? 1 : 0}"/></c:ser>`
+    );
+  };
+
+  /** One `c:scatterChart` group: its series, then the axis pair they plot against. */
+  const groupXml = (list: ChartSeriesSpec[], offset: number, ax1: number, ax2: number) =>
+    `<c:scatterChart><c:scatterStyle val="lineMarker"/><c:varyColors val="0"/>` +
+    list.map((s, i) => serXml(s, offset + i)).join("") +
+    `<c:dLbls><c:showLegendKey val="0"/><c:showVal val="0"/><c:showCatName val="0"/><c:showSerName val="0"/><c:showPercent val="0"/><c:showBubbleSize val="0"/></c:dLbls>` +
+    `<c:axId val="${ax1}"/><c:axId val="${ax2}"/></c:scatterChart>`;
 
   return (
     `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n` +
@@ -243,32 +300,59 @@ function buildChartXml(spec: ChartSpec, chartIndex: number): string {
     `<c:chart>` +
     `<c:autoTitleDeleted val="1"/>` +
     `<c:plotArea><c:layout/>` +
-    `<c:scatterChart><c:scatterStyle val="lineMarker"/><c:varyColors val="0"/>` +
-    ser +
-    `<c:dLbls><c:showLegendKey val="0"/><c:showVal val="0"/><c:showCatName val="0"/><c:showSerName val="0"/><c:showPercent val="0"/><c:showBubbleSize val="0"/></c:dLbls>` +
-    `<c:axId val="${xAxId}"/><c:axId val="${yAxId}"/></c:scatterChart>` +
-    valAxXml(
-      xAxId,
-      yAxId,
-      "b",
-      spec.xTitle ?? "Repeat Units (n)",
-      spec.xNumFmt ?? "General",
-      spec.xNumFmt == null,
-      spec.xMin,
-      spec.xMax,
-      "none",
-    ) +
-    valAxXml(
-      yAxId,
-      xAxId,
-      "l",
-      spec.yTitle ?? "m/z",
-      spec.yNumFmt ?? "0",
-      false,
-      spec.yMin,
-      spec.yMax,
-      "transparent",
-    ) +
+    // Every chart group precedes every axis — CT_PlotArea's schema order.
+    groupXml(primary, 0, xAxId, yAxId) +
+    (split ? groupXml(secondary, primary.length, x2AxId, y2AxId) : "") +
+    valAxXml({
+      axId: xAxId,
+      crossAxId: yAxId,
+      pos: "b",
+      title: spec.xTitle ?? "Repeat Units (n)",
+      numFmt: spec.xNumFmt ?? "General",
+      sourceLinked: spec.xNumFmt == null,
+      min: spec.xMin,
+      max: spec.xMax,
+      gridlines: "none",
+    }) +
+    valAxXml({
+      axId: yAxId,
+      crossAxId: xAxId,
+      pos: "l",
+      title: spec.yTitle ?? "m/z",
+      numFmt: spec.yNumFmt ?? "0",
+      sourceLinked: false,
+      min: spec.yMin,
+      max: spec.yMax,
+      gridlines: "transparent",
+    }) +
+    (split
+      ? valAxXml({
+          axId: y2AxId,
+          crossAxId: x2AxId,
+          pos: "r",
+          title: spec.y2Title ?? "",
+          numFmt: spec.y2NumFmt ?? "General",
+          sourceLinked: spec.y2NumFmt == null,
+          min: spec.y2Min ?? 0,
+          max: spec.y2Max ?? 1,
+          gridlines: "none",
+          crosses: "max",
+        }) +
+        // The secondary x-axis duplicates the primary's range and is deleted:
+        // it exists purely to complete the second group's axis pair.
+        valAxXml({
+          axId: x2AxId,
+          crossAxId: y2AxId,
+          pos: "b",
+          title: "",
+          numFmt: "General",
+          sourceLinked: true,
+          min: spec.xMin,
+          max: spec.xMax,
+          gridlines: "none",
+          deleted: true,
+        })
+      : "") +
     `<c:spPr><a:ln><a:noFill/></a:ln></c:spPr>` +
     `</c:plotArea>` +
     (style.legend ? `<c:legend><c:legendPos val="r"/><c:overlay val="0"/></c:legend>` : "") +

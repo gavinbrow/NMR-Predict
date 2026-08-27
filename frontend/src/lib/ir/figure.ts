@@ -596,15 +596,35 @@ export function reconcileFigureOptions(prev: FigureOptions, data: FigureData): F
 }
 
 /**
- * Drop peak-label overrides whose peak id is gone from the data. Peak ids are
- * `crypto.randomUUID()`s minted afresh on every re-pick (they do not survive
- * re-picking), so without this a re-pick would leave placement/hide entries
- * keyed by dead ids to accumulate forever — and, worse, a *new* peak that
- * happened to reuse an id would inherit a stranger's placement. We deliberately
- * do NOT re-bind by rounded m/z: a shifted centroid would silently mis-apply
- * another peak's override. The trade-off (re-picking resets label placement) is
- * surfaced to the user in the controls. Overrides for surviving ids are kept
- * verbatim; the previous object is returned unchanged when nothing is dropped so
+ * How many overrides are kept for labels that are not currently on the figure.
+ * Generous, because an override only exists where the user dragged or hid a
+ * label by hand — a few hundred is far past any real figure, and each entry is
+ * two numbers and a flag. See {@link reconcilePeakLabelOverrides}.
+ */
+export const MAX_ABSENT_PEAK_LABEL_OVERRIDES = 400;
+
+/**
+ * Reconcile peak-label overrides against the labels now on the figure.
+ *
+ * Overrides are keyed by peak-label id, and a label goes missing from the data
+ * for two very different reasons. It can be *momentarily* absent — the user
+ * turned labels off, hid the run it belongs to, or switched to an axis mode
+ * that withholds it — in which case it comes back later under the same id, and
+ * discarding its placement throws away every drag the moment the figure is
+ * reconfigured. Or it can be gone for good: hosts that re-detect peaks mint
+ * `crypto.randomUUID()` ids afresh on every re-pick, so a re-picked peak is a
+ * new label as far as this map is concerned, and its predecessor's entry will
+ * never match anything again.
+ *
+ * Nothing here can tell the two apart, so overrides are KEPT for absent ids —
+ * hand placement surviving is what the user notices — and the dead entries a
+ * re-picking host leaves behind are bounded instead, evicted oldest-first once
+ * they pass {@link MAX_ABSENT_PEAK_LABEL_OVERRIDES}.
+ *
+ * We deliberately do NOT re-bind an override by rounded position: a shifted
+ * centroid would silently inherit another peak's placement.
+ *
+ * The previous object is returned unchanged when nothing needs evicting, so
  * callers can skip a needless state update.
  */
 export function reconcilePeakLabelOverrides(
@@ -612,13 +632,16 @@ export function reconcilePeakLabelOverrides(
   data: FigureData,
 ): Record<string, PeakLabelOverride> {
   const ids = new Set((data.peakLabels ?? []).map((p) => p.id));
-  let dropped = false;
+  // Object key order is insertion order, so the oldest placements come first.
+  const absent = Object.keys(prev).filter((id) => !ids.has(id));
+  const excess = absent.length - MAX_ABSENT_PEAK_LABEL_OVERRIDES;
+  if (excess <= 0) return prev;
+  const evicted = new Set(absent.slice(0, excess));
   const next: Record<string, PeakLabelOverride> = {};
   for (const [id, ov] of Object.entries(prev)) {
-    if (ids.has(id)) next[id] = ov;
-    else dropped = true;
+    if (!evicted.has(id)) next[id] = ov;
   }
-  return dropped ? next : prev;
+  return next;
 }
 
 // --- axis math -------------------------------------------------------------------

@@ -2,9 +2,10 @@
 //
 // Everything stays client-side: CSV and JSON are built in memory and offered as
 // downloads; the Excel workbook is written with ExcelJS and then post-processed
-// to carry two NATIVE, editable scatter charts (weight % and DTG against
-// temperature) via the shared `injectCharts` helper; the PDF report is jsPDF,
-// mirroring `lib/maldi/export.ts`'s `exportReportPdf`.
+// to carry NATIVE, editable scatter charts via the shared `injectCharts` helper
+// — a trio (weight %, derivative, and the two combined) for each run on its own
+// data sheet, and the same trio with every run overlaid on a Charts sheet; the
+// PDF report is jsPDF, mirroring `lib/maldi/export.ts`'s `exportReportPdf`.
 //
 // The project file (`.tgaproj`) round-trips the runs, the analysis params, the
 // materials and the figure options, so a saved workspace reproduces the exact
@@ -187,6 +188,194 @@ export function buildStepsCsvRows(runs: TgaRunAnalyzed[]): (string | number | ""
  */
 const EXCEL_MAX_CHART_POINTS = 32000;
 
+/**
+ * Where one run's chart series live: which sheet holds them, the A1 ranges on
+ * it, and the run's own data extents so a single-run chart can scale to itself
+ * rather than to the whole workbook.
+ */
+interface TgaChartBlock {
+  label: string;
+  color: string;
+  sheet: string;
+  /** Zero-based column the run sheet's own charts anchor at, clear of its data. */
+  anchorCol: number;
+  xRange: string;
+  wRange: string;
+  dRange: string;
+  /** [min, max] of temperature, weight % and derivative for this run. */
+  tExtent: [number, number];
+  wExtent: [number, number];
+  dExtent: [number, number];
+}
+
+/** [min, max] over the finite entries of one signal. */
+function arrayExtent(src: Float64Array): [number, number] {
+  let lo = Infinity;
+  let hi = -Infinity;
+  for (let i = 0; i < src.length; i += 1) {
+    const v = src[i];
+    if (!Number.isFinite(v)) continue;
+    lo = Math.min(lo, v);
+    hi = Math.max(hi, v);
+  }
+  return [lo, hi];
+}
+
+/** The combined extent of one quantity across blocks; [0, 1] when nothing is
+ *  finite, so an axis is never written as NaN. */
+function unionExtent(
+  blocks: TgaChartBlock[],
+  key: "tExtent" | "wExtent" | "dExtent",
+): [number, number] {
+  let lo = Infinity;
+  let hi = -Infinity;
+  for (const b of blocks) {
+    lo = Math.min(lo, b[key][0]);
+    hi = Math.max(hi, b[key][1]);
+  }
+  return Number.isFinite(lo) && Number.isFinite(hi) ? [lo, hi] : [0, 1];
+}
+
+/** Round outwards to a whole number, for axis bounds that land on a tick. */
+function roundOut(v: number, up: boolean): number {
+  return Number.isFinite(v) ? Number((up ? Math.ceil(v) : Math.floor(v)).toFixed(4)) : 0;
+}
+
+/** Derivative values are small (~0.1 %/°C), so whole-number rounding would
+ *  collapse the axis to 0–1 and flatten the curve; pad the real range instead. */
+function dtgBounds([lo, hi]: [number, number]): { min: number; max: number } {
+  if (!Number.isFinite(lo) || !Number.isFinite(hi)) return { min: 0, max: 1 };
+  const pad = Math.max(Math.abs(lo), Math.abs(hi)) * 0.1 || 0.1;
+  return { min: Number((lo - pad).toFixed(4)), max: Number((hi + pad).toFixed(4)) };
+}
+
+/** Charts are 16 rows tall (see `buildDrawingXml`), so 18 leaves a two-row gap
+ *  and a row for each one's caption. */
+const CHART_ROW_PITCH = 18;
+
+/** The three captions naming a trio, for whatever the trio covers. */
+function chartCaptions(subject: string): [string, string, string] {
+  return [
+    `${subject} — weight (%)`,
+    `${subject} — derivative weight`,
+    `${subject} — weight + derivative (right axis)`,
+  ];
+}
+
+/**
+ * Three charts over one set of curves: weight %, derivative weight, and the two
+ * together on a shared temperature axis with the derivative on a secondary
+ * right-hand axis — without that second axis the derivative, two orders of
+ * magnitude smaller, would draw as a flat line on zero.
+ *
+ * Called once per run against that run's own block, so every sample carries its
+ * own set beside its own data, and once more with every block at once for the
+ * overlaid versions on the Charts sheet.
+ */
+function tgaChartTrio(args: {
+  sheetName: string;
+  blocks: TgaChartBlock[];
+  dtgUnit: string;
+  anchorCol: number;
+  /** Zero-based row the first chart anchors at; the next two follow below it. */
+  firstRow: number;
+}): ChartSpec[] {
+  const { sheetName, blocks, dtgUnit, anchorCol, firstRow } = args;
+  if (blocks.length === 0) return [];
+  const t = unionExtent(blocks, "tExtent");
+  const w = unionExtent(blocks, "wExtent");
+  const d = dtgBounds(unionExtent(blocks, "dExtent"));
+  const yTitle = "Weight (%)";
+  const y2Title = `Deriv. weight (${dtgUnit})`;
+  const weightSeries = blocks.map((b) => ({
+    name: b.label,
+    sheet: b.sheet,
+    xRange: b.xRange,
+    yRange: b.wRange,
+    color: b.color,
+  }));
+  const dtgSeries = blocks.map((b) => ({
+    name: `${b.label} — deriv.`,
+    sheet: b.sheet,
+    xRange: b.xRange,
+    yRange: b.dRange,
+    color: b.color,
+  }));
+  const common = {
+    sheetName,
+    // Superseded by `series`, but required by the single-series ChartSpec shape.
+    seriesName: "",
+    xRange: "",
+    yRange: "",
+    xMin: roundOut(t[0], false),
+    xMax: roundOut(t[1], true),
+    xTitle: "Temperature (°C)",
+    xNumFmt: "0",
+    anchorCol,
+  };
+  // Plain solid lines, no markers, no trendline — TGA curves are dense traces,
+  // not the sparse fitted points MALDI's defaults are shaped for. A legend only
+  // earns its space once there is more than one curve to tell apart.
+  const style = (legend: boolean) =>
+    ({ line: "solid", markers: false, trendline: false, legend }) as const;
+  const wMin = Math.min(0, roundOut(w[0], false));
+  const wMax = roundOut(Math.max(w[1], 100), true);
+  return [
+    {
+      ...common,
+      series: weightSeries,
+      yMin: wMin,
+      yMax: wMax,
+      yTitle,
+      yNumFmt: "0",
+      style: style(weightSeries.length > 1),
+      anchorRow: firstRow,
+    },
+    {
+      ...common,
+      series: dtgSeries,
+      yMin: d.min,
+      yMax: d.max,
+      yTitle: y2Title,
+      yNumFmt: "0.000",
+      style: style(dtgSeries.length > 1),
+      anchorRow: firstRow + CHART_ROW_PITCH,
+    },
+    {
+      ...common,
+      // Same curves again, the derivatives moved to the right axis and dashed so
+      // each run's pair reads as one colour in two line styles.
+      series: [...weightSeries, ...dtgSeries.map((s) => ({ ...s, axis: "y2" as const, dash: true }))],
+      yMin: wMin,
+      yMax: wMax,
+      yTitle,
+      yNumFmt: "0",
+      y2Min: d.min,
+      y2Max: d.max,
+      y2Title,
+      y2NumFmt: "0.000",
+      style: style(true),
+      anchorRow: firstRow + CHART_ROW_PITCH * 2,
+    },
+  ];
+}
+
+/** Write a trio's captions on the rows the charts anchor under. */
+function addChartCaptions(
+  ws: ExcelJS.Worksheet,
+  anchorCol: number,
+  firstRow: number,
+  captions: [string, string, string],
+): void {
+  captions.forEach((text, i) => {
+    // `anchorCol` is zero-based (drawing coordinates); getCell is one-based, so
+    // the caption lands in the chart's own column, one row above its top edge.
+    const c = ws.getCell(firstRow + i * CHART_ROW_PITCH, anchorCol + 1);
+    c.value = text;
+    c.font = { bold: true };
+  });
+}
+
 export interface TgaExcelInput {
   runs: TgaRunAnalyzed[];
   materials: TgaMaterial[];
@@ -197,9 +386,14 @@ export interface TgaExcelInput {
 }
 
 /**
- * Write the workbook: a Summary sheet, a Steps sheet, one full-resolution data
- * sheet per run, and a `Charts` sheet carrying two native editable scatter
- * charts — weight % vs temperature and DTG vs temperature.
+ * Write the workbook: a Summary sheet, a Steps sheet, a `Charts` sheet with
+ * every run overlaid, and one full-resolution data sheet per run.
+ *
+ * Charts come as a trio — weight %, derivative weight, and the two combined
+ * with the derivative on a secondary right-hand axis. Each run's own sheet
+ * carries the trio for that run alone, beside its data, and the Charts sheet
+ * carries the same trio with every run overlaid, so a multi-sample export is
+ * readable both per sample and as a comparison without anyone editing a series.
  *
  * The charts read each run's data sheet DIRECTLY, so every recorded point is on
  * the curve and the workbook holds exactly one copy of the data. (An earlier
@@ -207,10 +401,6 @@ export interface TgaExcelInput {
  * exported curves to ~900 points each, which is the one thing an export must
  * not do.) A run longer than Excel's 32 000-point series limit is the sole
  * exception — see {@link EXCEL_MAX_CHART_POINTS}.
- *
- * Two separate charts rather than one secondary-axis chart: an OOXML combo
- * chart is a great deal more XML for a picture that is harder to read than the
- * pair.
  *
  * Returns the finished .xlsx bytes; {@link exportTgaExcel} wraps this with the
  * download. Split so the package can be asserted on in a test without a DOM.
@@ -252,24 +442,20 @@ export async function buildTgaExcelBuffer(input: TgaExcelInput): Promise<Uint8Ar
   for (const r of stepRows.slice(1)) steps.addRow(r);
   steps.getColumn(1).width = 28;
 
-  // --- One data sheet per run (full resolution), and the ranges the charts
-  //     will read straight off it ---
-  const usedSheetNames = new Set(["Summary", "Steps", "Charts", "Figure"]);
-  /** Where one run's chart series live: which sheet, and the A1 ranges. */
-  interface ChartBlock {
-    run: TgaRunAnalyzed;
-    sheet: string;
-    xRange: string;
-    wRange: string;
-    dRange: string;
-  }
-  const blocks: ChartBlock[] = [];
-  let tMin = Infinity;
-  let tMax = -Infinity;
-  let wMin = Infinity;
-  let wMax = -Infinity;
-  let dMin = Infinity;
-  let dMax = -Infinity;
+  // --- The overlay chart sheet, created here so it sits before the data
+  //     sheets in the workbook; its charts are anchored further down, once the
+  //     ranges they read are known ---
+  const chartSheetName = "Charts";
+  const chartSheet = wb.addWorksheet(chartSheetName);
+  chartSheet.addRow(["TGA charts — every run overlaid"]).font = { bold: true };
+  chartSheet.addRow([
+    "Each run's own sheet carries the same three charts for that run alone. Series read the run sheets at full resolution — edit the chart, not the data.",
+  ]);
+
+  // --- One data sheet per run (full resolution), the ranges the charts read
+  //     straight off it, and that run's own charts beside its data ---
+  const usedSheetNames = new Set(["Summary", "Steps", chartSheetName, "Figure"]);
+  const blocks: TgaChartBlock[] = [];
 
   for (const run of runs) {
     // Excel sheet names: 31 chars max, no []:*?/\ and no duplicates.
@@ -337,96 +523,53 @@ export async function buildTgaExcelBuffer(input: TgaExcelInput): Promise<Uint8Ar
       // Full resolution: B / D / E. Thinned: G / H / I.
       const [xc, wc, dc] = thinned ? ["G", "H", "I"] : ["B", "D", "E"];
       blocks.push({
-        run,
+        label: run.label,
+        color: run.color,
         sheet: name,
+        // Clear of the data — column K when the thinned chart columns are
+        // present (A–I), column G when they are not (A–E).
+        anchorCol: thinned ? 10 : 6,
         xRange: `${xc}${first}:${xc}${last}`,
         wRange: `${wc}${first}:${wc}${last}`,
         dRange: `${dc}${first}:${dc}${last}`,
+        // The run's own extents, so its own charts scale to itself.
+        tExtent: arrayExtent(run.tempC),
+        wExtent: arrayExtent(a.weightPct),
+        dExtent: arrayExtent(a.dtg),
       });
-    }
-    for (let i = 0; i < n; i += 1) {
-      const t = run.tempC[i];
-      if (Number.isFinite(t)) {
-        tMin = Math.min(tMin, t);
-        tMax = Math.max(tMax, t);
-      }
-      const w = a.weightPct[i];
-      if (Number.isFinite(w)) {
-        wMin = Math.min(wMin, w);
-        wMax = Math.max(wMax, w);
-      }
-      const d = a.dtg[i];
-      if (Number.isFinite(d)) {
-        dMin = Math.min(dMin, d);
-        dMax = Math.max(dMax, d);
-      }
     }
   }
 
-  // --- The two native charts, on their own sheet ---
+  // --- The charts: the overlaid trio on the Charts sheet, then a trio per run
+  //     on that run's own sheet. Overlays come first so they take the low chart
+  //     numbers, which is also the order a reader meets them in. ---
   const chartSpecs: ChartSpec[] = [];
   if (blocks.length > 0) {
-    const chartSheetName = "Charts";
-    const chartSheet = wb.addWorksheet(chartSheetName);
-    chartSheet.addRow(["TGA charts"]).font = { bold: true };
-    chartSheet.addRow([
-      "Each series reads its run's own sheet at full resolution — edit the chart, not the data.",
-    ]);
-    const round = (v: number, up: boolean) =>
-      Number.isFinite(v) ? Number((up ? Math.ceil(v) : Math.floor(v)).toFixed(4)) : 0;
-    // Weight % vs temperature — solid lines, no markers, no trendline, one
-    // series per run in that run's own colour, with a legend to name them.
-    chartSpecs.push({
-      sheetName: chartSheetName,
-      seriesName: "TGA",
-      xRange: "",
-      yRange: "",
-      series: blocks.map((b) => ({
-        name: b.run.label,
-        sheet: b.sheet,
-        xRange: b.xRange,
-        yRange: b.wRange,
-        color: b.run.color,
-      })),
-      xMin: round(tMin, false),
-      xMax: round(tMax, true),
-      yMin: Math.min(0, round(wMin, false)),
-      yMax: round(Math.max(wMax, 100), true),
-      xTitle: "Temperature (°C)",
-      yTitle: "Weight (%)",
-      xNumFmt: "0",
-      yNumFmt: "0",
-      style: { line: "solid", markers: false, trendline: false, legend: true },
-      anchorCol: 1,
-      anchorRow: 3,
-    });
-    // DTG vs temperature, directly below the first chart (charts are 16 rows tall).
-    chartSpecs.push({
-      sheetName: chartSheetName,
-      seriesName: "DTG",
-      xRange: "",
-      yRange: "",
-      series: blocks.map((b) => ({
-        name: `${b.run.label} DTG`,
-        sheet: b.sheet,
-        xRange: b.xRange,
-        yRange: b.dRange,
-        color: b.run.color,
-      })),
-      xMin: round(tMin, false),
-      xMax: round(tMax, true),
-      // DTG is small (~0.1 %/°C), so an integer-rounded axis would collapse to
-      // 0–1 and flatten the curve; keep the real range with a little headroom.
-      yMin: Number.isFinite(dMin) ? Number((dMin - Math.abs(dMin) * 0.1).toFixed(4)) : 0,
-      yMax: Number.isFinite(dMax) ? Number((dMax + Math.abs(dMax) * 0.1).toFixed(4)) : 1,
-      xTitle: "Temperature (°C)",
-      yTitle: `Deriv. weight (${params.dtgUnit})`,
-      xNumFmt: "0",
-      yNumFmt: "0.000",
-      style: { line: "solid", markers: false, trendline: false, legend: true },
-      anchorCol: 1,
-      anchorRow: 21,
-    });
+    const overlayFirstRow = 3;
+    addChartCaptions(chartSheet, 1, overlayFirstRow, chartCaptions("All runs"));
+    chartSpecs.push(
+      ...tgaChartTrio({
+        sheetName: chartSheetName,
+        blocks,
+        dtgUnit: params.dtgUnit,
+        anchorCol: 1,
+        firstRow: overlayFirstRow,
+      }),
+    );
+    for (const block of blocks) {
+      const ws = wb.getWorksheet(block.sheet);
+      if (!ws) continue;
+      addChartCaptions(ws, block.anchorCol, 1, chartCaptions(block.label));
+      chartSpecs.push(
+        ...tgaChartTrio({
+          sheetName: block.sheet,
+          blocks: [block],
+          dtgUnit: params.dtgUnit,
+          anchorCol: block.anchorCol,
+          firstRow: 1,
+        }),
+      );
+    }
   }
 
   // --- Figure image ---
