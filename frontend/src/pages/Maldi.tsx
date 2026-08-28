@@ -710,19 +710,23 @@ const Maldi = () => {
   const figConfirmedSeries = useMemo(() => series.filter((s) => s.endGroupLocked), [series]);
 
   // --- Cross-file figure sources ----------------------------------------------
-  // The figure draws every VISIBLE document, active first: its trace, its peaks
-  // AND its ladders. Visibility stays the single source of truth (WP4), so the
-  // Documents panel decides what is in the figure and the screen and the export
-  // can't disagree. Deliberately independent of the analysis-wide "Combine
-  // documents" toggle — that one pools the TABLES, whereas a figure is a picture
-  // of what is on screen either way. The active document reads its spectrum,
-  // peaks and series from the LIVE hooks (newer than its snapshot); the others
-  // from their snapshotted state, exactly as `docSpectra` does.
+  // Every open document, active first: its trace, its peaks AND its ladders.
+  // `visible` rides along rather than filtering the list, because the Figure tab
+  // offers a tick per spectrum of its own (composing a stacked figure without
+  // walking back to the Documents panel — which in fullscreen isn't on screen at
+  // all). It is the SAME flag that panel sets, so visibility stays the single
+  // source of truth (WP4) and the screen and the export can't disagree; only the
+  // VISIBLE entries are drawn, and the active document is always one of them.
+  // Deliberately independent of the analysis-wide "Combine documents" toggle —
+  // that one pools the TABLES, whereas a figure is a picture of what is on
+  // screen either way. The active document reads its spectrum, peaks and series
+  // from the LIVE hooks (newer than its snapshot); the others from their
+  // snapshotted state, exactly as `docSpectra` does.
   const figSources = useMemo(() => {
     const ordered = [
       ...documents.filter((d) => d.id === activeDocId),
       ...documents.filter((d) => d.id !== activeDocId),
-    ].filter((d) => d.visible !== false);
+    ];
     return ordered
       .map((d) => {
         const isActive = d.id === activeDocId;
@@ -734,6 +738,8 @@ const Maldi = () => {
               id: d.id,
               name: d.name,
               color: d.color,
+              visible: d.visible !== false,
+              active: isActive,
               offset: d.offset ?? 0,
               scale: d.scale ?? 1,
               spectrum,
@@ -810,13 +816,18 @@ const Maldi = () => {
   const { figFiles, figFileInfos, figShownPeaks, figHiddenCount, figPeakDocId } = useMemo(() => {
     const ticked = new Set<string>();
     let anyTicked = false;
-    for (const ladders of figFileLadders) {
+    figFileLadders.forEach((ladders, i) => {
+      // Only a DRAWN spectrum's ladders narrow the figure. A tick left behind on
+      // one that has since been hidden would otherwise read as "draw only these
+      // ladders" and empty every other file — the picker doesn't even offer a
+      // hidden spectrum's ladders, so the tick would be invisible too.
+      if (!figSources[i].visible) return;
       for (const l of ladders) {
         if (!figSeriesIds.has(l.id)) continue;
         anyTicked = true;
         for (const id of l.peakIds) ticked.add(id);
       }
-    }
+    });
     const files: MaldiFigureFile[] = [];
     const infos: MaldiFigureFileInfo[] = [];
     const shown: Peak[] = [];
@@ -832,38 +843,46 @@ const Maldi = () => {
         base = base.filter((p) => highlightedPeakIds!.has(p.id));
       }
       if (anyTicked) base = base.filter((p) => ticked.has(p.id));
-      const visible =
+      const drawn =
         figExcludedPeakIds.size > 0 ? base.filter((p) => !figExcludedPeakIds.has(p.id)) : base;
-      hidden += base.length - visible.length;
-      for (const p of visible) {
-        shown.push(p);
-        docOf.set(p.id, e.id);
-      }
       const ladders = figFileLadders[i];
-      files.push({
-        // Keyed by DOCUMENT, so a file's trace styling belongs to that file and
-        // doesn't transfer to whoever happens to be active next. Document ids are
-        // minted afresh on load, so they would not survive a save on their own —
-        // `ACTIVE_PROFILE_ID` handles that at the persistence boundary instead.
-        id: e.id,
-        name: e.name,
-        spectrum: e.spectrum,
-        peaks: visible,
-        seriesGroups: ladders,
-        color: e.color,
-        // Normalize's own factor times the user's manual multiplier, so the
-        // figure puts this file exactly where the plot does.
-        scale: (normalize && max > 0 ? 100 / max : 1) * e.scale,
-        offset: e.offset,
-      });
+      // A hidden spectrum still gets a picker row (that is how it is put back in)
+      // but contributes nothing to the figure: no series, no peaks, and none of
+      // its figure-only deletes counted against the "N hidden · Restore all" line.
+      if (e.visible) {
+        hidden += base.length - drawn.length;
+        for (const p of drawn) {
+          shown.push(p);
+          docOf.set(p.id, e.id);
+        }
+        files.push({
+          // Keyed by DOCUMENT, so a file's trace styling belongs to that file and
+          // doesn't transfer to whoever happens to be active next. Document ids are
+          // minted afresh on load, so they would not survive a save on their own —
+          // `ACTIVE_PROFILE_ID` handles that at the persistence boundary instead.
+          id: e.id,
+          name: e.name,
+          spectrum: e.spectrum,
+          peaks: drawn,
+          seriesGroups: ladders,
+          color: e.color,
+          // Normalize's own factor times the user's manual multiplier, so the
+          // figure puts this file exactly where the plot does.
+          scale: (normalize && max > 0 ? 100 / max : 1) * e.scale,
+          offset: e.offset,
+        });
+      }
       // The picker keys by DOCUMENT id (it drives per-document actions), and
       // reads the same names, colours and ladder wording the figure draws.
       infos.push({
         id: e.id,
         name: e.name,
         color: e.color,
-        peakCount: visible.length,
+        visible: e.visible,
+        active: e.active,
+        peakCount: drawn.length,
         scale: e.scale,
+        offset: e.offset,
         ladders: ladders.map((g) => ({ id: g.id, label: g.label, color: g.color })),
       });
     });
@@ -876,8 +895,12 @@ const Maldi = () => {
     };
   }, [figSources, figFileLadders, figSeriesIds, figIncludeFlagged, figSelectedOnly, figHasSelection, highlightedPeakIds, figExcludedPeakIds, normalize]);
 
-  // Every open file's peaks, for the panel's "any flagged peaks?" check.
-  const figAllPeaks = useMemo(() => figSources.flatMap((e) => e.peaks), [figSources]);
+  // Every DRAWN file's peaks, for the panel's "any flagged peaks?" check — a
+  // hidden spectrum's flagged peaks are not something the figure could show.
+  const figAllPeaks = useMemo(
+    () => figSources.filter((e) => e.visible).flatMap((e) => e.peaks),
+    [figSources],
+  );
 
   const reportSeriesColors = useMemo(() => {
     const m = new Map<string, string>();
@@ -900,9 +923,15 @@ const Maldi = () => {
         showSticks: figShowSticks,
         labelPeaks: true, // label DATA is always supplied; the maker toggles display.
         sourceName: sourceName || projectName,
-        yLabel: normalize ? "Rel. intensity (%)" : "Intensity",
+        // Stacking makes the y-axis a stack of baselines rather than one
+        // intensity scale, so say so. It also matters mechanically: a changed
+        // y label is `useFigureOptions`' signal that the axis' unit moved, which
+        // drops any manual range the user had zoomed to — without that, turning
+        // Stack on would push the upper spectra straight out of a pinned view.
+        yLabel:
+          (normalize ? "Rel. intensity (%)" : "Intensity") + (stacked ? ", offset" : ""),
       }),
-    [figFiles, figShowProfile, figShowSticks, sourceName, projectName, normalize],
+    [figFiles, figShowProfile, figShowSticks, sourceName, projectName, normalize, stacked],
   );
 
   const [figureOptions, setFigureOptions] = useFigureOptions(figureData, MALDI_FIGURE_SEED);
@@ -2042,6 +2071,26 @@ const Maldi = () => {
     [handleUpdateDocument],
   );
 
+  // Draw / stop drawing one spectrum, and nudge one up or down, from the Figure
+  // tab. Both write the same `MaldiDocument` fields the Documents panel writes —
+  // a figure-only visibility or offset would be a second model of what is on
+  // screen, and the two would drift apart the moment either was touched. What
+  // this buys is reach: the figure maker opens fullscreen, where the Documents
+  // panel isn't on screen, so without these a second spectrum could not be added
+  // to a figure from inside the figure.
+  const handleToggleFigureFileVisible = useCallback(
+    (fileId: string, visible: boolean) => {
+      handleUpdateDocument(fileId, { visible });
+    },
+    [handleUpdateDocument],
+  );
+  const handleSetFigureFileOffset = useCallback(
+    (fileId: string, offset: number) => {
+      handleUpdateDocument(fileId, { offset: Number.isFinite(offset) ? offset : 0 });
+    },
+    [handleUpdateDocument],
+  );
+
   // Stack toggle. ON: save every document's current offset, then assign
   // `index * step` walking the VISIBLE documents in document order (active
   // included, treated no differently). OFF: restore each saved offset,
@@ -2864,6 +2913,10 @@ const Maldi = () => {
                         onToggleSeries={handleToggleFigureSeries}
                         onToggleFileSeries={handleToggleFigureFileSeries}
                         onSetFileScale={handleSetFigureFileScale}
+                        onToggleFileVisible={handleToggleFigureFileVisible}
+                        onSetFileOffset={handleSetFigureFileOffset}
+                        stacked={stacked}
+                        onStackedChange={handleStackedChange}
                         hiddenPeakCount={figHiddenCount}
                         onRestorePeaks={handleFigureRestorePeaks}
                         onDeletePeak={handleFigureDeletePeak}

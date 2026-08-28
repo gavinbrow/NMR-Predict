@@ -14,20 +14,33 @@ export interface MaldiFigureLadderInfo {
 }
 
 /**
- * One file the figure draws. A cross-file figure lists these as sections so the
- * ladders of each file can be picked — and, in the maker's Series controls,
- * styled — file by file rather than out of one undifferentiated list.
+ * One open spectrum offered to the figure. Every open document is listed —
+ * drawn or not — so a multi-spectrum figure can be composed here without going
+ * back to the Documents panel: {@link visible} is the tick that puts a spectrum
+ * in the figure, and {@link scale}/{@link offset} decide where it sits once it
+ * is in. A cross-file figure lists these as sections so the ladders of each file
+ * can be picked — and, in the maker's Series controls, styled — file by file
+ * rather than out of one undifferentiated list.
  */
 export interface MaldiFigureFileInfo {
   id: string;
   name: string;
   /** The document's trace colour (the Documents panel swatch). */
   color: string;
-  /** Peaks of this file the figure currently draws. */
+  /** Whether this spectrum is drawn at all — the same `visible` flag the
+   *  Documents panel's checkbox sets, not a figure-only copy of it. */
+  visible: boolean;
+  /** True for the active document, which cannot be hidden (the host forces it
+   *  visible; active-but-hidden would describe a spectrum nothing shows). */
+  active: boolean;
+  /** Peaks of this file the figure draws (or would draw, while it is hidden). */
   peakCount: number;
   /** The document's manual intensity multiplier (1 = as measured). Shared with
    *  the on-screen plot, so a file scaled here is scaled there too. */
   scale: number;
+  /** The document's vertical offset, in whatever unit the y-axis is currently
+   *  showing. Non-zero is what lifts a spectrum clear of the ones below it. */
+  offset: number;
   /** This file's confirmed ladders. */
   ladders: MaldiFigureLadderInfo[];
 }
@@ -73,10 +86,12 @@ interface MaldiFigurePanelProps {
   //     disturbs the analysis view and vice versa.
 
   /**
-   * Every file in the figure (the visible documents, active first), each with its
-   * confirmed ladders — superseded duplicate readings the rest of the UI hides
-   * never reach here. One entry is the ordinary single-file case; more than one
-   * is a cross-file figure and the picker sections itself by file.
+   * Every OPEN document, active first, each with its confirmed ladders —
+   * superseded duplicate readings the rest of the UI hides never reach here.
+   * Hidden documents are listed too, so a second spectrum can be added to the
+   * figure from here; only the ticked ones are drawn. One entry is the ordinary
+   * single-file case; more than one is a cross-file figure and the picker
+   * sections itself by file.
    */
   files: MaldiFigureFileInfo[];
   /** Ids of the ladders ticked in the picker (empty = show every peak). Spans
@@ -88,6 +103,19 @@ interface MaldiFigurePanelProps {
   /** Set one file's intensity multiplier (the same value the Documents panel's
    *  "×" edits — the figure mirrors the plot rather than keeping a second one). */
   onSetFileScale: (fileId: string, scale: number) => void;
+  /** Draw / stop drawing one spectrum. Sets the same `MaldiDocument.visible` the
+   *  Documents panel's checkbox does, so the plot and the figure can't disagree
+   *  about which spectra are in play. */
+  onToggleFileVisible: (fileId: string, visible: boolean) => void;
+  /** Set one file's vertical offset (the Documents panel's second per-row
+   *  number) — the manual counterpart to {@link stacked}, for nudging one
+   *  spectrum on its own. */
+  onSetFileOffset: (fileId: string, offset: number) => void;
+  /** Stack: spread the drawn spectra out with evenly-spaced vertical offsets so
+   *  they read as a waterfall instead of sitting on top of each other. Shared
+   *  with the Documents panel's Stack switch — one stack, in both places. */
+  stacked: boolean;
+  onStackedChange: (v: boolean) => void;
   /** How many peaks are currently hidden by figure-only deletes (in this view). */
   hiddenPeakCount: number;
   /** Restore every figure-only-deleted peak (never a one-way door). */
@@ -169,6 +197,10 @@ export function MaldiFigurePanel({
   onToggleSeries,
   onToggleFileSeries,
   onSetFileScale,
+  onToggleFileVisible,
+  onSetFileOffset,
+  stacked,
+  onStackedChange,
   hiddenPeakCount,
   onRestorePeaks,
   onDeletePeak,
@@ -178,13 +210,20 @@ export function MaldiFigurePanel({
   onFigureOptionsChange,
 }: MaldiFigurePanelProps) {
   const hasSelection = (highlightedPeakIds?.size ?? 0) > 0;
-  // Which files the figure draws is driven by the Documents panel's per-row
-  // visibility checkbox — `files` already contains only the VISIBLE documents
-  // (filtered by the host), active first. The old `includeOthers` switch is
-  // gone: two unsynchronised visibility models would let the screen and the
-  // exported figure disagree (maldi-overhaul-plan.md → WP4).
+  // Which spectra the figure draws is one flag, `MaldiDocument.visible`, shared
+  // with the Documents panel and the plot — the old `includeOthers` switch is
+  // gone because two unsynchronised visibility models would let the screen and
+  // the exported figure disagree (maldi-overhaul-plan.md → WP4). What lives here
+  // is a SECOND control over that same flag, not a second model: `files` lists
+  // every open document and the tick beside each one IS the Documents panel's
+  // checkbox. Without it, putting a second spectrum in a figure meant leaving
+  // the Figure tab — and in fullscreen, where the Documents panel is off-screen
+  // entirely, it meant leaving the figure.
   const crossFile = files.length > 1;
-  const allLadders = files.flatMap((f) => f.ladders);
+  const drawnFiles = files.filter((f) => f.visible);
+  // Only a drawn file's ladders belong in the picker's counts — a tick left on a
+  // spectrum that is currently hidden contributes nothing to the figure.
+  const allLadders = drawnFiles.flatMap((f) => f.ladders);
   // A flagged peak is one the library/background detector has tagged. Whether
   // to draw them is a figure-only choice; the underlying peak list is unchanged.
   const hasFlagged = peaks.some((p) => p.flag);
@@ -213,16 +252,30 @@ export function MaldiFigurePanel({
           disabled={!hasSelection}
           title={!hasSelection ? "Select a series or cluster in the plot/table to enable" : undefined}
         />
-        {/* The "Overlay open spectra" toggle was deleted in WP4 — which files
-            the figure draws is driven by the Documents panel's per-row
-            visibility checkbox, so the screen and the exported figure can't
-            disagree. The count is surfaced here as a read-only hint. */}
+        {/* Stack is the Documents panel's switch on the Documents panel's own
+            state: it spreads the drawn spectra out with evenly-spaced vertical
+            offsets, so a two-spectrum figure reads as a waterfall rather than as
+            two curves on top of one another. It needs a second spectrum to mean
+            anything — which is exactly the figure that needs it. */}
+        <ToggleLine
+          id="fig-stack"
+          label="Stack spectra"
+          checked={stacked}
+          onChange={onStackedChange}
+          disabled={!crossFile}
+          title={
+            crossFile
+              ? "Spread the drawn spectra out with evenly-spaced vertical offsets (stacks the plot too)"
+              : "Open a second spectrum to stack"
+          }
+          helper={crossFile ? "Waterfall — nudge one with its own offset below" : undefined}
+        />
         {crossFile && (
           <span
             className="text-[11px] text-muted-foreground"
-            title="Every visible document is drawn: its trace, its peaks and its ladders. Hide one in the Documents panel to leave it out."
+            title="Tick a spectrum below to draw it: its trace, its peaks and its ladders."
           >
-            {`${files.length} files`}
+            {`${drawnFiles.length} of ${files.length} spectra`}
           </span>
         )}
         <ToggleLine
@@ -253,24 +306,26 @@ export function MaldiFigurePanel({
         )}
       </div>
 
-      {/* Series picker: choose which assigned ladders the figure draws. With none
-          ticked every shown peak is drawn; tick one or more and only those
-          ladders' peaks appear, each stick in its ladder colour. Independent of
-          the plot's highlight (WP6b). Across files it sections by file, so a
-          two-polymer sample in one file and a reference in another stay legible;
-          the colours and wording match what the figure's Series controls show. */}
-      {/* One block per file: its intensity multiplier, and its assigned ladders.
-          The multiplier is the same `MaldiDocument.scale` the Documents panel
-          edits — Normalize takes every spectrum to its own 100 %, which is
-          rarely the comparison you actually want, so this is where a file gets
-          brought up or pushed down against the others. Editing it here moves the
-          plot too, deliberately: the figure is a picture of what is on screen,
-          and a second, figure-only scale would let the two disagree. */}
+      {/* Spectrum + series picker: which of the open spectra the figure draws,
+          and which of their assigned ladders. With no ladder ticked every shown
+          peak is drawn; tick one or more and only those ladders' peaks appear,
+          each stick in its ladder colour. Independent of the plot's highlight
+          (WP6b). Across files it sections by file, so a two-polymer sample in one
+          file and a reference in another stay legible; the colours and wording
+          match what the figure's Series controls show. */}
+      {/* One block per open spectrum: whether it is drawn, how it is scaled and
+          offset, and its assigned ladders. Every number here is the same
+          `MaldiDocument` field the Documents panel edits — Normalize takes every
+          spectrum to its own 100 %, which is rarely the comparison you actually
+          want, so × is where a file gets brought up or pushed down against the
+          others, and ↕ is where it gets lifted clear of them. Editing them here
+          moves the plot too, deliberately: the figure is a picture of what is on
+          screen, and a second, figure-only copy would let the two disagree. */}
       {files.length > 0 && (
         <div className="rounded-2xl border border-border/60 bg-card px-4 py-3 shadow-card">
           <div className="mb-2 flex items-center justify-between gap-2">
             <span className="text-xs font-semibold text-foreground">
-              {crossFile ? "Files & series" : "File & series"}
+              {crossFile ? "Spectra & series" : "Spectrum & series"}
             </span>
             {allLadders.length > 0 && (
               <span className="text-[11px] text-muted-foreground">
@@ -286,42 +341,94 @@ export function MaldiFigurePanel({
               return (
                 <div key={f.id} className="grid gap-1.5">
                   <div className="flex items-center gap-1.5">
+                    {/* The tick that puts this spectrum in the figure. The active
+                        document's is disabled: the host forces it visible, so an
+                        enabled box that springs back would just look broken. */}
+                    <input
+                      type="checkbox"
+                      checked={f.visible}
+                      disabled={f.active}
+                      onChange={(e) => onToggleFileVisible(f.id, e.target.checked)}
+                      className="h-3.5 w-3.5 shrink-0 disabled:opacity-50"
+                      title={
+                        f.active
+                          ? "The active spectrum is always drawn — switch to another document to leave this one out"
+                          : f.visible
+                            ? `Leave ${f.name} out of the figure`
+                            : `Draw ${f.name} in the figure`
+                      }
+                      aria-label={`Draw ${f.name} in the figure`}
+                    />
                     <span
                       className="h-2.5 w-2.5 shrink-0 rounded-full border border-border/60"
                       style={{ backgroundColor: f.color }}
                     />
-                    <span className="truncate text-[11px] font-semibold text-foreground">
+                    <span
+                      className={[
+                        "truncate text-[11px] font-semibold",
+                        f.visible ? "text-foreground" : "text-muted-foreground",
+                      ].join(" ")}
+                    >
                       {f.name}
                     </span>
                     <span className="shrink-0 text-[11px] text-muted-foreground">
-                      {f.peakCount} peak{f.peakCount === 1 ? "" : "s"}
+                      {f.visible ? `${f.peakCount} peak${f.peakCount === 1 ? "" : "s"}` : "not drawn"}
                     </span>
-                    <label
-                      className="flex shrink-0 items-center gap-1 text-[11px] text-muted-foreground"
-                      title="Intensity multiplier for this file — 1 draws it as measured. Also applies on the spectrum plot."
-                    >
-                      <span aria-hidden>×</span>
-                      <span className="sr-only">{`Intensity multiplier for ${f.name}`}</span>
-                      <Input
-                        type="number"
-                        step={0.1}
-                        min={0}
-                        value={f.scale}
-                        onChange={(e) => onSetFileScale(f.id, Number(e.target.value))}
-                        className="h-6 w-16 px-1 text-[11px]"
-                      />
-                    </label>
-                    {f.scale !== 1 && (
-                      <button
-                        type="button"
-                        onClick={() => onSetFileScale(f.id, 1)}
-                        className="shrink-0 text-[11px] underline underline-offset-2 text-muted-foreground hover:text-foreground"
-                        title="Draw this file at its measured intensity"
-                      >
-                        Reset
-                      </button>
+                    {/* Scale and offset only mean something for a drawn spectrum,
+                        and a hidden row collapses to its tick and its name. */}
+                    {f.visible && (
+                      <>
+                        <label
+                          className="flex shrink-0 items-center gap-1 text-[11px] text-muted-foreground"
+                          title="Intensity multiplier for this file — 1 draws it as measured. Also applies on the spectrum plot."
+                        >
+                          <span aria-hidden>×</span>
+                          <Input
+                            type="number"
+                            step={0.1}
+                            min={0}
+                            value={f.scale}
+                            onChange={(e) => onSetFileScale(f.id, Number(e.target.value))}
+                            aria-label={`Intensity multiplier for ${f.name}`}
+                            className="h-6 w-16 px-1 text-[11px]"
+                          />
+                        </label>
+                        {f.scale !== 1 && (
+                          <button
+                            type="button"
+                            onClick={() => onSetFileScale(f.id, 1)}
+                            className="shrink-0 text-[11px] underline underline-offset-2 text-muted-foreground hover:text-foreground"
+                            title="Draw this file at its measured intensity"
+                          >
+                            Reset
+                          </button>
+                        )}
+                        <label
+                          className="flex shrink-0 items-center gap-1 text-[11px] text-muted-foreground"
+                          title="Vertical offset for this file, in the y-axis' current unit — how far up the stack it sits. Also applies on the spectrum plot."
+                        >
+                          <span aria-hidden>&#8597;</span>
+                          <Input
+                            type="number"
+                            value={f.offset}
+                            onChange={(e) => onSetFileOffset(f.id, Number(e.target.value) || 0)}
+                            aria-label={`Vertical offset for ${f.name}`}
+                            className="h-6 w-20 px-1 text-[11px]"
+                          />
+                        </label>
+                        {f.offset !== 0 && (
+                          <button
+                            type="button"
+                            onClick={() => onSetFileOffset(f.id, 0)}
+                            className="shrink-0 text-[11px] underline underline-offset-2 text-muted-foreground hover:text-foreground"
+                            title="Drop this file back onto the baseline"
+                          >
+                            Reset
+                          </button>
+                        )}
+                      </>
                     )}
-                    {f.ladders.length > 0 && (
+                    {f.visible && f.ladders.length > 0 && (
                       <button
                         type="button"
                         onClick={() => onToggleFileSeries(f.id, on < f.ladders.length)}
@@ -331,7 +438,10 @@ export function MaldiFigurePanel({
                       </button>
                     )}
                   </div>
-                  {f.ladders.length > 0 && (
+                  {/* A hidden spectrum's ladders are not offered: ticking one is
+                      the statement "draw only these ladders", and a tick on a
+                      spectrum that isn't drawn would empty the whole figure. */}
+                  {f.visible && f.ladders.length > 0 && (
                     <div className="flex flex-wrap gap-x-4 gap-y-1.5 pl-4">
                       {f.ladders.map((l) => (
                         <label
