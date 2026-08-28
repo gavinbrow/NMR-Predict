@@ -268,7 +268,9 @@ export function MaldiFigurePanel({
               ? "Spread the drawn spectra out with evenly-spaced vertical offsets (stacks the plot too)"
               : "Open a second spectrum to stack"
           }
-          helper={crossFile ? "Waterfall — nudge one with its own offset below" : undefined}
+          helper={
+            crossFile ? "Waterfall — × sets each one's height, ↕ its place" : undefined
+          }
         />
         {crossFile && (
           <span
@@ -380,7 +382,11 @@ export function MaldiFigurePanel({
                       <>
                         <label
                           className="flex shrink-0 items-center gap-1 text-[11px] text-muted-foreground"
-                          title="Intensity multiplier for this file — 1 draws it as measured. Also applies on the spectrum plot."
+                          title={
+                            stacked
+                              ? "How tall this spectrum is drawn — 1 fills its own slot. The stack re-spaces around it, so turning one up doesn't run it through the one above. Also applies on the spectrum plot."
+                              : "Intensity multiplier for this file — 1 draws it as measured. Also applies on the spectrum plot."
+                          }
                         >
                           <span aria-hidden>×</span>
                           <Input

@@ -104,6 +104,7 @@ import {
 } from "@/lib/maldi/polymers";
 import { explainedPeakIds as explainedPeakIdsHelper, sameLadderSiblings, unexplainedPeaks } from "@/lib/maldi/seriesMatch";
 import { buildLadderColorMap, SERIES_COLORS } from "@/lib/maldi/seriesColor";
+import { stackOffsets } from "@/lib/maldi/view";
 import type { CopolymerSeries, RepeatCandidate, RepeatSeriesGroup } from "@/lib/maldi/polymers";
 import {
   createProject,
@@ -624,28 +625,57 @@ const Maldi = () => {
   // traces in raw-count units (Normalize off).
   const [stacked, setStacked] = useState(false);
   const savedOffsetsRef = useRef<Record<string, number>>({});
+  // Keyed on the visible set AND each visible document's intensity multiplier:
+  // turning one spectrum up or down changes how tall it is drawn, which changes
+  // where everything above it has to sit, so it re-lays the stack exactly as
+  // showing or hiding a document does.
   const visibleStackKey = useMemo(
-    () => documents.filter((d) => d.visible !== false).map((d) => d.id).join("|"),
+    () =>
+      documents
+        .filter((d) => d.visible !== false)
+        .map((d) => `${d.id}:${d.scale ?? 1}`)
+        .join("|"),
     [documents],
   );
-  const maxIntensityAcrossVisibleTraces = useMemo(() => {
-    let m = 0;
+  /** Each document's own maximum intensity — the height it is drawn at with
+   *  Normalize off and no multiplier. */
+  const docMaxima = useMemo(() => {
+    const out = new Map<string, number>();
     for (const d of docSpectra) {
-      if (d.visible === false) continue;
+      let m = 0;
       const arr = d.spectrum.intensity;
       for (let i = 0; i < arr.length; i += 1) {
         const v = arr[i];
         if (Number.isFinite(v) && v > m) m = v;
       }
+      out.set(d.id, m);
+    }
+    return out;
+  }, [docSpectra]);
+  const maxIntensityAcrossVisibleTraces = useMemo(() => {
+    let m = 0;
+    for (const d of docSpectra) {
+      if (d.visible === false) continue;
+      m = Math.max(m, docMaxima.get(d.id) ?? 0);
     }
     return m;
-  }, [docSpectra]);
-  const stackStep = useMemo(
-    () => (normalize ? 120 : 1.2 * maxIntensityAcrossVisibleTraces),
-    [normalize, maxIntensityAcrossVisibleTraces],
+  }, [docSpectra, docMaxima]);
+  // Where each visible document sits in the stack: on the combined height of the
+  // traces below it, measured as they are actually drawn. See `stackOffsets` —
+  // a constant step (what this used to be) ignores the per-document multipliers,
+  // so a spectrum turned up ran through the one above it.
+  const stackOffsetsByDoc = useMemo(
+    () =>
+      stackOffsets(
+        documents
+          .filter((d) => d.visible !== false)
+          .map((d) => ({ id: d.id, max: docMaxima.get(d.id) ?? 0, scale: d.scale ?? 1 })),
+        normalize,
+      ),
+    [documents, docMaxima, normalize],
   );
-  const stackStepRef = useRef(stackStep);
-  stackStepRef.current = stackStep;
+  const stackOffsetsRef = useRef(stackOffsetsByDoc);
+  stackOffsetsRef.current = stackOffsetsByDoc;
 
   // The reference spectrum for Difference mode: the snapshotted display
   // spectrum of the document the user marked "ref" in the Documents panel. Read
@@ -2091,24 +2121,24 @@ const Maldi = () => {
     [handleUpdateDocument],
   );
 
-  // Stack toggle. ON: save every document's current offset, then assign
-  // `index * step` walking the VISIBLE documents in document order (active
-  // included, treated no differently). OFF: restore each saved offset,
-  // defaulting to 0 for any document with no saved value (e.g. imported while
-  // stacked). The manual per-row offset input keeps working: typing a value
-  // while stacked overrides that one row and this handler does not fight it.
+  // Stack toggle. ON: save every document's current offset, then give each
+  // VISIBLE document (in document order, active included and treated no
+  // differently) the offset that clears the traces below it. OFF: restore each
+  // saved offset, defaulting to 0 for any document with no saved value (e.g.
+  // imported while stacked). The manual per-row offset input keeps working:
+  // typing a value while stacked overrides that one row, and this handler does
+  // not fight it — only a change to the stack's LAYOUT (a document shown, hidden
+  // or rescaled) re-derives the offsets.
   const handleStackedChange = useCallback(
     (on: boolean) => {
       if (on) {
         const saved: Record<string, number> = {};
         for (const d of documents) saved[d.id] = d.offset ?? 0;
         savedOffsetsRef.current = saved;
-        const step = stackStepRef.current;
-        let i = 0;
+        const offsets = stackOffsetsRef.current;
         for (const d of documents) {
           if (d.visible === false) continue;
-          handleUpdateDocument(d.id, { offset: i * step });
-          i += 1;
+          handleUpdateDocument(d.id, { offset: offsets.get(d.id) ?? 0 });
         }
       } else {
         const saved = savedOffsetsRef.current;
@@ -2147,19 +2177,18 @@ const Maldi = () => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [normalize]);
 
-  // While stacked, re-apply evenly-spaced offsets whenever the visible set
-  // changes (show/hide, import, close) or Normalize toggles, so the stack stays
-  // evenly spaced with no gaps. A manual per-row offset edit does NOT change the
-  // visible set, so this effect leaves it alone — the user's override stands
-  // until the visible set next changes.
+  // While stacked, re-lay the stack whenever something about its layout changes:
+  // the visible set (show/hide, import, close), a document's intensity
+  // multiplier, or Normalize — each of which changes how tall a trace is drawn
+  // and so where the ones above it belong. A manual per-row offset edit changes
+  // none of those, so this effect leaves it alone: the user's override stands
+  // until the layout next moves under it.
   useEffect(() => {
     if (!stacked) return;
-    const step = stackStepRef.current;
-    let i = 0;
+    const offsets = stackOffsetsRef.current;
     for (const d of documents) {
       if (d.visible === false) continue;
-      handleUpdateDocument(d.id, { offset: i * step });
-      i += 1;
+      handleUpdateDocument(d.id, { offset: offsets.get(d.id) ?? 0 });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [visibleStackKey, stacked, normalize]);

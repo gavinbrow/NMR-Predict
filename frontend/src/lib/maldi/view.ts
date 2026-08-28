@@ -259,6 +259,54 @@ export function applyOffset(arr: Float64Array, offset: number): Float64Array {
   return out;
 }
 
+/** One trace's contribution to a stack: how tall it will be drawn. */
+export interface StackEntry {
+  id: string;
+  /** The trace's own maximum, in raw intensity — before Normalize, before
+   *  {@link StackEntry.scale}. Ignored when normalising (every trace is 100
+   *  units tall then, by definition). */
+  max: number;
+  /** The document's intensity multiplier ({@link applyScale}'s factor). */
+  scale: number;
+}
+
+/** Clear air left above each trace in a stack, as a fraction of its own height. */
+export const STACK_GAP_FRACTION = 0.2;
+
+/**
+ * Vertical offsets that stack `entries` bottom-to-top, each trace sitting on the
+ * combined height of the ones below it plus a fifth of its own height as clear
+ * air. Pass the traces in the order they should stack; the first gets 0.
+ *
+ * Heights are measured AS DRAWN — through Normalize, and through each document's
+ * own intensity multiplier. That is the point of computing them rather than
+ * stepping by a constant: with a fixed step (what this replaced) the slots stay
+ * the same size however tall the traces in them actually are, so turning one
+ * spectrum up runs it through the trace above and turning one down leaves a hole
+ * under it. Carrying the multiplier through means adjusting one spectrum's
+ * intensity re-lays the stack around it, which is what makes the multiplier
+ * usable on a stacked figure at all.
+ *
+ * A trace with no height (all-zero, or scaled to nothing) still gets a slot of
+ * one unit, so it can be found and turned back up rather than being buried under
+ * the trace above.
+ */
+export function stackOffsets(
+  entries: StackEntry[],
+  normalize: boolean,
+  gapFraction = STACK_GAP_FRACTION,
+): Map<string, number> {
+  const out = new Map<string, number>();
+  let top = 0;
+  for (const e of entries) {
+    out.set(e.id, top);
+    const scale = Number.isFinite(e.scale) ? e.scale : 1;
+    const height = (normalize ? 100 : Math.max(0, e.max)) * scale;
+    top += (height > 0 ? height : 1) * (1 + gapFraction);
+  }
+  return out;
+}
+
 /**
  * Build a uniform ascending m/z grid of `samples` points spanning the UNION
  * m/z range of every supplied spectrum, intersected with the optional `[lo, hi]`

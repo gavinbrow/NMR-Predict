@@ -10,6 +10,7 @@ import {
   resampleOnto,
   resampleOntoGappy,
   sliceRange,
+  stackOffsets,
   unionGrid,
 } from "../view";
 
@@ -296,5 +297,59 @@ describe("peakMarkerScale", () => {
   it("returns 1 when normalize is on but the window max is non-positive", () => {
     expect(peakMarkerScale(true, 0)).toBe(1);
     expect(peakMarkerScale(true, -5)).toBe(1);
+  });
+});
+
+// The stack's slots are sized from the traces themselves, not stepped by a
+// constant, so the per-document intensity multiplier stays usable while stacked:
+// turning one spectrum up has to push the ones above it up too, and turning one
+// down has to close the gap it leaves rather than stranding it in dead space.
+describe("stackOffsets", () => {
+  const e = (id: string, max: number, scale = 1) => ({ id, max, scale });
+
+  it("stacks normalised traces at a fixed 120 (100 tall, a fifth of it as air)", () => {
+    const out = stackOffsets([e("a", 5000), e("b", 40), e("c", 900)], true);
+    // Normalising makes every trace 100 units tall whatever it measured, so the
+    // raw maxima drop out entirely — this is the everyday multi-document case.
+    expect([...out.values()]).toEqual([0, 120, 240]);
+  });
+
+  it("sizes each slot to its own trace when nothing is normalised", () => {
+    const out = stackOffsets([e("a", 1000), e("b", 50)], false);
+    expect(out.get("a")).toBe(0);
+    expect(out.get("b")).toBeCloseTo(1200);
+  });
+
+  it("re-spaces around a spectrum that has been turned up", () => {
+    const out = stackOffsets([e("a", 5000, 3), e("b", 40), e("c", 900)], true);
+    // 'a' is drawn 300 tall now, so 'b' has to start above 360 rather than at
+    // 120 — under the old constant step it started at 120 and 'a' ran straight
+    // through it.
+    expect([...out.values()]).toEqual([0, 360, 480]);
+  });
+
+  it("closes the gap under a spectrum that has been turned down", () => {
+    const out = stackOffsets([e("a", 5000, 0.5), e("b", 40)], true);
+    expect([...out.values()]).toEqual([0, 60]);
+  });
+
+  it("still gives a flat or zeroed trace a slot of its own", () => {
+    // Scaled to nothing (or all-zero), it would otherwise share a baseline with
+    // the trace above and be impossible to find and turn back up.
+    const out = stackOffsets([e("a", 0, 0), e("b", 100)], false);
+    expect(out.get("a")).toBe(0);
+    expect(out.get("b")).toBeCloseTo(1.2);
+  });
+
+  it("treats an unusable multiplier as 1 rather than collapsing the stack", () => {
+    const out = stackOffsets([e("a", 100, NaN), e("b", 100)], false);
+    expect(out.get("b")).toBeCloseTo(120);
+  });
+
+  it("puts the first trace on the baseline and returns one entry per id", () => {
+    const out = stackOffsets([e("a", 100), e("b", 100), e("c", 100)], true);
+    expect(out.get("a")).toBe(0);
+    expect(out.size).toBe(3);
+    expect(stackOffsets([], true).size).toBe(0);
   });
 });
