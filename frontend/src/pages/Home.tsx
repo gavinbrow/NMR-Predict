@@ -1,4 +1,4 @@
-import { Activity, ArrowRight, BarChart3, Database, FlaskConical, LineChart, Sparkles, Spline, Waves } from "lucide-react";
+import { Activity, ArrowRight, BarChart3, Database, FlaskConical, LineChart, Sparkles, Spline, Thermometer, Waves } from "lucide-react";
 import { Link } from "react-router-dom";
 import { AppShell } from "@/components/AppShell";
 
@@ -122,6 +122,13 @@ const Home = () => {
           eyebrow="Thermal"
           title="TGA analysis"
           description="Drop TA Q50 and TRIOS thermogravimetric files, compute Td/onset/DTG/residue, overlay runs, and build publication figures with a secondary axis."
+        />
+        <WorkspaceCard
+          href="/dsc"
+          icon={Thermometer}
+          eyebrow="Thermal"
+          title="DSC analysis"
+          description="Drop TRIOS and TA DSC files, pick a heat/cool segment, measure Tg, melting and crystallization, and build publication figures."
         />
       </section>
     </AppShell>

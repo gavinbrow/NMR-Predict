@@ -1,6 +1,0 @@
-Name LastDataFile
-  LastDataPath$ = "C:\MSDCHEM\75476\" 
-  LastDataFile$ = "ACSDCPD.D" 
-  LastDataSize  = 2439464
-  remove LastDataFile
-  return

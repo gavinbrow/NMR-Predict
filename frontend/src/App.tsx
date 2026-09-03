@@ -6,6 +6,7 @@ import { Toaster } from "@/components/ui/toaster";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import Home from "./pages/Home.tsx";
 import Index from "./pages/Index.tsx";
+import Dsc from "./pages/Dsc.tsx";
 import Gcms from "./pages/Gcms.tsx";
 import IrKinetics from "./pages/IrKinetics.tsx";
 import Kinetics from "./pages/Kinetics.tsx";
@@ -32,6 +33,7 @@ const KEEP_ALIVE: { path: string; element: JSX.Element }[] = [
   { path: "/ir", element: <IrKinetics /> },
   { path: "/tensile", element: <Tensile /> },
   { path: "/tga", element: <Tga /> },
+  { path: "/dsc", element: <Dsc /> },
 ];
 const KEEP_ALIVE_PATHS = new Set(KEEP_ALIVE.map((route) => route.path));
 

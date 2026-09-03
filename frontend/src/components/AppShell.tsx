@@ -100,6 +100,13 @@ export function AppShell({
               >
                 TGA
               </NavLink>
+              <NavLink
+                to="/dsc"
+                className={navLinkClassName}
+                activeClassName={navLinkActiveClassName}
+              >
+                DSC
+              </NavLink>
             </nav>
           </div>
 

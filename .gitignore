@@ -35,5 +35,8 @@ backend/.pytest_cache/
 # same reason GCMS Example/ was.
 TGA Test/
 
+# DSC sample files (~35 MB of .tri/.xls fixtures) — same reason.
+DSC Examples/
+
 # Benchmark reports — keep the dir (.gitkeep) but ignore generated output.
 
