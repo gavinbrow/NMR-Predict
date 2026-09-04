@@ -42,6 +42,7 @@ import { polyfitDeg1 } from "@/lib/ir/numerics";
 import type { FigureData, FigureSeriesData, PeakLabelDatum } from "@/lib/ir/figure";
 import type { GlassResult, PeakResult } from "./compute";
 import { ascendingView } from "./numerics";
+import { segmentDisplayName } from "./segments";
 import type { DscRunAnalyzed } from "./store";
 import type { DscFeatureKind, DscSegment } from "./types";
 import { downsample } from "./view";
@@ -554,7 +555,7 @@ export function buildDscFigureData(args: BuildDscFigureArgs): FigureData {
       const isCooling = segmentMode === "all" && b.segment.kind === "cool";
       series.push({
         id: `dsc:${run.id}:${b.segment.id}`,
-        label: segmentMode === "all" ? `${run.label} · ${b.segment.label}` : run.label,
+        label: segmentMode === "all" ? `${run.label} · ${segmentDisplayName(b.segment)}` : run.label,
         x: b.x,
         y: ys,
         ...(bandBaseline != null ? { baseline: bandBaseline } : {}),

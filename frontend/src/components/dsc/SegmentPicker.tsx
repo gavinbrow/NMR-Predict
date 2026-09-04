@@ -1,23 +1,24 @@
 // Segment chip picker for the selected run's "Segments" left-rail section:
 // one chip per procedure segment (§WP1.4's `DscSegment`), reading like
-// "Heat 1 · 10 °C/min · 0→280 °C", plus an "All" chip that clears the run's
-// pinned segment (passes `null`, which the store/compute layer resolves back
-// to the default per `defaultSegmentId` — normally the 2nd heat).
+// "Heat 1 · 10 °C/min · 0→280 °C", plus an "All" chip that overlays every
+// segment (all heats and cools) on the plot — i.e. it requests the plot's
+// `segmentMode: "all"` (see `lib/dsc/plot.ts`'s `segmentsForMode` and
+// `lib/dsc/figure.ts`), NOT a pinned-segment value. Clicking a specific chip
+// pins that segment (`useDscStore().setActiveSegment`) AND switches back to
+// `segmentMode: "active"`.
 //
-// Stateless — selection is reported via `onSelect`; the host wires it to
-// `useDscStore().setActiveSegment`.
+// Stateless — this component owns no state of its own. The host tells it
+// which chip is active via `allSegments` (highlights "All") and
+// `resolvedSegmentId` (highlights that segment otherwise — the run's
+// resolved `analysis.segmentId`, since a `null` pinned segment still
+// resolves to a real default, normally the 2nd heat), and reports clicks via
+// `onSelectAll` / `onSelect`.
 
+import { segmentDisplayName } from "@/lib/dsc/segments";
 import type { DscSegment } from "@/lib/dsc/types";
 
-const KIND_LABEL: Record<DscSegment["kind"], string> = {
-  heat: "Heat",
-  cool: "Cool",
-  isothermal: "Isothermal",
-  unknown: "Segment",
-};
-
 function segmentLabel(seg: DscSegment): string {
-  const parts = [`${KIND_LABEL[seg.kind]} ${seg.ordinal}`];
+  const parts = [segmentDisplayName(seg)];
   if (seg.rateCPerMin != null) parts.push(`${seg.rateCPerMin} °C/min`);
   parts.push(`${Math.round(seg.tStartC)}→${Math.round(seg.tEndC)} °C`);
   return parts.join(" · ");
@@ -52,29 +53,40 @@ function Chip({
 
 export function SegmentPicker({
   segments,
-  activeSegmentId,
+  allSegments,
+  resolvedSegmentId,
+  onSelectAll,
   onSelect,
 }: {
   segments: DscSegment[];
-  /** The run's currently pinned segment, or `null` when it should resolve to
-   *  the default (§WP1.4's `defaultSegmentId`). */
-  activeSegmentId: string | null;
-  onSelect: (segmentId: string | null) => void;
+  /** True when the plot is currently overlaying every segment
+   *  (`segmentMode: "all"`) — highlights the "All" chip instead of a single
+   *  segment chip. */
+  allSegments: boolean;
+  /** The run's resolved active segment (`run.analysis.segmentId`) — highlighted
+   *  when `allSegments` is false. Always a real segment id (or `null` only
+   *  when the run has none), never the "unresolved" sentinel the pinned
+   *  `activeSegmentId` can be. */
+  resolvedSegmentId: string | null;
+  /** Request `segmentMode: "all"` (overlay every heat/cool segment). */
+  onSelectAll: () => void;
+  /** Pin this segment and request `segmentMode: "active"`. */
+  onSelect: (segmentId: string) => void;
 }) {
   if (segments.length === 0) {
     return <p className="text-xs text-muted-foreground">This run has no segments.</p>;
   }
   return (
     <div className="flex flex-wrap gap-1.5">
-      <Chip
-        active={activeSegmentId === null}
-        onClick={() => onSelect(null)}
-        title="Resolve to the default segment (2nd heat, when present)"
-      >
+      <Chip active={allSegments} onClick={onSelectAll} title="Overlay every heating and cooling segment">
         All
       </Chip>
       {segments.map((seg) => (
-        <Chip key={seg.id} active={activeSegmentId === seg.id} onClick={() => onSelect(seg.id)}>
+        <Chip
+          key={seg.id}
+          active={!allSegments && resolvedSegmentId === seg.id}
+          onClick={() => onSelect(seg.id)}
+        >
           {segmentLabel(seg)}
         </Chip>
       ))}

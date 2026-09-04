@@ -33,6 +33,7 @@ import {
   type PeakResult,
 } from "./compute";
 import { interp1d } from "./numerics";
+import { segmentDisplayName } from "./segments";
 import { downsample } from "./view";
 import type { DscFeature, DscFeatureKind, DscParams, DscRun, DscSegment } from "./types";
 import type { DscRunAnalyzed } from "./store";
@@ -376,7 +377,7 @@ export function buildDscPlotTraces(args: BuildDscPlotTracesArgs): DscPlotTrace[]
         id: `${run.id}:${segment.id}`,
         runId: run.id,
         segmentId: segment.id,
-        label: segmentMode === "all" ? `${run.label} · ${segment.label}` : run.label,
+        label: segmentMode === "all" ? `${run.label} · ${segmentDisplayName(segment)}` : run.label,
         color: run.color,
         visible: run.visible,
         dashed: segmentMode === "all" && segment.kind === "cool",

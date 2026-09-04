@@ -641,8 +641,13 @@ function DscWorkspace() {
               {selectedRun ? (
                 <SegmentPicker
                   segments={selectedRun.segments}
-                  activeSegmentId={selectedRun.activeSegmentId}
-                  onSelect={(segId) => setActiveSegment(selectedRun.id, segId)}
+                  allSegments={segmentMode === "all"}
+                  resolvedSegmentId={selectedRun.analysis.segmentId}
+                  onSelectAll={() => setSegmentMode("all")}
+                  onSelect={(segId) => {
+                    setSegmentMode("active");
+                    setActiveSegment(selectedRun.id, segId);
+                  }}
                 />
               ) : (
                 <p className="text-xs text-muted-foreground">Select a run to see its segments.</p>

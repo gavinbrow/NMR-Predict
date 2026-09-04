@@ -9,6 +9,28 @@ import type { DscSegment, SegmentKind } from "./types";
 /** Temperature span below which a segment counts as isothermal, in °C. */
 const ISOTHERMAL_SPAN_C = 1;
 
+/** Human-readable noun for each `SegmentKind`, used by `segmentDisplayName`. */
+const KIND_NAME: Record<SegmentKind, string> = {
+  heat: "Heat",
+  cool: "Cool",
+  isothermal: "Isothermal",
+  unknown: "Segment",
+};
+
+/**
+ * The one canonical short display name for a segment, e.g. "Heat 1",
+ * "Cool 2", "Isothermal 1". Every place that shows a segment to the user —
+ * the segment-picker chips, and the "all segments" trace legend in both
+ * `plot.ts` and `figure.ts` — derives its label from this, so a heat/cool
+ * cycle can never be numbered one way in the picker and another way in the
+ * legend. `kind: "unknown"` still gets a number (segments of that kind are
+ * counted the same way as any other), rendered as "Segment N" rather than a
+ * bare ordinal.
+ */
+export function segmentDisplayName(segment: Pick<DscSegment, "kind" | "ordinal">): string {
+  return `${KIND_NAME[segment.kind]} ${segment.ordinal}`;
+}
+
 /**
  * Classify one segment from its temperature/time span:
  *  - `|span| < 1 °C` → `"isothermal"`, rate `null`.

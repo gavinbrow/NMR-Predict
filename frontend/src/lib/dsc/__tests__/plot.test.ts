@@ -21,6 +21,7 @@ import {
   dscPlotYLabel,
   type DscMarkerToggles,
 } from "../plot";
+import { buildSegments } from "../segments";
 import { DEFAULT_PARAMS, type DscFeature, type DscParams, type DscRun, type DscSegment } from "../types";
 import type { DscRunAnalyzed } from "../store";
 
@@ -210,6 +211,92 @@ function makeRun(
     polymerFraction: 1,
     referenceId: null,
     features: [glassFeature, meltFeature],
+  };
+
+  const analysis = computeDscAnalysis(run, DEFAULT_PARAMS);
+  return { ...run, analysis };
+}
+
+/**
+ * A run with a heat/cool/heat/cool method (two full cycles), each leg a
+ * plain baseline ramp with no features — just enough shape for
+ * `computeDscAnalysis` to classify each segment's kind, used only to check
+ * that "all" segment mode gives every one of the four traces its own
+ * distinct label (§ "same label twice" all-mode legend fix).
+ */
+function makeMultiCycleRun(): DscRunAnalyzed {
+  runCounter += 1;
+  const id = `cycle${runCounter}`;
+  const t0 = 0;
+  const t1 = 280;
+  const rateCPerMin = 10;
+  const dTc = 1;
+  const n = Math.round((t1 - t0) / dTc) + 1;
+  const dtMin = dTc / rateCPerMin;
+
+  const legs: Array<{ from: number; to: number }> = [
+    { from: t0, to: t1 }, // heat 1
+    { from: t1, to: t0 }, // cool 1
+    { from: t0, to: t1 }, // heat 2
+    { from: t1, to: t0 }, // cool 2
+  ];
+  const timeMin = new Float64Array(legs.length * n);
+  const tempC = new Float64Array(legs.length * n);
+  const heatFlowMw = new Float64Array(legs.length * n);
+  const blocks: { start: number; end: number; label: string }[] = [];
+  let t = 0;
+  legs.forEach((leg, legIdx) => {
+    const start = legIdx * n;
+    for (let i = 0; i < n; i += 1) {
+      const T = leg.from + (i * (leg.to - leg.from)) / (n - 1);
+      timeMin[start + i] = t;
+      tempC[start + i] = T;
+      heatFlowMw[start + i] = baselineOnlyWPerGAt(T);
+      t += dtMin;
+    }
+    blocks.push({
+      start,
+      end: start + n,
+      label: `Ramp ${rateCPerMin}.00 °C/min to ${leg.to.toFixed(2)} °C`,
+    });
+  });
+
+  const segments = buildSegments(id, tempC, timeMin, blocks);
+
+  const run: DscRun = {
+    label: id,
+    meta: {
+      instrument: "DSC25",
+      operator: "Test",
+      sampleName: id,
+      sampleMassMg: 10,
+      panMassMg: 0,
+      pan: "Tzero Aluminum Hermetic",
+      methodSteps: blocks.map((b) => b.label),
+      runDate: "9/2/2026",
+      gases: "Nitrogen, 50 mL/min",
+      cooler: "RCS 90",
+      cellConstant: "-23.6 mW/°C",
+      sampleInterval: "0.1 s/pt",
+      exoDirection: "up",
+    },
+    segments,
+    timeMin,
+    tempC,
+    heatFlowMw,
+    id,
+    fileId: `${id}:file`,
+    fileName: "synthetic-cycle.tri",
+    color: "#2563eb",
+    scale: 1,
+    offset: 0,
+    visible: true,
+    materialId: null,
+    activeSegmentId: segments[0].id,
+    massOverrideMg: null,
+    polymerFraction: 1,
+    referenceId: null,
+    features: [],
   };
 
   const analysis = computeDscAnalysis(run, DEFAULT_PARAMS);
@@ -496,6 +583,27 @@ describe("buildDscPlotTraces", () => {
     const cool = traces.find((t) => t.segmentId === run.segments[1].id)!;
     expect(heat.dashed).toBe(false);
     expect(cool.dashed).toBe(true);
+  });
+
+  it('segment mode "all" gives a heat/cool/heat/cool run four distinct trace labels', () => {
+    const run = makeMultiCycleRun();
+    const traces = buildDscPlotTraces({
+      runs: [run],
+      params: DEFAULT_PARAMS,
+      xAxis: "temperature",
+      yAxis: "wattsPerGram",
+      y2Mode: "off",
+      segmentMode: "all",
+    });
+    expect(traces).toHaveLength(4);
+    const labels = traces.map((tr) => tr.label);
+    expect(new Set(labels).size).toBe(4); // no two segments share a label
+    expect(labels).toEqual([
+      `${run.label} · Heat 1`,
+      `${run.label} · Cool 1`,
+      `${run.label} · Heat 2`,
+      `${run.label} · Cool 2`,
+    ]);
   });
 
   it("downsamples a series past the point budget, and respects a caller-supplied budget", () => {
