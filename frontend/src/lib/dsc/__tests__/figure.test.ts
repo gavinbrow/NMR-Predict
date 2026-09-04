@@ -25,6 +25,12 @@ const NO_MARKERS: DscMarkerToggles = {
   baselines: false,
   tangents: false,
   enthalpyLabels: false,
+  // NOT part of what "no markers" turns off — `verticals` cuts across every
+  // family above rather than being one itself, so existing fixtures that
+  // spread `NO_MARKERS` and flip on a single family (e.g. `glassOnset`) still
+  // get that family's line. Dedicated tests below flip this one off on its
+  // own to check the "keep the label, drop the line" behaviour.
+  verticals: true,
 };
 
 const ALL_MARKERS: DscMarkerToggles = {
@@ -37,6 +43,7 @@ const ALL_MARKERS: DscMarkerToggles = {
   baselines: true,
   tangents: true,
   enthalpyLabels: true,
+  verticals: true,
 };
 
 /**
@@ -149,6 +156,63 @@ function makeRun(
     features,
   };
 
+  const analysis = computeDscAnalysis(run, DEFAULT_PARAMS);
+  return { ...run, analysis };
+}
+
+/** A single flat heating ramp — constant heat flow, no glass/melt shape at
+ *  all — used only to pin the degenerate-span normalization guard: a trace
+ *  with no variation has nothing to map onto 0..1, so it must pass through
+ *  UNCHANGED rather than divide by ~0. */
+function makeFlatRun(id: string, color: string, valueWPerG = 0.05): DscRunAnalyzed {
+  const n = 200;
+  const massMg = 10;
+  const tempC = new Float64Array(n);
+  const timeMin = new Float64Array(n);
+  const heatFlowMw = new Float64Array(n);
+  for (let i = 0; i < n; i += 1) {
+    const t = i / (n - 1);
+    tempC[i] = 30 + t * 170;
+    timeMin[i] = t * 17;
+    heatFlowMw[i] = valueWPerG * massMg;
+  }
+  const segments = buildSegments(id, tempC, timeMin, [{ start: 0, end: n, label: "Ramp 10 °C/min to 200 °C" }]);
+  const meta: DscMetadata = {
+    instrument: "DSC25",
+    operator: "",
+    sampleName: id,
+    sampleMassMg: massMg,
+    panMassMg: null,
+    pan: "",
+    methodSteps: [],
+    runDate: "",
+    gases: "",
+    cooler: "",
+    cellConstant: "",
+    sampleInterval: "",
+    exoDirection: "up",
+  };
+  const run: DscRun = {
+    id,
+    fileId: `file-${id}`,
+    fileName: `${id}.tri`,
+    label: id,
+    color,
+    meta,
+    segments,
+    timeMin,
+    tempC,
+    heatFlowMw,
+    scale: 1,
+    offset: 0,
+    visible: true,
+    materialId: null,
+    activeSegmentId: null,
+    massOverrideMg: null,
+    polymerFraction: 1,
+    referenceId: null,
+    features: [],
+  };
   const analysis = computeDscAnalysis(run, DEFAULT_PARAMS);
   return { ...run, analysis };
 }
@@ -553,5 +617,342 @@ describe("buildDscFigureData", () => {
     const idx = curveWPerG.y.findIndex((v) => Math.abs(v) > 0.05);
     expect(idx).toBeGreaterThanOrEqual(0);
     expect(curveMw.y[idx] / curveWPerG.y[idx]).toBeCloseTo(10, 5);
+  });
+
+  it("spans the glass mid mark preLine(Tmid) -> postLine(Tmid), with the callout at the span midpoint", () => {
+    // The bug this pins: the glass mid mark used to be curve-anchored,
+    // running to the run floor exactly like a glass onset/endset mark — for
+    // a step, the curve at Tmid sits mid-transition, between the two
+    // extrapolated baselines, so a curve-anchored floor-running mark put the
+    // "Tg …" callout nowhere near the step. This mirrors the on-screen plot
+    // overlay's identical fix for the same geometry (`lib/dsc/plot.ts`'s
+    // `pushGlassMarkers`).
+    const run = makeRun("A", "#2563eb");
+    const data = buildDscFigureData({
+      runs: [run],
+      xAxis: "temperature",
+      yAxis: "wattsPerGram",
+      y2: "none",
+      segmentMode: "active",
+      labelFeatures: true,
+      stackRuns: false,
+      markers: { ...NO_MARKERS, glassMid: true },
+    });
+
+    const result = run.analysis.results["A:glass1"];
+    expect(result.kind).toBe("glass");
+    const glass = result.kind === "glass" ? result.glass : null;
+    expect(glass?.midpointC).not.toBeNull();
+    expect(glass?.preLine).not.toBeNull();
+    expect(glass?.postLine).not.toBeNull();
+
+    const marks = data.series.filter((s) => s.id.startsWith("mark:") && s.id.endsWith(":mid"));
+    expect(marks).toHaveLength(1);
+    const [mark] = marks;
+    const expectedTop = glass!.preLine!.slope * glass!.midpointC! + glass!.preLine!.intercept;
+    const expectedBottom = glass!.postLine!.slope * glass!.midpointC! + glass!.postLine!.intercept;
+    expect(mark.y[1]).toBeCloseTo(expectedTop, 3);
+    expect(mark.y[0]).toBeCloseTo(expectedBottom, 3);
+    // A real span, not a same-point no-op.
+    expect(Math.abs(mark.y[1] - mark.y[0])).toBeGreaterThan(0.001);
+
+    const label = (data.peakLabels ?? []).find((p) => p.id === `${mark.id}:lbl`);
+    expect(label).toBeDefined();
+    expect(label!.y).toBeCloseTo((mark.y[0] + mark.y[1]) / 2, 6);
+  });
+
+  it("verticals:false suppresses every mark: line series while every callout label survives untouched", () => {
+    // The user's ask this satisfies for the exported figure, mirroring the
+    // on-screen plot's identical toggle: "remove the Tg line and keep just
+    // the Tg label — do that for all of them." Baseline/tangent series are
+    // unaffected — those are `baselines`/`tangents`' own toggles.
+    const run = makeRun("A", "#2563eb");
+    const withVerticals = buildDscFigureData({
+      runs: [run],
+      xAxis: "temperature",
+      yAxis: "wattsPerGram",
+      y2: "none",
+      segmentMode: "active",
+      labelFeatures: true,
+      stackRuns: false,
+      markers: ALL_MARKERS,
+    });
+    const noVerticals = buildDscFigureData({
+      runs: [run],
+      xAxis: "temperature",
+      yAxis: "wattsPerGram",
+      y2: "none",
+      segmentMode: "active",
+      labelFeatures: true,
+      stackRuns: false,
+      markers: { ...ALL_MARKERS, verticals: false },
+    });
+
+    const marksWith = withVerticals.series.filter((s) => s.id.startsWith("mark:"));
+    const marksWithout = noVerticals.series.filter((s) => s.id.startsWith("mark:"));
+    expect(marksWith.length).toBeGreaterThan(0);
+    expect(marksWithout).toHaveLength(0);
+
+    // Baseline/tangent lines survive — a different toggle.
+    expect(withVerticals.series.some((s) => s.id.startsWith("baseline:"))).toBe(true);
+    expect(noVerticals.series.some((s) => s.id.startsWith("baseline:"))).toBe(true);
+
+    const labelsWith = (withVerticals.peakLabels ?? []).map((p) => p.text).sort();
+    const labelsWithout = (noVerticals.peakLabels ?? []).map((p) => p.text).sort();
+    expect(labelsWithout).toEqual(labelsWith);
+    expect(labelsWith.length).toBeGreaterThan(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// normalizeTraces (display-only, composed unit conversion -> normalization
+// -> run.scale -> run.offset -> stack shift)
+// ---------------------------------------------------------------------------
+
+describe("buildDscFigureData normalizeTraces", () => {
+  it("maps each run's own drawn y-range onto 0..1, independently of its amplitude", () => {
+    // Two runs with very different sample masses — very different W/g
+    // amplitude — should BOTH land on exactly 0..1: this is what makes it a
+    // per-trace normalization rather than one shared range across runs.
+    const a = makeRun("A", "#2563eb", { massMg: 5 });
+    const b = makeRun("B", "#dc2626", { massMg: 50 });
+    const data = buildDscFigureData({
+      runs: [a, b],
+      xAxis: "temperature",
+      yAxis: "wattsPerGram",
+      y2: "none",
+      segmentMode: "active",
+      labelFeatures: false,
+      stackRuns: false,
+      markers: NO_MARKERS,
+      normalizeTraces: true,
+    });
+    for (const run of [a, b]) {
+      const s = data.series.find((x) => x.id === `dsc:${run.id}:${run.analysis.segmentId}`)!;
+      const finite = s.y.filter(Number.isFinite);
+      expect(Math.min(...finite)).toBeCloseTo(0, 6);
+      expect(Math.max(...finite)).toBeCloseTo(1, 6);
+    }
+  });
+
+  it("passes a flat trace through unchanged rather than dividing by ~0", () => {
+    const run = makeFlatRun("F", "#111827", 0.05);
+    const plain = buildDscFigureData({
+      runs: [run],
+      xAxis: "temperature",
+      yAxis: "wattsPerGram",
+      y2: "none",
+      segmentMode: "active",
+      labelFeatures: false,
+      stackRuns: false,
+      markers: NO_MARKERS,
+    });
+    const normalized = buildDscFigureData({
+      runs: [run],
+      xAxis: "temperature",
+      yAxis: "wattsPerGram",
+      y2: "none",
+      segmentMode: "active",
+      labelFeatures: false,
+      stackRuns: false,
+      markers: NO_MARKERS,
+      normalizeTraces: true,
+    });
+    const cPlain = plain.series.find((s) => s.id.startsWith("dsc:F:"))!;
+    const cNorm = normalized.series.find((s) => s.id.startsWith("dsc:F:"))!;
+    expect(cNorm.y).toEqual(cPlain.y);
+  });
+
+  it("normalizes a marker anchor through the SAME range as the curve, so the callout stays glued to it", () => {
+    // The failure mode this pins: the curve moves onto 0..1 but a marker
+    // anchored on the pre-normalization analysis value does not — leaving
+    // the callout stranded off the curve.
+    const run = makeRun("A", "#2563eb");
+    const plain = buildDscFigureData({
+      runs: [run],
+      xAxis: "temperature",
+      yAxis: "wattsPerGram",
+      y2: "none",
+      segmentMode: "active",
+      labelFeatures: false,
+      stackRuns: false,
+      markers: { ...NO_MARKERS, glassOnset: true },
+    });
+    const normalized = buildDscFigureData({
+      runs: [run],
+      xAxis: "temperature",
+      yAxis: "wattsPerGram",
+      y2: "none",
+      segmentMode: "active",
+      labelFeatures: false,
+      stackRuns: false,
+      markers: { ...NO_MARKERS, glassOnset: true },
+      normalizeTraces: true,
+    });
+
+    const curvePlain = plain.series.find((s) => s.id.startsWith("dsc:A:"))!;
+    const finite = curvePlain.y.filter(Number.isFinite);
+    const min = Math.min(...finite);
+    const max = Math.max(...finite);
+
+    const markPlain = plain.series.find((s) => s.id.startsWith("mark:"))!;
+    const markNorm = normalized.series.find((s) => s.id === markPlain.id)!;
+
+    // The mark's bottom (the run floor, i.e. `min` itself) must map to
+    // exactly 0 — and its curve-anchored top must map through the identical
+    // (v - min) / (max - min) the curve used, not some independently
+    // recomputed range.
+    expect(markNorm.y[0]).toBeCloseTo(0, 6);
+    const expectedTop = (markPlain.y[1] - min) / (max - min);
+    expect(markNorm.y[1]).toBeCloseTo(expectedTop, 4);
+  });
+
+  it("does not normalize the derivative on y2 — a different physical quantity", () => {
+    const run = makeRun("A", "#2563eb");
+    const plain = buildDscFigureData({
+      runs: [run],
+      xAxis: "temperature",
+      yAxis: "wattsPerGram",
+      y2: "derivative",
+      segmentMode: "active",
+      labelFeatures: false,
+      stackRuns: false,
+      markers: NO_MARKERS,
+    });
+    const normalized = buildDscFigureData({
+      runs: [run],
+      xAxis: "temperature",
+      yAxis: "wattsPerGram",
+      y2: "derivative",
+      segmentMode: "active",
+      labelFeatures: false,
+      stackRuns: false,
+      markers: NO_MARKERS,
+      normalizeTraces: true,
+    });
+    const dPlain = plain.series.find((s) => s.id.startsWith("deriv:A:"))!;
+    const dNorm = normalized.series.find((s) => s.id.startsWith("deriv:A:"))!;
+    expect(dNorm.y).toEqual(dPlain.y);
+  });
+
+  it("switches the y-axis label to 'Heat flow (normalized)' when on", () => {
+    const run = makeRun("A", "#2563eb");
+    const data = buildDscFigureData({
+      runs: [run],
+      xAxis: "temperature",
+      yAxis: "wattsPerGram",
+      y2: "none",
+      segmentMode: "active",
+      labelFeatures: false,
+      stackRuns: false,
+      markers: NO_MARKERS,
+      normalizeTraces: true,
+    });
+    expect(data.yLabel).toBe("Heat flow (normalized)");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// stackSpacing (fixed rung ladder, an alternative to the automatic
+// accumulated-height stacking `STACK_GAP_FRACTION` builds)
+// ---------------------------------------------------------------------------
+
+describe("buildDscFigureData stackSpacing", () => {
+  it("places run k at k * stackSpacing, in the current display units, carrying its markers with it", () => {
+    // Normalized traces both have amplitude 1 (0..1), so a spacing of 1.2
+    // gives an exact, predictable ladder — the "clean even ladder" case
+    // `stackSpacing`'s doc comment describes.
+    const a = makeRun("A", "#2563eb");
+    const b = makeRun("B", "#dc2626");
+    const data = buildDscFigureData({
+      runs: [a, b],
+      xAxis: "temperature",
+      yAxis: "wattsPerGram",
+      y2: "none",
+      segmentMode: "active",
+      labelFeatures: false,
+      stackRuns: true,
+      stackSpacing: 1.2,
+      normalizeTraces: true,
+      markers: { ...NO_MARKERS, glassOnset: true },
+    });
+    const ca = data.series.find((s) => s.id === `dsc:A:${a.analysis.segmentId}`)!;
+    const cb = data.series.find((s) => s.id === `dsc:B:${b.analysis.segmentId}`)!;
+
+    expect(ca.baseline).toBeCloseTo(0, 10); // run 0 -> 0 * 1.2
+    expect(cb.baseline).toBeCloseTo(1.2, 10); // run 1 -> 1 * 1.2
+
+    const finiteA = ca.y.filter(Number.isFinite);
+    const finiteB = cb.y.filter(Number.isFinite);
+    expect(Math.min(...finiteA)).toBeCloseTo(0, 6);
+    expect(Math.max(...finiteA)).toBeCloseTo(1, 6);
+    expect(Math.min(...finiteB)).toBeCloseTo(1.2, 6);
+    expect(Math.max(...finiteB)).toBeCloseTo(2.2, 6);
+
+    // B's onset marker rides in B's rung, not an accumulated-height one.
+    const markersB = data.series.filter((s) => s.group === "Analysis markers" && s.y[0] === cb.baseline);
+    expect(markersB.length).toBeGreaterThan(0);
+  });
+
+  it("keeps the y2 series on the SAME rung as its run's primary curve", () => {
+    const a = makeRun("A", "#2563eb");
+    const b = makeRun("B", "#dc2626");
+    const data = buildDscFigureData({
+      runs: [a, b],
+      xAxis: "temperature",
+      yAxis: "wattsPerGram",
+      y2: "derivative",
+      segmentMode: "active",
+      labelFeatures: false,
+      stackRuns: true,
+      stackSpacing: 2,
+      markers: NO_MARKERS,
+    });
+    const da = data.series.find((s) => s.id === `deriv:A:${a.analysis.segmentId}`)!;
+    const db = data.series.find((s) => s.id === `deriv:B:${b.analysis.segmentId}`)!;
+    expect(da.baseline).toBeCloseTo(0, 10);
+    expect(db.baseline).toBeCloseTo(2, 10);
+  });
+
+  it("a non-positive or missing stackSpacing keeps the automatic ladder — never divides by, or multiplies into, a bogus rung", () => {
+    const a = makeRun("A", "#2563eb");
+    for (const bad of [0, -1, NaN]) {
+      const data = buildDscFigureData({
+        runs: [a],
+        xAxis: "temperature",
+        yAxis: "wattsPerGram",
+        y2: "none",
+        segmentMode: "active",
+        labelFeatures: false,
+        stackRuns: true,
+        stackSpacing: bad,
+        markers: NO_MARKERS,
+      });
+      const c = data.series.find((s) => s.id === `dsc:A:${a.analysis.segmentId}`)!;
+      // Only one run stacked — its rung is 0 either way (automatic or
+      // fixed), so this alone doesn't distinguish the two paths; the
+      // byte-for-byte test below is the real pin for `null`. This just
+      // confirms a bad value doesn't throw or produce non-finite output.
+      expect(c.y.every((v) => Number.isFinite(v) || Number.isNaN(v))).toBe(true);
+      expect(c.baseline).toBe(0);
+    }
+  });
+
+  it("stackSpacing: null reproduces the automatic accumulated-height stacking byte-for-byte", () => {
+    const a = makeRun("A", "#2563eb");
+    const b = makeRun("B", "#dc2626");
+    const commonArgs = {
+      runs: [a, b],
+      xAxis: "temperature" as const,
+      yAxis: "wattsPerGram" as const,
+      y2: "derivative" as const,
+      segmentMode: "active" as const,
+      labelFeatures: true,
+      stackRuns: true,
+      markers: { ...NO_MARKERS, glassOnset: true },
+    };
+    const omitted = buildDscFigureData(commonArgs);
+    const explicitNull = buildDscFigureData({ ...commonArgs, stackSpacing: null });
+    expect(explicitNull).toEqual(omitted);
   });
 });

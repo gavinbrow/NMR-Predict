@@ -34,6 +34,7 @@ const ALL_MARKERS: DscMarkerToggles = {
   baselines: true,
   tangents: true,
   enthalpyLabels: true,
+  verticals: true,
 };
 
 // ---------------------------------------------------------------------------
@@ -671,5 +672,230 @@ describe("buildDscPlotMarkers", () => {
     const label = out.find((m) => m.kind === "label" && m.id === `${featureId}:label:peak`);
     expect(label).toBeDefined();
     expect((label as { y: number }).y).toBeCloseTo((v.y! + v.y2!) / 2, 6);
+  });
+
+  it("spans the Tg midpoint vertical across the step (preLine to postLine), with the callout at the span midpoint", () => {
+    // The bug this pins: the glass midpoint vertical used to be anchored on
+    // the curve with no y2, running to the plot floor — for a step, the
+    // curve value at Tmid sits mid-transition, between the two extrapolated
+    // baselines, so a curve-anchored floor-running line put the "Tg …"
+    // callout nowhere near the step. ASTM E1356 figures instead draw a
+    // short bracket at Tmid, spanning the pre-transition baseline's
+    // extrapolated level to the post-transition one's.
+    const out = buildDscPlotMarkers({
+      runs: [makeRun()],
+      params: DEFAULT_PARAMS,
+      xAxis: "temperature",
+      yAxis: "wattsPerGram",
+      markers: ALL_MARKERS,
+    });
+    const midVertical = out.find((m) => m.kind === "vertical" && m.id.endsWith(":glass1:v:midpoint"));
+    expect(midVertical).toBeDefined();
+    const v = midVertical as Extract<typeof midVertical, { kind: "vertical" }>;
+    expect(v.y).not.toBeUndefined();
+    expect(v.y2).not.toBeUndefined();
+    // A real span, not a same-point no-op.
+    expect(Math.abs(v.y2! - v.y!)).toBeGreaterThan(0.01);
+
+    const featureId = v.id.slice(0, -":v:midpoint".length);
+    const label = out.find((m) => m.kind === "label" && m.id === `${featureId}:label`);
+    expect(label).toBeDefined();
+    expect((label as { y: number }).y).toBeCloseTo((v.y! + v.y2!) / 2, 6);
+  });
+
+  it("leaves the glass onset/endset verticals floor-anchored (no y2) — only the midpoint spans the step", () => {
+    const out = buildDscPlotMarkers({
+      runs: [makeRun()],
+      params: DEFAULT_PARAMS,
+      xAxis: "temperature",
+      yAxis: "wattsPerGram",
+      markers: ALL_MARKERS,
+    });
+    const onset = out.find((m) => m.kind === "vertical" && m.id.endsWith(":glass1:v:onset"));
+    const endset = out.find((m) => m.kind === "vertical" && m.id.endsWith(":glass1:v:endset"));
+    expect(onset).toBeDefined();
+    expect(endset).toBeDefined();
+    expect((onset as Extract<typeof onset, { kind: "vertical" }>).y2).toBeUndefined();
+    expect((endset as Extract<typeof endset, { kind: "vertical" }>).y2).toBeUndefined();
+  });
+
+  it("verticals:false suppresses every vertical marker while every label survives untouched", () => {
+    // The user's ask this satisfies: "remove the Tg line and keep just the
+    // Tg label — do that for all of them." Checked across every family this
+    // fixture exercises (glass onset/midpoint/endset, melt onset/peak/endset).
+    const withVerticals = buildDscPlotMarkers({
+      runs: [makeRun()],
+      params: DEFAULT_PARAMS,
+      xAxis: "temperature",
+      yAxis: "wattsPerGram",
+      markers: ALL_MARKERS,
+    });
+    const noVerticals = buildDscPlotMarkers({
+      runs: [makeRun()],
+      params: DEFAULT_PARAMS,
+      xAxis: "temperature",
+      yAxis: "wattsPerGram",
+      markers: { ...ALL_MARKERS, verticals: false },
+    });
+    expect(withVerticals.some((m) => m.kind === "vertical")).toBe(true);
+    expect(noVerticals.some((m) => m.kind === "vertical")).toBe(false);
+
+    const withLabels = withVerticals
+      .filter((m) => m.kind === "label")
+      .map((m) => m.text)
+      .sort();
+    const noVerticalLabels = noVerticals
+      .filter((m) => m.kind === "label")
+      .map((m) => m.text)
+      .sort();
+    expect(noVerticalLabels).toEqual(withLabels);
+    expect(withLabels.length).toBeGreaterThan(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// normalizeTraces (display-only, composed unit conversion -> normalization
+// -> run.scale -> run.offset)
+// ---------------------------------------------------------------------------
+
+describe("normalizeTraces", () => {
+  it("maps each trace's own drawn y-range onto 0..1, independently of its amplitude", () => {
+    // Different sample masses give very different W/g amplitude — both
+    // traces should still land on exactly 0..1, which is what makes this a
+    // PER-TRACE normalization rather than one shared range across runs.
+    const small = makeRun({ sampleMassMg: 2 });
+    const large = makeRun({ sampleMassMg: 80 });
+    const traces = buildDscPlotTraces({
+      runs: [small, large],
+      params: DEFAULT_PARAMS,
+      xAxis: "temperature",
+      yAxis: "wattsPerGram",
+      y2Mode: "off",
+      segmentMode: "active",
+      normalizeTraces: true,
+    });
+    for (const t of traces) {
+      const finite = Array.from(t.y).filter((v) => Number.isFinite(v));
+      expect(Math.min(...finite)).toBeCloseTo(0, 6);
+      expect(Math.max(...finite)).toBeCloseTo(1, 6);
+    }
+  });
+
+  it("passes a flat trace through unchanged rather than dividing by ~0", () => {
+    // The cooling segment in `makeRun`'s fixture (`baselineOnlyWPerGAt`) is
+    // NOT flat (it has a slope) — build a genuinely constant run by hand.
+    const run = makeRun();
+    // Overwrite the active (heating) segment's heat flow with a constant —
+    // still exercises the real `buildDscPlotTraces` path, just against data
+    // with zero span.
+    const n = run.segments[0].end - run.segments[0].start;
+    for (let i = 0; i < n; i += 1) run.heatFlowMw[i] = 0.4; // constant mW
+    // `buildDscPlotTraces` reads `run.tempC`/`timeMin`/`heatFlowMw` fresh via
+    // `segmentView` on every call — it never reads `run.analysis` — so
+    // mutating the raw array in place above is enough; no need to recompute
+    // `analysis` for this test.
+
+    const plain = buildDscPlotTraces({
+      runs: [run],
+      params: DEFAULT_PARAMS,
+      xAxis: "temperature",
+      yAxis: "wattsPerGram",
+      y2Mode: "off",
+      segmentMode: "active",
+    });
+    const normalized = buildDscPlotTraces({
+      runs: [run],
+      params: DEFAULT_PARAMS,
+      xAxis: "temperature",
+      yAxis: "wattsPerGram",
+      y2Mode: "off",
+      segmentMode: "active",
+      normalizeTraces: true,
+    });
+    expect(Array.from(normalized[0].y)).toEqual(Array.from(plain[0].y));
+  });
+
+  it("does not normalize the derivative on y2 — a different physical quantity", () => {
+    const run = makeRun();
+    const plain = buildDscPlotTraces({
+      runs: [run],
+      params: DEFAULT_PARAMS,
+      xAxis: "temperature",
+      yAxis: "wattsPerGram",
+      y2Mode: "derivative",
+      segmentMode: "active",
+    });
+    const normalized = buildDscPlotTraces({
+      runs: [run],
+      params: DEFAULT_PARAMS,
+      xAxis: "temperature",
+      yAxis: "wattsPerGram",
+      y2Mode: "derivative",
+      segmentMode: "active",
+      normalizeTraces: true,
+    });
+    expect(Array.from(normalized[0].y2!)).toEqual(Array.from(plain[0].y2!));
+  });
+
+  it("switches the y-axis label to 'Heat flow (normalized)', keeping the exo arrow", () => {
+    expect(dscPlotYLabel("wattsPerGram", true, false, true)).toBe("Heat flow (normalized)");
+    expect(dscPlotYLabel("milliwatts", true, false, true)).toBe("Heat flow (normalized)");
+    expect(dscPlotYLabel("wattsPerGram", true, true, true)).toBe("Heat flow (normalized) ↑ Exo");
+    expect(dscPlotYLabel("wattsPerGram", false, true, true)).toBe("Heat flow (normalized) ↓ Exo");
+    // Omitting `normalize` (or passing false) keeps the pre-existing labels.
+    expect(dscPlotYLabel("wattsPerGram", true, false)).toBe("Heat flow (W/g)");
+  });
+
+  it("normalizes a marker anchor through the SAME range as its trace, so the callout stays glued to the curve", () => {
+    // The failure mode this pins: the curve moves onto 0..1 but a marker
+    // built from the pre-normalization analysis value does not, leaving the
+    // callout's label stranded off the curve.
+    const run = makeRun();
+    const [plainTrace] = buildDscPlotTraces({
+      runs: [run],
+      params: DEFAULT_PARAMS,
+      xAxis: "temperature",
+      yAxis: "wattsPerGram",
+      y2Mode: "off",
+      segmentMode: "active",
+    });
+    const finite = Array.from(plainTrace.y).filter((v) => Number.isFinite(v));
+    const min = Math.min(...finite);
+    const max = Math.max(...finite);
+
+    const plainMarkers = buildDscPlotMarkers({
+      runs: [run],
+      params: DEFAULT_PARAMS,
+      xAxis: "temperature",
+      yAxis: "wattsPerGram",
+      markers: ALL_MARKERS,
+    });
+    const normMarkers = buildDscPlotMarkers({
+      runs: [run],
+      params: DEFAULT_PARAMS,
+      xAxis: "temperature",
+      yAxis: "wattsPerGram",
+      markers: ALL_MARKERS,
+      normalizeTraces: true,
+    });
+
+    const peakVertical = plainMarkers.find(
+      (m) => m.kind === "vertical" && m.id.endsWith(":melt1:v:peak"),
+    ) as Extract<(typeof plainMarkers)[number], { kind: "vertical" }>;
+    const peakVerticalNorm = normMarkers.find((m) => m.id === peakVertical.id) as typeof peakVertical;
+    expect(peakVertical.y).not.toBeUndefined();
+    expect(peakVertical.y2).not.toBeUndefined();
+
+    const expectedY = (peakVertical.y! - min) / (max - min);
+    const expectedY2 = (peakVertical.y2! - min) / (max - min);
+    expect(peakVerticalNorm.y!).toBeCloseTo(expectedY, 4);
+    expect(peakVerticalNorm.y2!).toBeCloseTo(expectedY2, 4);
+
+    const label = plainMarkers.find((m) => m.kind === "label" && m.text.startsWith("Tm ")) as Extract<
+      (typeof plainMarkers)[number],
+      { kind: "label" }
+    >;
+    const labelNorm = normMarkers.find((m) => m.id === label.id) as typeof label;
+    expect(labelNorm.y).toBeCloseTo((peakVerticalNorm.y! + peakVerticalNorm.y2!) / 2, 4);
   });
 });

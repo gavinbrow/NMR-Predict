@@ -103,6 +103,10 @@ const DEFAULT_PLOT_MARKERS: DscPlotMarkerToggles = {
   baselines: false,
   tangents: false,
   enthalpyLabels: false,
+  // On by default — the pre-existing behaviour. This is the "declutter"
+  // toggle a user reaches for AFTER seeing the marker lines, to drop them
+  // while keeping every Tg/Tm/… label right where it was.
+  verticals: true,
 };
 
 /** Marker-family toggles for the Figure tab. A different shape from the
@@ -121,6 +125,10 @@ const DEFAULT_FIGURE_MARKERS: DscFigureMarkerToggles = {
   baselines: false,
   tangents: false,
   enthalpyLabels: false,
+  // On by default — the pre-existing behaviour; see the plot's
+  // `DEFAULT_PLOT_MARKERS` doc comment above for why this one starts true
+  // where its neighbours start false.
+  verticals: true,
 };
 
 /** The DSC figure defaults — MALDI's / TGA's verbatim. TGA callouts are
@@ -393,12 +401,35 @@ function DscWorkspace() {
   const [showMarkerLabels, setShowMarkerLabels] = useState(true);
   const [plotMarkers, setPlotMarkers] = useState<DscPlotMarkerToggles>(DEFAULT_PLOT_MARKERS);
   const [selectedFeatureId, setSelectedFeatureId] = useState<string | null>(null);
+  // Display-only trace normalization (map each trace onto its own 0..1
+  // span) — shared verbatim between the on-screen plot and the Figure tab,
+  // exactly like `xAxis`/`yAxis`/`segmentMode` above. Never touches `params`
+  // or any computed analysis number; see `lib/dsc/plot.ts`'s and
+  // `lib/dsc/figure.ts`'s matching `normalizeTraces` doc comments.
+  const [normalizeTraces, setNormalizeTraces] = useState(false);
+
+  // Spinner increment for every run's Y-offset field (`RunCard` and
+  // `DscFigurePanel`'s per-run strip), derived from the CURRENT display
+  // mode rather than hardcoded: DSC heat flow is ~0.3 W/g (or, once
+  // normalized, confined to 0..1), so a step of `1` throws the trace clean
+  // off the chart on one spinner click — the bug `RunCard`'s own doc
+  // comment on this prop names. `0.01` covers W/g and normalized display;
+  // raw mW values run roughly 1-10, an order of magnitude larger, so `0.1`
+  // (also an order of magnitude larger) keeps the same "a few clicks moves
+  // it a visible but sane amount" feel rather than being either imperceptible
+  // or a single click blowing the trace off-screen again.
+  const offsetStep = normalizeTraces || yAxis === "wattsPerGram" ? 0.01 : 0.1;
 
   // Figure-tab-only state.
   const [figShowCurve, setFigShowCurve] = useState(true);
   const [figureY2, setFigureY2] = useState<DscY2>("none");
   const [figLabelFeatures, setFigLabelFeatures] = useState(true);
   const [figStackRuns, setFigStackRuns] = useState(false);
+  // Fixed vertical spacing between stacked runs (Figure tab only — the
+  // on-screen plot never stacks). `null` keeps the adapter's automatic
+  // accumulated-height ladder; see `lib/dsc/figure.ts`'s `stackSpacing` doc
+  // comment.
+  const [figStackSpacing, setFigStackSpacing] = useState<number | null>(null);
   const [figureMarkers, setFigureMarkers] = useState<DscFigureMarkerToggles>(DEFAULT_FIGURE_MARKERS);
 
   // Cure / OIT — a genuinely persistent value (should survive a tab switch).
@@ -413,12 +444,12 @@ function DscWorkspace() {
 
   // --- Derived plot data ---
   const plotTraces = useMemo(
-    () => buildDscPlotTraces({ runs, params, xAxis, yAxis, y2Mode, segmentMode }),
-    [runs, params, xAxis, yAxis, y2Mode, segmentMode],
+    () => buildDscPlotTraces({ runs, params, xAxis, yAxis, y2Mode, segmentMode, normalizeTraces }),
+    [runs, params, xAxis, yAxis, y2Mode, segmentMode, normalizeTraces],
   );
   const plotMarkerOverlays = useMemo(
-    () => buildDscPlotMarkers({ runs, params, xAxis, yAxis, markers: plotMarkers }),
-    [runs, params, xAxis, yAxis, plotMarkers],
+    () => buildDscPlotMarkers({ runs, params, xAxis, yAxis, markers: plotMarkers, normalizeTraces }),
+    [runs, params, xAxis, yAxis, plotMarkers, normalizeTraces],
   );
 
   // A feature can belong to any run, not just the selected one (the plot
@@ -434,7 +465,15 @@ function DscWorkspace() {
 
   // --- Derived figure data ---
   const figureRuns = useMemo(
-    () => runs.map((r) => ({ id: r.id, label: r.label, color: r.color, visible: r.visible })),
+    () =>
+      runs.map((r) => ({
+        id: r.id,
+        label: r.label,
+        color: r.color,
+        visible: r.visible,
+        scale: r.scale,
+        offset: r.offset,
+      })),
     [runs],
   );
   const figureData = useMemo(
@@ -447,6 +486,8 @@ function DscWorkspace() {
         segmentMode,
         labelFeatures: figLabelFeatures,
         stackRuns: figStackRuns,
+        stackSpacing: figStackSpacing,
+        normalizeTraces,
         markers: figureMarkers,
         sourceName: selectedRun?.fileName.replace(/\.[^.]+$/, "") ?? undefined,
       }),
@@ -459,6 +500,8 @@ function DscWorkspace() {
       segmentMode,
       figLabelFeatures,
       figStackRuns,
+      figStackSpacing,
+      normalizeTraces,
       figureMarkers,
       selectedRun,
     ],
@@ -556,6 +599,7 @@ function DscWorkspace() {
                       onToggleVisible={() => toggleRunVisible(r.id)}
                       onSetScale={(s) => setRunScale(r.id, s)}
                       onSetOffset={(o) => setRunOffset(r.id, o)}
+                      offsetStep={offsetStep}
                       onRemove={() => {
                         removeRun(r.id);
                         if (selectedRunId === r.id) setSelectedRunId(null);
@@ -662,12 +706,14 @@ function DscWorkspace() {
                       onShowMarkerLabelsChange={setShowMarkerLabels}
                       markers={plotMarkers}
                       onMarkersChange={setPlotMarkers}
+                      normalizeTraces={normalizeTraces}
+                      onNormalizeTracesChange={setNormalizeTraces}
                     />
                     <DscPlot
                       traces={plotTraces}
                       markers={plotMarkerOverlays}
                       xLabel={dscPlotXLabel(xAxis)}
-                      yLabel={dscPlotYLabel(yAxis, params.exoUp, params.showExoArrow)}
+                      yLabel={dscPlotYLabel(yAxis, params.exoUp, params.showExoArrow, normalizeTraces)}
                       y2Label={dscPlotY2Label(y2Mode, xAxis)}
                       showY2={y2Mode !== "off"}
                       showMarkerLabels={showMarkerLabels}
@@ -727,6 +773,13 @@ function DscWorkspace() {
                   onLabelFeaturesChange={setFigLabelFeatures}
                   stackRuns={figStackRuns}
                   onStackRunsChange={setFigStackRuns}
+                  stackSpacing={figStackSpacing}
+                  onStackSpacingChange={setFigStackSpacing}
+                  normalizeTraces={normalizeTraces}
+                  onNormalizeTracesChange={setNormalizeTraces}
+                  offsetStep={offsetStep}
+                  onSetRunScale={setRunScale}
+                  onSetRunOffset={setRunOffset}
                   markers={figureMarkers}
                   onMarkersChange={setFigureMarkers}
                   figureData={figureData}

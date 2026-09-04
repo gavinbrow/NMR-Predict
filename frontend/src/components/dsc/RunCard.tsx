@@ -18,6 +18,7 @@ export function RunCard({
   onToggleVisible,
   onSetScale,
   onSetOffset,
+  offsetStep = 0.01,
   onRemove,
 }: {
   run: DscRunAnalyzed;
@@ -29,6 +30,19 @@ export function RunCard({
   onToggleVisible: () => void;
   onSetScale: (scale: number) => void;
   onSetOffset: (offset: number) => void;
+  /**
+   * Spinner increment for the Offset field, in whatever y unit the plot is
+   * CURRENTLY showing — the bug this fixes: DSC heat flow lives around
+   * ~0.3 W/g, but the field's step was hardcoded to `1`, so one click on the
+   * spinner threw the trace clean off the chart. The host derives this from
+   * the plot's own display mode (`yAxis`/`normalizeTraces` in `Dsc.tsx`)
+   * rather than this component reading `run.analysis` itself, since the
+   * SAME step must also make sense for a run that isn't the selected one.
+   * Defaults to `0.01` (the W/g / normalized case) so a caller that hasn't
+   * been updated yet keeps a sane, non-`1` step rather than reverting to the
+   * bug.
+   */
+  offsetStep?: number;
   onRemove: () => void;
 }) {
   const effectiveMass = run.massOverrideMg ?? run.meta.sampleMassMg;
@@ -97,7 +111,7 @@ export function RunCard({
           <Input
             type="number"
             value={run.offset}
-            step={1}
+            step={offsetStep}
             onChange={(e) => onSetOffset(Number(e.target.value))}
             className="h-7 text-xs"
           />

@@ -53,7 +53,13 @@ export type DscYAxis = "wattsPerGram" | "milliwatts";
 /** What (if anything) the figure plots on the right-hand y2 axis. */
 export type DscY2 = "none" | "derivative" | "program";
 
-/** Which marker families to draw. Each is a boolean toggle in the Markers strip. */
+/** Which marker families to draw. Each is a boolean toggle in the Markers
+ *  strip. `verticals` cuts across every one of the onset/mid/endset/peak
+ *  toggles above it: OFF, `pushMark` (below) still anchors and pushes the
+ *  feature's text callout via `labelFeatures`, but skips the dotted
+ *  `mark:{featureId}:{suffix}` line series entirely — the exported figure's
+ *  equivalent of the on-screen plot's `DscMarkerToggles.verticals` (see that
+ *  file's doc comment for the "keep the label, drop the line" rationale). */
 export interface DscMarkerToggles {
   glassOnset: boolean;
   glassMid: boolean;
@@ -64,6 +70,7 @@ export interface DscMarkerToggles {
   baselines: boolean;
   tangents: boolean;
   enthalpyLabels: boolean;
+  verticals: boolean;
 }
 
 export interface BuildDscFigureArgs {
@@ -81,6 +88,19 @@ export interface BuildDscFigureArgs {
   labelFeatures: boolean;
   /** Stack runs with a vertical offset per run (as MALDI stacks spectra). */
   stackRuns: boolean;
+  /**
+   * Fixed vertical spacing between stacked runs, in the CURRENT display y
+   * units (post unit-conversion/normalization/gain) — run `k` (0-based,
+   * counting only the runs actually drawn) sits at `k * stackSpacing`
+   * instead of the accumulated-height ladder `STACK_GAP_FRACTION` builds.
+   * Only takes effect when `stackRuns` is on AND this is a finite number
+   * `> 0`; `null`, `undefined`, `0`, a negative value, or `stackRuns: false`
+   * all keep today's automatic per-run-height spacing exactly. Pairs
+   * naturally with `normalizeTraces`: every normalized trace has amplitude
+   * 1, so e.g. `1.2` gives a clean even ladder regardless of each run's own
+   * (pre-normalization) amplitude.
+   */
+  stackSpacing?: number | null;
   /** Marker families to draw. */
   markers: DscMarkerToggles;
   /** File-name stem for downloads. */
@@ -93,6 +113,16 @@ export interface BuildDscFigureArgs {
    * than a sketch of it.
    */
   maxTracePoints?: number;
+  /**
+   * Map each run·segment's OWN drawn y-range onto 0..1 (display-only —
+   * never touches any computed analysis number). Composed as unit
+   * conversion -> normalization -> `run.scale` -> `run.offset` -> stack
+   * shift, exactly like `buildDscPlotTraces`'s matching flag. Off (`false`,
+   * the default) when omitted. The right-hand axis (derivative /
+   * temperature program) is a different physical quantity and is NEVER
+   * normalized regardless of this flag.
+   */
+  normalizeTraces?: boolean;
 }
 
 const DEFAULT_MAX_TRACE_POINTS = 20000;
@@ -126,6 +156,52 @@ function finiteExtent(values: number[]): { min: number; max: number } | null {
     if (v > max) max = v;
   }
   return Number.isFinite(min) && Number.isFinite(max) ? { min, max } : null;
+}
+
+/** A trace's own y-range, used to map it onto 0..1 when `normalizeTraces` is
+ *  on — the figure's counterpart to `lib/dsc/plot.ts`'s identically-shaped
+ *  `NormRange`. `null` means "not normalizing", which every helper below
+ *  passes straight through. */
+interface NormRange {
+  min: number;
+  max: number;
+}
+
+/** `finiteExtent` over a `Float64Array` already scaled to the figure's unit
+ *  (`heatFlowScale`'s output) — the range ONE segment's drawn curve spans,
+ *  computed on the FULL-resolution array before `downsample` so the active
+ *  segment's range (used for `toDrawnY` below) doesn't shift with the point
+ *  budget. */
+function computeNormRange(values: Float64Array): NormRange | null {
+  let min = Infinity;
+  let max = -Infinity;
+  for (let i = 0; i < values.length; i += 1) {
+    const v = values[i];
+    if (!Number.isFinite(v)) continue;
+    if (v < min) min = v;
+    if (v > max) max = v;
+  }
+  return Number.isFinite(min) && Number.isFinite(max) ? { min, max } : null;
+}
+
+/** `(v - range.min) / (range.max - range.min)`, guarding a degenerate (flat)
+ *  span by passing `v` through UNCHANGED rather than dividing by ~0 — a
+ *  trace with no variation has no shape to map onto 0..1. Mirrors
+ *  `plot.ts`'s identically-named helper exactly, so the on-screen curve and
+ *  the exported figure normalize the same way. */
+function normalizeValue(v: number, range: NormRange): number {
+  const span = range.max - range.min;
+  if (!(span > 1e-12)) return v;
+  return (v - range.min) / span;
+}
+
+function normalizeArray(values: Float64Array, range: NormRange | null): Float64Array {
+  if (!range) return values;
+  const span = range.max - range.min;
+  if (!(span > 1e-12)) return values;
+  const out = new Float64Array(values.length);
+  for (let i = 0; i < values.length; i += 1) out[i] = (values[i] - range.min) / span;
+  return out;
 }
 
 /**
@@ -343,8 +419,20 @@ function localTangent(
  * asked to see. Follows `buildTgaFigureData`'s structure.
  */
 export function buildDscFigureData(args: BuildDscFigureArgs): FigureData {
-  const { runs, xAxis, yAxis, y2, segmentMode, labelFeatures, stackRuns, markers, sourceName, maxTracePoints } =
-    args;
+  const {
+    runs,
+    xAxis,
+    yAxis,
+    y2,
+    segmentMode,
+    labelFeatures,
+    stackRuns,
+    stackSpacing = null,
+    markers,
+    sourceName,
+    maxTracePoints,
+    normalizeTraces = false,
+  } = args;
   const maxPoints = maxTracePoints ?? DEFAULT_MAX_TRACE_POINTS;
   const onTemperature = xAxis === "temperature";
 
@@ -354,7 +442,10 @@ export function buildDscFigureData(args: BuildDscFigureArgs): FigureData {
   const stackSuffix = stackRuns ? ", offset" : "";
   const xLabel = onTemperature ? "Temperature (°C)" : "Time (min)";
   const yUnit = yAxis === "wattsPerGram" ? "W/g" : "mW";
-  const yLabel = `Heat flow (${yUnit}${stackSuffix})`;
+  // Once every trace is rescaled onto its own 0..1 span, W/g vs mW no longer
+  // means anything — say so instead of printing a unit that stopped
+  // applying, mirroring `dscPlotYLabel`'s matching override in `plot.ts`.
+  const yLabel = normalizeTraces ? `Heat flow (normalized${stackSuffix})` : `Heat flow (${yUnit}${stackSuffix})`;
 
   // The derivative's units follow whatever normMode the workspace is
   // currently analyzing with (it is a straight index-domain derivative of
@@ -370,8 +461,19 @@ export function buildDscFigureData(args: BuildDscFigureArgs): FigureData {
         ? `Temperature (°C${stackSuffix})`
         : undefined;
 
+  // A fixed rung spacing only takes effect while stacking is actually on and
+  // the value is usable — a finite positive number. `null`/`undefined`/`0`/
+  // negative all fall through to the existing accumulated-height ladder
+  // below, UNCHANGED, so `stackSpacing: null` reproduces the pre-existing
+  // geometry byte-for-byte.
+  const useFixedSpacing = stackRuns && stackSpacing != null && Number.isFinite(stackSpacing) && stackSpacing > 0;
   let stackTop = 0;
   let stackTopY2 = 0;
+  // Counts runs actually drawn (visible, with at least one segment built) —
+  // NOT the raw `runs` index — so a hidden or empty run never opens a gap in
+  // the ladder. Shared by the primary and y2 stacking below so a fixed-
+  // spacing ladder puts run k's primary AND y2 series at the same rung k.
+  let stackIndex = 0;
 
   for (const run of runs) {
     if (!run.visible) continue;
@@ -386,21 +488,34 @@ export function buildDscFigureData(args: BuildDscFigureArgs): FigureData {
 
     // Build every segment's curve (still un-gained, un-stacked) so a
     // multi-segment run's stack band spans ALL of its drawn segments, not
-    // just whichever one happens to be active.
-    const built: { segment: DscSegment; isActive: boolean; x: number[]; y: number[] }[] = [];
+    // just whichever one happens to be active. Normalization (when on)
+    // happens per SEGMENT — one trace, one 0..1 span — and BEFORE
+    // `run.scale`/`run.offset`, exactly like `buildDscPlotTraces`'s ordering:
+    // unit conversion -> normalization -> scale -> offset -> (stack shift,
+    // applied further down once every segment's combined extent is known).
+    const built: { segment: DscSegment; isActive: boolean; x: number[]; y: number[]; normRange: NormRange | null }[] =
+      [];
     for (const segment of segmentsToDraw) {
       const isActive = segment.id === activeSegmentId;
       const curve = segmentCurve(run, segment, isActive, sign);
       if (!curve) continue;
       const xArr = onTemperature ? curve.tempC : curve.timeMin;
-      const yArr = new Float64Array(curve.heatFlow.length);
-      for (let i = 0; i < yArr.length; i += 1) yArr[i] = curve.heatFlow[i] * scale;
+      const yUnitScaled = new Float64Array(curve.heatFlow.length);
+      for (let i = 0; i < yUnitScaled.length; i += 1) yUnitScaled[i] = curve.heatFlow[i] * scale;
+      const normRange = normalizeTraces ? computeNormRange(yUnitScaled) : null;
+      const yArr = normalizeTraces ? normalizeArray(yUnitScaled, normRange) : yUnitScaled;
       const ds = downsample({ x: xArr, y: yArr }, maxPoints);
       const xs = toNumbers(ds.x);
       const ys = applyGain(toNumbers(ds.y), run.scale, run.offset);
-      built.push({ segment, isActive, x: xs, y: ys });
+      built.push({ segment, isActive, x: xs, y: ys, normRange });
     }
     if (built.length === 0) continue;
+    // The active segment's own normalization range — every marker below is
+    // anchored on the active segment's `DscFeature`s (§ file doc comment),
+    // so `toDrawnY` must normalize through THIS range, not any other
+    // segment's, or a marker on a multi-segment "all" figure would land off
+    // the curve it's meant to label.
+    const activeNormRange = built.find((b) => b.isActive)?.normRange ?? null;
 
     // Combined extent across every drawn segment of this run — the run's
     // OWN band, whether stacked or not.
@@ -418,11 +533,19 @@ export function buildDscFigureData(args: BuildDscFigureArgs): FigureData {
     let bandBaseline: number | undefined;
     let shift = 0;
     if (stackRuns) {
-      bandBaseline = stackTop;
-      shift = stackTop - (hasExtent ? combinedMin : 0);
-      runFloor = stackTop;
-      const height = hasExtent ? combinedMax - combinedMin : 0;
-      stackTop += height * (1 + STACK_GAP_FRACTION) || 1;
+      // Fixed rung `stackIndex * stackSpacing` when a usable `stackSpacing`
+      // is set, else the pre-existing accumulated-height ladder — same
+      // `bandBaseline`/`shift`/`runFloor` locals either way, so every
+      // downstream consumer (the curve, `toDrawnY`'s markers, the y2 series
+      // below) needs no separate fixed-spacing-aware path of its own.
+      const thisStackTop = useFixedSpacing ? stackIndex * (stackSpacing as number) : stackTop;
+      bandBaseline = thisStackTop;
+      shift = thisStackTop - (hasExtent ? combinedMin : 0);
+      runFloor = thisStackTop;
+      if (!useFixedSpacing) {
+        const height = hasExtent ? combinedMax - combinedMin : 0;
+        stackTop += height * (1 + STACK_GAP_FRACTION) || 1;
+      }
     }
 
     let activeCurve: { x: number[]; y: number[] } | null = null;
@@ -462,11 +585,18 @@ export function buildDscFigureData(args: BuildDscFigureArgs): FigureData {
         let derivBaseline: number | undefined;
         if (stackRuns) {
           const ext = finiteExtent(ys);
-          derivBaseline = stackTopY2;
-          const shiftY2 = stackTopY2 - (ext?.min ?? 0);
+          // Same `stackIndex`/`stackSpacing` rung as the primary curve when
+          // fixed spacing is on, so run k's derivative sits at k*spacing
+          // too — not a second, independently-accumulating ladder. Falls
+          // back to y2's own pre-existing accumulator otherwise (unchanged).
+          const thisStackTopY2 = useFixedSpacing ? stackIndex * (stackSpacing as number) : stackTopY2;
+          derivBaseline = thisStackTopY2;
+          const shiftY2 = thisStackTopY2 - (ext?.min ?? 0);
           ys = ys.map((v) => v + shiftY2);
-          const height = (ext?.max ?? 0) - (ext?.min ?? 0);
-          stackTopY2 += height * (1 + STACK_GAP_FRACTION) || 1;
+          if (!useFixedSpacing) {
+            const height = (ext?.max ?? 0) - (ext?.min ?? 0);
+            stackTopY2 += height * (1 + STACK_GAP_FRACTION) || 1;
+          }
         }
         series.push({
           id: `deriv:${run.id}:${activeSegment.id}`,
@@ -489,11 +619,15 @@ export function buildDscFigureData(args: BuildDscFigureArgs): FigureData {
       let progBaseline: number | undefined;
       if (stackRuns) {
         const ext = finiteExtent(ys);
-        progBaseline = stackTopY2;
-        const shiftY2 = stackTopY2 - (ext?.min ?? 0);
+        // Same rung-sharing rationale as the derivative block above.
+        const thisStackTopY2 = useFixedSpacing ? stackIndex * (stackSpacing as number) : stackTopY2;
+        progBaseline = thisStackTopY2;
+        const shiftY2 = thisStackTopY2 - (ext?.min ?? 0);
         ys = ys.map((v) => v + shiftY2);
-        const height = (ext?.max ?? 0) - (ext?.min ?? 0);
-        stackTopY2 += height * (1 + STACK_GAP_FRACTION) || 1;
+        if (!useFixedSpacing) {
+          const height = (ext?.max ?? 0) - (ext?.min ?? 0);
+          stackTopY2 += height * (1 + STACK_GAP_FRACTION) || 1;
+        }
       }
       series.push({
         id: `program:${run.id}`,
@@ -520,13 +654,18 @@ export function buildDscFigureData(args: BuildDscFigureArgs): FigureData {
       // are evaluated in the ANALYSIS-space heat-flow units — whatever
       // `DscParams.normMode` the workspace is analyzing with — not in the
       // figure's own drawn units. The curve itself goes through
-      // `* heatFlowScale * run.scale + run.offset (+ stack shift)` to get
-      // from analysis space to what's actually drawn (see the per-segment
-      // loop above); every marker built by evaluating one of those lines
-      // directly must go through the exact same transform, or it lands off
-      // the curve the moment yAxis disagrees with normMode, or a run has a
-      // display gain, or runs are stacked.
-      const toDrawnY = (yAnalysis: number) => yAnalysis * scale * run.scale + run.offset + shift;
+      // `* heatFlowScale -> normalize -> * run.scale + run.offset (+ stack
+      // shift)` to get from analysis space to what's actually drawn (see the
+      // per-segment loop above); every marker built by evaluating one of
+      // those lines directly must go through the exact same transform, in
+      // the exact same order, or it lands off the curve the moment yAxis
+      // disagrees with normMode, normalization is on, a run has a display
+      // gain, or runs are stacked — the curve moves and the label doesn't.
+      const toDrawnY = (yAnalysis: number) => {
+        const afterUnit = yAnalysis * scale;
+        const afterNorm = normalizeTraces && activeNormRange ? normalizeValue(afterUnit, activeNormRange) : afterUnit;
+        return afterNorm * run.scale + run.offset + shift;
+      };
 
       const pushMark = (
         featureId: string,
@@ -537,31 +676,45 @@ export function buildDscFigureData(args: BuildDscFigureArgs): FigureData {
         // units, via `toDrawnY`) — when given, the mark spans apex→baseline
         // instead of apex→run floor, matching the on-screen plot overlay's
         // fix for the same "Tm sits at the bottom of the chart" bug. `null`
-        // (a glass mark, or a peak with no fitted baseline) keeps today's
-        // run-floor behaviour.
+        // (a glass onset/endset mark, or a peak with no fitted baseline)
+        // keeps today's run-floor behaviour.
         bottomY?: number,
+        // The glass midpoint's `preLine(Tmid)`, already in DRAWN units —
+        // when given (alongside `bottomY` as `postLine(Tmid)`), the mark
+        // spans the step itself instead of anchoring on the curve, mirroring
+        // the on-screen plot overlay's midpoint fix. Every other caller omits
+        // this and gets the usual curve-anchored `top`.
+        topOverride?: number,
       ) => {
         if (xv == null) return;
-        const top = valueAt(activeCurve!.x, activeCurve!.y, xv);
+        const top = topOverride ?? valueAt(activeCurve!.x, activeCurve!.y, xv);
         if (top == null) return;
         const bottom = bottomY ?? runFloor;
-        series.push({
-          id: `mark:${featureId}:${suffix}`,
-          label: text,
-          x: [xv, xv],
-          y: [bottom, top],
-          group: MARKER_GROUP,
-          legendHidden: true,
-          styleHints: { kind: "line", lineWidth: 1, lineStyle: "dotted", color: run.color, axis: "y" },
-        });
+        // Gated on `markers.verticals` — the "keep the label, drop the line"
+        // toggle — while the callout below stays unconditional (on
+        // `labelFeatures` alone, same as before), so turning it off leaves a
+        // clean labelled figure.
+        if (markers.verticals) {
+          series.push({
+            id: `mark:${featureId}:${suffix}`,
+            label: text,
+            x: [xv, xv],
+            y: [bottom, top],
+            group: MARKER_GROUP,
+            legendHidden: true,
+            styleHints: { kind: "line", lineWidth: 1, lineStyle: "dotted", color: run.color, axis: "y" },
+          });
+        }
         if (labelFeatures) {
-          // Midway down the apex-to-baseline span for the "peak" callout
-          // (Tm/Tc/…) — "midway down the slope", matching the on-screen
-          // overlay's fix — not at the apex. Onset/endset callouts (and any
-          // glass mark) stay curve-anchored: they mark a specific transition
-          // POINT, not a peak, so there's no analogous "half of a slope"
-          // reading for them.
-          const labelY = suffix === "peak" && bottomY != null ? (bottom + top) / 2 : top;
+          // Midway down the span for a "peak" callout (Tm/Tc/…, apex to
+          // baseline) or a spanned "mid" callout (Tg, preLine to postLine) —
+          // "midway down the slope"/"midway across the step", matching the
+          // on-screen overlay's fixes — not at the apex or curve-anchored.
+          // Onset/endset callouts (and a glass mid with no preLine/postLine
+          // to span) stay curve-anchored: they mark a specific transition
+          // POINT, so there's no analogous "half of a span" reading.
+          const spanned = suffix === "peak" ? bottomY != null : suffix === "mid" ? topOverride != null && bottomY != null : false;
+          const labelY = spanned ? (bottom + top) / 2 : top;
           peakLabels.push({
             id: `mark:${featureId}:${suffix}:lbl`,
             x: xv,
@@ -657,7 +810,19 @@ export function buildDscFigureData(args: BuildDscFigureArgs): FigureData {
         if (result.kind === "glass") {
           const g = result.glass;
           if (markers.glassOnset) pushMark(rid, "onset", g.onsetC, `Tg onset ${g.onsetC?.toFixed(1)} °C`);
-          if (markers.glassMid) pushMark(rid, "mid", g.midpointC, `Tg ${g.midpointC?.toFixed(1)} °C`);
+          if (markers.glassMid && g.midpointC != null) {
+            // Span preLine(Tmid) -> postLine(Tmid), the same short bracket
+            // straddling the step that the on-screen plot overlay now draws
+            // for the midpoint (§ "Tg line should span the step" fix) —
+            // NOT curve-anchored, since the curve at Tmid sits mid-step,
+            // between the two extrapolated baselines. Falls back to the
+            // pre-fix curve-anchored, run-floor-running mark when either
+            // line is missing.
+            const hasSpan = g.preLine != null && g.postLine != null;
+            const top = hasSpan ? toDrawnY(evalLine(g.preLine!, g.midpointC)) : undefined;
+            const bottom = hasSpan ? toDrawnY(evalLine(g.postLine!, g.midpointC)) : undefined;
+            pushMark(rid, "mid", g.midpointC, `Tg ${g.midpointC.toFixed(1)} °C`, bottom, top);
+          }
           if (markers.glassEndset)
             pushMark(rid, "endset", g.endsetC, `Tg endset ${g.endsetC?.toFixed(1)} °C`);
           if (markers.tangents) pushGlassTangents(rid, g, feature.window);
@@ -708,6 +873,10 @@ export function buildDscFigureData(args: BuildDscFigureArgs): FigureData {
         }
       }
     }
+
+    // One rung per run actually drawn — see `stackIndex`'s doc comment above
+    // for why this counts drawn runs, not the raw `runs` index.
+    if (stackRuns && useFixedSpacing) stackIndex += 1;
   }
 
   const seedX =

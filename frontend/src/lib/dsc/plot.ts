@@ -73,19 +73,25 @@ export type DscPlotSegmentMode = "active" | "all";
 
 /** Matches `Dsc.tsx`'s hoisted `DscMarkerToggles` exactly: one toggle per
  *  `DscFeatureKind` except `"custom"` — a user-placed feature has no
- *  kind-level toggle and is always shown — plus three marker-FAMILY toggles
+ *  kind-level toggle and is always shown — plus four marker-FAMILY toggles
  *  that cut across every kind: `baselines` (`sub: "baseline"` lines),
- *  `tangents` (`sub: "tangent"` lines), and `enthalpyLabels` (the "ΔH …"
- *  callout). All three default to `false` in `Dsc.tsx`'s
- *  `DEFAULT_PLOT_MARKERS` — a fresh analysis should show the transition
- *  callouts (Tg/Tm/…) without also drawing every fitted baseline/tangent/ΔH
- *  the user hasn't asked to see. Mirrors `lib/dsc/figure.ts`'s
- *  `DscMarkerToggles`, which already had these three (see that file's own
- *  doc comment). */
+ *  `tangents` (`sub: "tangent"` lines), `enthalpyLabels` (the "ΔH …"
+ *  callout), and `verticals` (every `kind: "vertical"` marker — onset/
+ *  midpoint/peak/endset drop-lines, glass included). `baselines`/`tangents`/
+ *  `enthalpyLabels` default to `false` in `Dsc.tsx`'s `DEFAULT_PLOT_MARKERS`
+ *  — a fresh analysis should show the transition callouts (Tg/Tm/…) without
+ *  also drawing every fitted baseline/tangent/ΔH the user hasn't asked to
+ *  see. `verticals` defaults to `true` — the pre-existing behaviour — since
+ *  it is the toggle a user reaches for AFTER seeing the plot, to declutter
+ *  the marker lines while keeping every "Tg …"/"Tm …"/… label exactly where
+ *  it was (the user's "remove the Tg line, keep just the Tg label, for all
+ *  of them" request). Mirrors `lib/dsc/figure.ts`'s `DscMarkerToggles`,
+ *  which carries the same four (see that file's own doc comment). */
 export type DscMarkerToggles = Record<Exclude<DscFeatureKind, "custom">, boolean> & {
   baselines: boolean;
   tangents: boolean;
   enthalpyLabels: boolean;
+  verticals: boolean;
 };
 
 /** Point budget per decimated series before the min/max-envelope
@@ -104,9 +110,21 @@ export function dscPlotXLabel(xAxis: DscPlotXAxis): string {
 /** Primary y-axis label. Carries the "↑ Exo" / "↓ Exo" suffix per §3.2 when
  *  `showExoArrow` is on — `exoUp` is `params.exoUp`, the display convention,
  *  not any one run's file convention (the arrow describes what "up" means
- *  for the whole plot). */
-export function dscPlotYLabel(yAxis: DscPlotYAxis, exoUp: boolean, showExoArrow: boolean): string {
-  const base = yAxis === "wattsPerGram" ? "Heat flow (W/g)" : "Heat flow (mW)";
+ *  for the whole plot).
+ *
+ *  `normalize` (default `false`) overrides `yAxis`'s W/g-vs-mW distinction
+ *  entirely — once every trace is rescaled onto its own 0..1 span, the two
+ *  units read identically, so the label says so rather than keep printing a
+ *  unit that no longer applies. The exo-arrow suffix still applies on top:
+ *  "up" is still a meaningful direction on a normalized curve, only the
+ *  *unit* stopped meaning anything. */
+export function dscPlotYLabel(
+  yAxis: DscPlotYAxis,
+  exoUp: boolean,
+  showExoArrow: boolean,
+  normalize = false,
+): string {
+  const base = normalize ? "Heat flow (normalized)" : yAxis === "wattsPerGram" ? "Heat flow (W/g)" : "Heat flow (mW)";
   if (!showExoArrow) return base;
   return `${base} ${exoUp ? "↑ Exo" : "↓ Exo"}`;
 }
@@ -150,17 +168,65 @@ function heatFlowUnitScale(normDivisorMg: number | null, yAxis: DscPlotYAxis): n
   return normDivisorMg != null ? normDivisorMg : 1;
 }
 
-/** `v * unitScale * scale + offset` — unit conversion composed with the
- *  run's display gain, applied identically to a scalar or an array so a
- *  marker anchor and its owning trace agree exactly. */
-function toDisplay(raw: number, unitScale: number, scale: number, offset: number): number {
-  return raw * unitScale * scale + offset;
+/** A trace's own y-range (after unit conversion, before gain), used to map
+ *  it onto 0..1 when normalization is on. `null` means "not normalizing" —
+ *  every gain helper below passes raw values straight through when it's
+ *  absent, so the un-normalized path costs nothing extra. */
+interface NormRange {
+  min: number;
+  max: number;
 }
 
-function applyDisplayArray(src: Float64Array, unitScale: number, scale: number, offset: number): Float64Array {
-  if (unitScale === 1 && scale === 1 && offset === 0) return src;
+/** `{min, max}` of `values[i] * unitScale`, skipping non-finite samples —
+ *  the range a trace's OWN drawn points span, computed on the FULL-resolution
+ *  array (not the downsampled one) so every marker anchored on the same
+ *  underlying `SegmentView.heatFlow` agrees with the plotted curve exactly,
+ *  independent of the point budget. `null` for an empty/all-non-finite
+ *  array. */
+function computeNormRange(values: Float64Array, unitScale: number): NormRange | null {
+  let min = Infinity;
+  let max = -Infinity;
+  for (let i = 0; i < values.length; i += 1) {
+    const v = values[i] * unitScale;
+    if (!Number.isFinite(v)) continue;
+    if (v < min) min = v;
+    if (v > max) max = v;
+  }
+  return Number.isFinite(min) && Number.isFinite(max) ? { min, max } : null;
+}
+
+/** `(v - range.min) / (range.max - range.min)`. Guards a degenerate
+ *  (effectively flat) trace by passing `v` through UNCHANGED rather than
+ *  dividing by ~0 — a trace with no variation has no "shape" to map onto
+ *  0..1, and doing so anyway would blow up a single noise sample to ±∞. */
+function normalizeValue(v: number, range: NormRange): number {
+  const span = range.max - range.min;
+  if (!(span > 1e-12)) return v;
+  return (v - range.min) / span;
+}
+
+/** `v * unitScale [-> normalize] * scale + offset` — unit conversion,
+ *  optional per-trace normalization, and the run's display gain, composed in
+ *  that exact order and applied identically to a scalar or an array so a
+ *  marker anchor and its owning trace agree exactly. `normRange` is `null`
+ *  whenever normalization is off (or the trace it was computed from was
+ *  empty), in which case this is exactly the pre-normalization formula. */
+function toDisplay(raw: number, unitScale: number, normRange: NormRange | null, scale: number, offset: number): number {
+  const afterUnit = raw * unitScale;
+  const afterNorm = normRange ? normalizeValue(afterUnit, normRange) : afterUnit;
+  return afterNorm * scale + offset;
+}
+
+function applyDisplayArray(
+  src: Float64Array,
+  unitScale: number,
+  normRange: NormRange | null,
+  scale: number,
+  offset: number,
+): Float64Array {
+  if (unitScale === 1 && !normRange && scale === 1 && offset === 0) return src;
   const out = new Float64Array(src.length);
-  for (let i = 0; i < src.length; i += 1) out[i] = src[i] * unitScale * scale + offset;
+  for (let i = 0; i < src.length; i += 1) out[i] = toDisplay(src[i], unitScale, normRange, scale, offset);
   return out;
 }
 
@@ -213,6 +279,16 @@ export interface BuildDscPlotTracesArgs {
   segmentMode: DscPlotSegmentMode;
   /** Point budget per decimated series; defaults to `DEFAULT_MAX_PLOT_POINTS`. */
   maxPoints?: number;
+  /**
+   * Map each trace's OWN drawn y-range onto 0..1 (display-only — never
+   * touches `params`, never changes a computed analysis number). Composed as
+   * unit conversion -> normalization -> `run.scale` -> `run.offset`, exactly
+   * like `buildDscFigureData`'s matching flag. Off (`false`, the default)
+   * when omitted. The right-hand axis (derivative / temperature program) is
+   * a different physical quantity and is NEVER normalized regardless of
+   * this flag.
+   */
+  normalizeTraces?: boolean;
 }
 
 /**
@@ -222,7 +298,16 @@ export interface BuildDscPlotTracesArgs {
  * `buildTgaPlotTraces`.
  */
 export function buildDscPlotTraces(args: BuildDscPlotTracesArgs): DscPlotTrace[] {
-  const { runs, params, xAxis, yAxis, y2Mode, segmentMode, maxPoints = DEFAULT_MAX_PLOT_POINTS } = args;
+  const {
+    runs,
+    params,
+    xAxis,
+    yAxis,
+    y2Mode,
+    segmentMode,
+    maxPoints = DEFAULT_MAX_PLOT_POINTS,
+    normalizeTraces = false,
+  } = args;
   const out: DscPlotTrace[] = [];
 
   for (const run of runs) {
@@ -235,7 +320,13 @@ export function buildDscPlotTraces(args: BuildDscPlotTracesArgs): DscPlotTrace[]
       if (view.tempC.length < 2) continue; // too little data to draw
 
       const xFull = xAxis === "temperature" ? view.tempC : view.timeMin;
-      const yFull = applyDisplayArray(view.heatFlow, unitScale, run.scale, run.offset);
+      // Computed on the FULL-resolution `view.heatFlow` (not the downsampled
+      // `primary.y` below) so `buildDscPlotMarkers`, which anchors on the
+      // very same `SegmentView`, can recompute an identical range and land
+      // its markers exactly on this curve — see that function's own
+      // `computeNormRange` call.
+      const normRange = normalizeTraces ? computeNormRange(view.heatFlow, unitScale) : null;
+      const yFull = applyDisplayArray(view.heatFlow, unitScale, normRange, run.scale, run.offset);
       const primary = downsample({ x: xFull, y: yFull }, maxPoints);
 
       let secondary: { x: Float64Array; y: Float64Array } | null = null;
@@ -244,9 +335,12 @@ export function buildDscPlotTraces(args: BuildDscPlotTracesArgs): DscPlotTrace[]
           // The derivative is scaled but NEVER offset — d/dT of a constant
           // offset is zero (copies TGA's rule, and `compute.ts`'s own §3.3
           // doc comment). No unit conversion either: the axis always reads
-          // "W/g·°C" regardless of the primary unit toggle.
+          // "W/g·°C" regardless of the primary unit toggle. Never
+          // normalized either (`normRange: null`, unconditionally) — it's a
+          // different physical quantity than heat flow, so "this trace's own
+          // 0..1 span" has no meaning for it.
           const deriv = computeDerivative(view, view.smoothWindow);
-          const y2Full = applyDisplayArray(deriv, 1, run.scale, 0);
+          const y2Full = applyDisplayArray(deriv, 1, null, run.scale, 0);
           secondary = downsample({ x: xFull, y: y2Full }, maxPoints);
         } else {
           // Temperature program trace: a different physical quantity than
@@ -292,13 +386,16 @@ export interface DscPlotMarkerLine {
 
 /** A vertical drop-line at one x (onset/midpoint/peak/endset), anchored on
  *  the owning run's own curve where available, and — when the feature has a
- *  fitted baseline to stop at — running only as far as `y2` rather than all
- *  the way to the plot floor. Without `y2`, `DscPlot` draws to the floor
- *  exactly as before (glass verticals, and a peak with no fitted baseline
- *  yet). With it, the line spans apex-to-baseline: for an endothermic melt
- *  in exo-up (a trough), that keeps the `Tm` line and its callout anchored
- *  ON the peak instead of running off to the bottom axis (§ "Tm sits at the
- *  bottom of the chart" fix). */
+ *  fitted baseline/pre-post pair to stop at — running only as far as `y2`
+ *  rather than all the way to the plot floor. Without `y2`, `DscPlot` draws
+ *  to the floor exactly as before (a glass onset/endset — see
+ *  `pushGlassMarkers`'s doc comment for why those two stay floor-anchored —
+ *  and a peak with no fitted baseline yet). With it, the line spans a real
+ *  physical extent instead of running off to the bottom axis: apex-to-
+ *  baseline for a peak (§ "Tm sits at the bottom of the chart" fix), or
+ *  preLine(Tmid)-to-postLine(Tmid) for a glass midpoint (§ "Tg line should
+ *  span the step, not the whole plot" fix) — either way keeping the callout
+ *  anchored on the transition itself. */
 export interface DscPlotMarkerVertical {
   id: string;
   kind: "vertical";
@@ -328,6 +425,9 @@ export interface BuildDscPlotMarkersArgs {
   xAxis: DscPlotXAxis;
   yAxis: DscPlotYAxis;
   markers: DscMarkerToggles;
+  /** Must match whatever `buildDscPlotTraces` was called with for the same
+   *  runs — see that function's doc comment. Off (`false`) when omitted. */
+  normalizeTraces?: boolean;
 }
 
 const PEAK_KIND_LABEL: Partial<Record<DscFeatureKind, string>> = {
@@ -391,26 +491,47 @@ function pushGlassMarkers(
       y1: toY(evalLine(glass.inflLine, glass.inflectionC + halfSpan)),
     });
   }
-  // No `y2` on the glass verticals — unlike a peak's baseline, `preLine`/
-  // `postLine` evaluated AT onsetC/endsetC lands essentially on the curve
-  // itself (that's how onset/endset are defined: where preLine/postLine
+  // No `y2` on the onset/endset verticals — unlike a peak's baseline,
+  // `preLine`/`postLine` evaluated AT onsetC/endsetC lands essentially on the
+  // curve itself (that's how onset/endset are defined: where preLine/postLine
   // cross the inflection tangent), so it would draw a near-zero-length line
-  // rather than the "span the transition" geometry the peak fix needs.
-  if (glass.onsetC != null) {
+  // rather than the "span the transition" geometry the midpoint fix below
+  // needs. Every `kind: "vertical"` push here is gated on `markers.verticals`
+  // — the "keep the label, drop the line" toggle — while the labels further
+  // down stay unconditional, so turning it off leaves a clean labelled plot.
+  if (markers.verticals && glass.onsetC != null) {
     out.push({ id: `${id}:v:onset`, kind: "vertical", sub: "onset", color, x: glass.onsetC, y: curveAt(glass.onsetC) });
   }
-  if (glass.endsetC != null) {
+  if (markers.verticals && glass.endsetC != null) {
     out.push({ id: `${id}:v:endset`, kind: "vertical", sub: "endset", color, x: glass.endsetC, y: curveAt(glass.endsetC) });
   }
   if (glass.midpointC != null) {
-    const y = curveAt(glass.midpointC);
-    out.push({ id: `${id}:v:midpoint`, kind: "vertical", sub: "midpoint", color, x: glass.midpointC, y });
+    // Unlike onset/endset, the midpoint vertical DOES get a `y2`: ASTM E1356
+    // figures draw a short bracket straddling the step at Tmid, from the
+    // pre-transition baseline's extrapolated level to the post-transition
+    // baseline's — not a line dropped to the plot floor, and not one
+    // anchored on the curve either (the curve at Tmid sits mid-step, between
+    // the two, which is exactly why a single curve-anchored point read as
+    // "the bottom of the chart" before this fix — the dip in an endothermic
+    // Tg's baseline easily undershoots the visible y-range). Falls back to
+    // the pre-fix curve-anchored, floor-running behaviour when either line
+    // is missing (shouldn't happen once `midpointC` is non-null, but mirrors
+    // every other null-guard in this file).
+    const hasSpan = glass.preLine != null && glass.postLine != null;
+    const yPre = hasSpan ? toY(evalLine(glass.preLine!, glass.midpointC)) : undefined;
+    const yPost = hasSpan ? toY(evalLine(glass.postLine!, glass.midpointC)) : undefined;
+    const y = hasSpan ? yPre : curveAt(glass.midpointC);
+    const y2 = hasSpan ? yPost : undefined;
+    if (markers.verticals) {
+      out.push({ id: `${id}:v:midpoint`, kind: "vertical", sub: "midpoint", color, x: glass.midpointC, y, y2 });
+    }
+    const labelY = y != null && y2 != null ? (y + y2) / 2 : (y ?? curveAt(glass.midpointC) ?? 0);
     out.push({
       id: `${id}:label`,
       kind: "label",
       color,
       x: glass.midpointC,
-      y: y ?? 0,
+      y: labelY,
       text: `Tg ${glass.midpointC.toFixed(1)} °C`,
     });
   }
@@ -481,7 +602,10 @@ function pushPeakMarkers(
       }
     }
   }
-  if (peak.onsetC != null) {
+  // Every `kind: "vertical"` push below is gated on `markers.verticals` — the
+  // "keep the label, drop the line" toggle — while the "T… …"/"ΔH …" labels
+  // stay unconditional, so turning it off leaves a clean labelled plot.
+  if (markers.verticals && peak.onsetC != null) {
     out.push({
       id: `${id}:v:onset`,
       kind: "vertical",
@@ -492,7 +616,7 @@ function pushPeakMarkers(
       y2: baselineY(peak.onsetC),
     });
   }
-  if (peak.endsetC != null) {
+  if (markers.verticals && peak.endsetC != null) {
     out.push({
       id: `${id}:v:endset`,
       kind: "vertical",
@@ -506,7 +630,9 @@ function pushPeakMarkers(
   if (peak.peakC != null) {
     const y = curveAt(peak.peakC);
     const y2 = baselineY(peak.peakC);
-    out.push({ id: `${id}:v:peak`, kind: "vertical", sub: "peak", color, x: peak.peakC, y, y2 });
+    if (markers.verticals) {
+      out.push({ id: `${id}:v:peak`, kind: "vertical", sub: "peak", color, x: peak.peakC, y, y2 });
+    }
     const label = PEAK_KIND_LABEL[feature.kind] ?? "T";
     // Midway down the apex-to-baseline span, not at the apex — "midway down
     // the slope", per the fix — when there's a baseline to span; otherwise
@@ -529,19 +655,24 @@ function pushPeakMarkers(
 }
 
 /** Draw one OIT feature's onset vertical and "OIT … min" callout. Time
- *  domain — meaningful only on the time x-axis (§WP4). */
+ *  domain — meaningful only on the time x-axis (§WP4). The vertical itself
+ *  is gated on `markers.verticals`, same as every other family's, while the
+ *  "OIT … min" callout below stays unconditional. */
 function pushOitMarkers(
   out: DscPlotMarker[],
   run: DscRunAnalyzed,
   feature: DscFeature,
   oit: { onsetMin: number | null; oitMin: number | null },
   curveAtTime: (t: number) => number | undefined,
+  markers: DscMarkerToggles,
 ): void {
   const id = feature.id;
   const color = run.color;
   if (oit.onsetMin == null) return;
   const y = curveAtTime(oit.onsetMin);
-  out.push({ id: `${id}:v:onset`, kind: "vertical", sub: "onset", color, x: oit.onsetMin, y });
+  if (markers.verticals) {
+    out.push({ id: `${id}:v:onset`, kind: "vertical", sub: "onset", color, x: oit.onsetMin, y });
+  }
   const text = oit.oitMin != null ? `OIT ${oit.oitMin.toFixed(1)} min` : `OIT onset ${oit.onsetMin.toFixed(1)} min`;
   out.push({ id: `${id}:label`, kind: "label", color, x: oit.onsetMin, y: y ?? 0, text });
 }
@@ -562,7 +693,7 @@ function pushOitMarkers(
  * unconditionally axis-agnostic.
  */
 export function buildDscPlotMarkers(args: BuildDscPlotMarkersArgs): DscPlotMarker[] {
-  const { runs, params, xAxis, yAxis, markers } = args;
+  const { runs, params, xAxis, yAxis, markers, normalizeTraces = false } = args;
   const out: DscPlotMarker[] = [];
 
   for (const run of runs) {
@@ -573,7 +704,15 @@ export function buildDscPlotMarkers(args: BuildDscPlotMarkersArgs): DscPlotMarke
 
     const normDivisorMg = resolveNormDivisorMg(run, params);
     const unitScale = heatFlowUnitScale(normDivisorMg, yAxis);
-    const toY = (raw: number) => toDisplay(raw, unitScale, run.scale, run.offset);
+    // Recomputed from this run's OWN `view.heatFlow` — the exact array
+    // `buildDscPlotTraces` draws the active-segment trace from — so a
+    // marker anchored via `toY`/`curveAt` below lands on the SAME 0..1
+    // curve the plot actually drew, not a second, independently-ranged one.
+    // Getting this wrong (e.g. normalizing the trace but not the markers,
+    // or computing the range from a different point set) is exactly the
+    // failure mode where the curve moves and the labels stay behind.
+    const normRange = normalizeTraces ? computeNormRange(view.heatFlow, unitScale) : null;
+    const toY = (raw: number) => toDisplay(raw, unitScale, normRange, run.scale, run.offset);
     const curveAt = (x: number): number | undefined => {
       const raw = interp1d(x, view.tempC, view.heatFlow);
       return Number.isFinite(raw) ? toY(raw) : undefined;
@@ -599,7 +738,7 @@ export function buildDscPlotMarkers(args: BuildDscPlotMarkersArgs): DscPlotMarke
         pushGlassMarkers(out, run, feature, result.glass, toY, curveAt, markers);
       } else if (result.kind === "oit") {
         if (xAxis !== "time") continue;
-        pushOitMarkers(out, run, feature, result.oit, curveAtTime);
+        pushOitMarkers(out, run, feature, result.oit, curveAtTime, markers);
       } else {
         if (xAxis !== "temperature") continue;
         pushPeakMarkers(out, run, feature, result.peak, toY, curveAt, markers);

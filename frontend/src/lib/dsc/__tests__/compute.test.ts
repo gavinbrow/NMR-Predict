@@ -51,19 +51,30 @@ interface CurveOpts {
    *  re-detect a broad peak off its own noisy shoulder" test below. */
   rippleAmpWPerG?: number;
   ripplePeriodC?: number;
+  /** Quadratic curvature about the segment's own midpoint, W/(g·°C²) — 0 (the
+   *  default for every existing fixture) disables it. `detectPeakCandidates`'
+   *  baseline (§3.6) is a straight two-point line, which cancels
+   *  `baselineSlope` exactly but leaves this term's curvature behind as a
+   *  single symmetric bulge peaking at the segment's midpoint — the
+   *  synthetic stand-in for `MAX_PEAK_SPAN_FRACTION`'s real-file bug (see
+   *  that constant's doc comment): a gently curved real baseline with no
+   *  actual transition, misread as one enormous peak. */
+  baselineCurvWPerGC2?: number;
 }
 
 /** baseline(T) + a Gaussian endotherm/exotherm + a tanh glass-transition
- *  step + an optional tiny high-frequency ripple, all in W/g. `sampleMassMg`
- *  is always 1 in these fixtures so the raw mW array below can hold these
- *  W/g values directly (mW / 1 mg = numerically identical), keeping the
- *  arithmetic transparent. */
+ *  step + an optional tiny high-frequency ripple + an optional quadratic
+ *  curvature term, all in W/g. `sampleMassMg` is always 1 in these fixtures
+ *  so the raw mW array below can hold these W/g values directly (mW / 1 mg =
+ *  numerically identical), keeping the arithmetic transparent. */
 function heatFlowAt(T: number, o: CurveOpts): number {
   const baseline = o.baseline0 + o.baselineSlope * T;
   const gauss = o.gaussAmpWPerG * Math.exp(-((T - o.gaussPeakC) ** 2) / (2 * o.gaussSigmaC ** 2));
   const step = (o.stepHeightWPerG / 2) * (1 + Math.tanh((T - o.stepCenterC) / o.stepWidthC));
   const ripple = o.rippleAmpWPerG ? o.rippleAmpWPerG * Math.sin((2 * Math.PI * T) / (o.ripplePeriodC ?? 1)) : 0;
-  return baseline + gauss + step + ripple;
+  const mid = (o.t0C + o.t1C) / 2;
+  const curv = o.baselineCurvWPerGC2 ? o.baselineCurvWPerGC2 * (T - mid) ** 2 : 0;
+  return baseline + gauss + step + ripple + curv;
 }
 
 /** Analytic |ΔH| of the Gaussian term alone, in J/g, integrated over all T
@@ -224,6 +235,31 @@ const SMALL_PEAK: CurveOpts = {
   stepWidthC: 1,
   stepHeightWPerG: 0, // no step
   sampleMassMg: 1,
+};
+
+/** No Gaussian, no step — just a gently CURVED baseline (quadratic bulge,
+ *  see `CurveOpts.baselineCurvWPerGC2`'s doc comment) over a 280 °C ramp, the
+ *  synthetic stand-in for real curvature-only segments like DAC2.tri's
+ *  monotone 2nd heat. `detectPeakCandidates`' straight two-point baseline
+ *  cannot cancel this shape, so it reads as one huge candidate spanning
+ *  nearly the whole segment — exactly the shape `MAX_PEAK_SPAN_FRACTION`
+ *  exists to reject. There is nothing here to find; "no feature detected" is
+ *  the correct answer. */
+const CURVED_BASELINE_ONLY: CurveOpts = {
+  t0C: 0,
+  t1C: 280,
+  dTc: 0.1,
+  rateCPerMin: 10,
+  baseline0: -0.2,
+  baselineSlope: 0,
+  gaussPeakC: 140,
+  gaussSigmaC: 5,
+  gaussAmpWPerG: 0, // no real peak
+  stepCenterC: 140,
+  stepWidthC: 3,
+  stepHeightWPerG: 0, // no real step
+  sampleMassMg: 1,
+  baselineCurvWPerGC2: -1e-5,
 };
 
 /**
@@ -449,6 +485,150 @@ function makeIsothermalRun(): DscRun {
   };
 }
 
+/**
+ * Options for `makeTwoSlopeRun` — a real-shaped fixture for the step-vs-peak
+ * discriminator (`classifyStepCandidate` in `compute.ts`), distinct from
+ * `CurveOpts`/`heatFlowAt` above. `heatFlowAt`'s baseline is a single GLOBAL
+ * linear slope, so its tanh step (see `COMBINED`) is small enough that
+ * `detectPeakCandidates`' endpoint-to-endpoint line still cancels it near
+ * enough for `detectGlassCandidate`'s outside-every-peak fallback to find it
+ * — a different code path than the one this fixture targets. Real `.tri`
+ * files' Tg steps ride on a baseline whose SLOPE CHANGES across the
+ * transition (steeper before, shallower after — DAC1.tri's pre-Tg slope
+ * measures ≈ -0.0018 W/(g·°C), its post-Tg slope ≈ -0.0005), which is what
+ * actually defeats the straight two-point baseline and gets the step picked
+ * up as one huge, one-sided "peak" candidate in the first place. Only THAT
+ * shape exercises `classifyStepCandidate`.
+ */
+interface TwoSlopeOpts {
+  t0C: number;
+  t1C: number;
+  dTc: number;
+  rateCPerMin: number;
+  baseline0: number; // hf at t0C
+  preSlope: number; // W/(g·°C), before the step
+  postSlope: number; // W/(g·°C), after the step
+  stepCenterC: number;
+  stepWidthC: number;
+  stepHeightWPerG: number; // permanent displacement added at the transition; 0 = a slope-only kink, no step
+  /** An optional Gaussian riding at `stepCenterC` — a real peak candidate to
+   *  confirm the discriminator lets it through untouched even when it's the
+   *  same size/location a step candidate would be. 0 = no peak. */
+  gaussAmpWPerG: number;
+  gaussSigmaC: number;
+  sampleMassMg: number;
+}
+
+/** `(1-w)*preLine(T) + w*postLine(T) + gaussian`, where `w` is the same
+ *  tanh blend `heatFlowAt` uses for its step, so the two lines cross over
+ *  smoothly at `stepCenterC` rather than jumping discontinuously — matching
+ *  a real DSC step's finite rise width. */
+function twoSlopeHeatFlowAt(T: number, o: TwoSlopeOpts): number {
+  const w = 0.5 * (1 + Math.tanh((T - o.stepCenterC) / o.stepWidthC));
+  const preVal = o.baseline0 + o.preSlope * (T - o.t0C);
+  const atCenter = o.baseline0 + o.preSlope * (o.stepCenterC - o.t0C);
+  const postVal = atCenter + o.stepHeightWPerG + o.postSlope * (T - o.stepCenterC);
+  const baseline = (1 - w) * preVal + w * postVal;
+  const gauss =
+    o.gaussAmpWPerG !== 0
+      ? o.gaussAmpWPerG * Math.exp(-((T - o.stepCenterC) ** 2) / (2 * o.gaussSigmaC ** 2))
+      : 0;
+  return baseline + gauss;
+}
+
+/** Same run-building shape as `makeRun`, driven by `twoSlopeHeatFlowAt`
+ *  instead of `heatFlowAt`. Always a heating ramp — every real file this
+ *  fixture mirrors is a heat segment. */
+function makeTwoSlopeRun(o: TwoSlopeOpts): DscRun {
+  runCounter += 1;
+  const id = `run${runCounter}`;
+  const n = Math.round((o.t1C - o.t0C) / o.dTc) + 1;
+  const dtMin = o.dTc / o.rateCPerMin;
+
+  const timeMin = new Float64Array(n);
+  const tempC = new Float64Array(n);
+  const heatFlowMw = new Float64Array(n);
+  for (let i = 0; i < n; i += 1) {
+    const T = o.t0C + i * o.dTc;
+    timeMin[i] = i * dtMin;
+    tempC[i] = T;
+    heatFlowMw[i] = twoSlopeHeatFlowAt(T, o);
+  }
+
+  const segment: DscSegment = {
+    id: `${id}:seg0`,
+    label: `Ramp ${o.rateCPerMin} °C/min to ${o.t1C} °C`,
+    kind: "heat",
+    rateCPerMin: o.rateCPerMin,
+    ordinal: 1,
+    cycle: 1,
+    start: 0,
+    end: n,
+    tStartC: tempC[0],
+    tEndC: tempC[n - 1],
+    timeStartMin: timeMin[0],
+    timeEndMin: timeMin[n - 1],
+  };
+
+  return {
+    label: "Synthetic two-slope",
+    meta: {
+      instrument: "DSC25",
+      operator: "Test",
+      sampleName: "Synthetic two-slope",
+      sampleMassMg: o.sampleMassMg,
+      panMassMg: 0,
+      pan: "Tzero Aluminum Hermetic",
+      methodSteps: [segment.label],
+      runDate: "9/2/2026",
+      gases: "Nitrogen, 50 mL/min",
+      cooler: "RCS 90",
+      cellConstant: "-23.6 mW/°C",
+      sampleInterval: "0.1 s/pt",
+      exoDirection: "up",
+    },
+    segments: [segment],
+    timeMin,
+    tempC,
+    heatFlowMw,
+    id,
+    fileId: `${id}:file`,
+    fileName: "synthetic-two-slope.tri",
+    color: "#000000",
+    scale: 1,
+    offset: 0,
+    visible: true,
+    materialId: null,
+    activeSegmentId: segment.id,
+    massOverrideMg: null,
+    polymerFraction: 1,
+    referenceId: null,
+    features: [],
+  };
+}
+
+/** DAC1.tri-shaped: a real step (permanent -0.05 W/g displacement) at 70 °C,
+ *  well clear of both segment ends (margin `max(10, 5% * 280) = 14 °C`,
+ *  70 °C clears it by 56 °C), pre-slope steeper than post-slope, no Gaussian.
+ *  `stepCenterC` and `stepHeightWPerG` are overridden by individual tests
+ *  below to probe the discriminator's edge-margin and Δcp-plausibility
+ *  guards. */
+const TWO_SLOPE_STEP: TwoSlopeOpts = {
+  t0C: 0,
+  t1C: 280,
+  dTc: 0.1,
+  rateCPerMin: 10,
+  baseline0: -0.17,
+  preSlope: -0.0018,
+  postSlope: -0.0005,
+  stepCenterC: 70,
+  stepWidthC: 3,
+  stepHeightWPerG: -0.05,
+  gaussAmpWPerG: 0,
+  gaussSigmaC: 5,
+  sampleMassMg: 1,
+};
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -595,6 +775,30 @@ describe("compute engine", () => {
     expect(excluded.some((f) => f.kind === "melt")).toBe(false);
   });
 
+  // Regression for the real-file bug `MAX_PEAK_SPAN_FRACTION` (compute.ts)
+  // exists to fix: DAC2.tri heat 2, DAC1.tri cool 1, DAC1.tri heat 1, and
+  // `1-2 S1.tri` heat 2 all reported a bogus melt/crystallization spanning
+  // 77-97% of their segment before this gate existed, because a straight
+  // two-point baseline can't represent a gently curved real DSC baseline.
+  it("rejects a peak candidate whose window would cover most of a purely-curved segment with no real transition", () => {
+    const run = makeRun("heat", CURVED_BASELINE_ONLY);
+    const view = segmentView(run, run.segments[0], DEFAULT_PARAMS);
+    const features = autoDetectFeatures(view, run.segments[0], DEFAULT_PARAMS);
+
+    // No melt, no crystallization, no cure — just curvature, nothing to
+    // report. (A weak glass candidate is not what this fixture is built to
+    // exercise; the assertion that matters is that no PEAK-family feature
+    // spans most of the segment.)
+    for (const f of features) {
+      const span = Math.abs(f.window[1] - f.window[0]);
+      const segSpan = Math.abs(CURVED_BASELINE_ONLY.t1C - CURVED_BASELINE_ONLY.t0C);
+      expect(span).toBeLessThanOrEqual(0.75 * segSpan);
+    }
+    expect(features.some((f) => f.kind === "melt" || f.kind === "crystallization" || f.kind === "cure")).toBe(
+      false,
+    );
+  });
+
   it("rejects an auto-detected peak whose apex sits in the segment's first/last 2% (start-of-ramp thermal lag, not a real transition)", () => {
     const run = makeEdgeArtifactRun();
     const view = segmentView(run, run.segments[0], DEFAULT_PARAMS);
@@ -687,5 +891,84 @@ describe("compute engine", () => {
     expect(analysis.melt).toBeNull();
     expect(analysis.glass).toBeNull();
     expect(analysis.view.tempC.length).toBe(0);
+  });
+
+  // -------------------------------------------------------------------------
+  // Step-vs-peak discriminator (`classifyStepCandidate`) — regression tests
+  // for the real `DAC1.tri`/`DAC3.tri` bug: a Tg step riding on a baseline
+  // whose slope differs before/after the transition defeats
+  // `detectPeakCandidates`' straight two-point baseline and reads as one
+  // huge, one-sided "melt" unless the discriminator catches it. Fixtures use
+  // `makeTwoSlopeRun`/`TWO_SLOPE_STEP`, not `COMBINED` — see that fixture's
+  // doc comment for why `COMBINED`'s small tanh step doesn't exercise this
+  // code path at all.
+  // -------------------------------------------------------------------------
+
+  it("auto-detects a baseline step with differing pre/post slopes as glass, windowed on the step, not swallowed as a bogus melt", () => {
+    const run = makeTwoSlopeRun(TWO_SLOPE_STEP);
+    const view = segmentView(run, run.segments[0], DEFAULT_PARAMS);
+    const features = autoDetectFeatures(view, run.segments[0], DEFAULT_PARAMS);
+
+    // Before the discriminator existed, this exact shape (verified against
+    // DAC1.tri's real numbers in TWO_SLOPE_STEP's doc comment) was reported
+    // as a single "melt" spanning almost the entire segment instead.
+    expect(features.some((f) => f.kind !== "glass")).toBe(false);
+    const glass = features.find((f) => f.kind === "glass");
+    expect(glass).toBeDefined();
+    expect(glass!.window[0]).toBeLessThan(TWO_SLOPE_STEP.stepCenterC);
+    expect(glass!.window[1]).toBeGreaterThan(TWO_SLOPE_STEP.stepCenterC);
+    // Windowed on the step, not spanning most of the 280 °C segment the way
+    // the pre-fix "melt" did.
+    expect(glass!.window[1] - glass!.window[0]).toBeLessThan(150);
+
+    const g = glassTransition(view, glass!.window);
+    expect(g.midpointC).not.toBeNull();
+    expect(Math.abs(g.midpointC! - TWO_SLOPE_STEP.stepCenterC)).toBeLessThan(10);
+  });
+
+  it("still classifies a genuine Gaussian peak as a peak, not a glass step, even riding the same two-slope baseline a step would", () => {
+    // Same baseline shape (and even the same candidate location) as the
+    // previous test, but a REAL, symmetric peak instead of a permanent
+    // displacement — the discriminator's two-lobe dominance test
+    // (STEP_LOBE_DOMINANCE_RATIO) must see this peak's roughly-equal
+    // opposite-sign flanks and let it through untouched.
+    const run = makeTwoSlopeRun({ ...TWO_SLOPE_STEP, stepHeightWPerG: 0, gaussAmpWPerG: -2, gaussSigmaC: 5 });
+    const view = segmentView(run, run.segments[0], DEFAULT_PARAMS);
+    const features = autoDetectFeatures(view, run.segments[0], DEFAULT_PARAMS);
+
+    expect(features.some((f) => f.kind === "glass")).toBe(false);
+    const melt = features.find((f) => f.kind === "melt");
+    expect(melt).toBeDefined();
+    expect(melt!.window[0]).toBeLessThan(TWO_SLOPE_STEP.stepCenterC);
+    expect(melt!.window[1]).toBeGreaterThan(TWO_SLOPE_STEP.stepCenterC);
+  });
+
+  it("rejects a step whose core sits within the ramp-start/end temperature margin, even when its own apex escapes the index-based edge guard", () => {
+    // Pins the real DAC2.tri/1-2 S1.tri bug: the ramp-start thermal-lag
+    // artifact's CORE sits at ~2-6 °C, but its d-apex (bestIdx, what
+    // EDGE_REJECT_FRACTION's pre-existing INDEX guard checks) lands much
+    // further out (~19 °C on the real files) — past that guard, so only the
+    // newer TEMPERATURE-based margin on the core itself (isNearSegmentTempEdge)
+    // catches it. stepCenterC: 5 sits inside max(10, 5% * 280) = 14 °C of
+    // the segment's low end.
+    const run = makeTwoSlopeRun({ ...TWO_SLOPE_STEP, stepCenterC: 5 });
+    const view = segmentView(run, run.segments[0], DEFAULT_PARAMS);
+    const features = autoDetectFeatures(view, run.segments[0], DEFAULT_PARAMS);
+    expect(features.some((f) => f.kind === "glass")).toBe(false);
+  });
+
+  it("rejects a step-shaped candidate whose fitted Δcp is implausibly large, the cure-exotherm-flank bug seen on DAC1.tri/DAC3.tri's first heat", () => {
+    // A step height of -0.2 W/g at 10 °C/min fits to Δcp ≈ 0.2 / (10/60) ≈
+    // 1.2 J/(g·°C) — above GLASS_DELTA_CP_MAX_J_PER_G_C (1.0) and nowhere
+    // near a real polymer's heat-capacity jump at Tg (TWO_SLOPE_STEP's own
+    // -0.05 W/g step fits to a plausible ≈ 0.3). The lobe-dominance and
+    // step-height-vs-amplitude gates both still pass this shape (it IS a
+    // one-sided, permanently-displaced deviation) — only the Δcp
+    // plausibility gate, run by calling the real glassTransition on the
+    // candidate window, catches it.
+    const run = makeTwoSlopeRun({ ...TWO_SLOPE_STEP, stepHeightWPerG: -0.2 });
+    const view = segmentView(run, run.segments[0], DEFAULT_PARAMS);
+    const features = autoDetectFeatures(view, run.segments[0], DEFAULT_PARAMS);
+    expect(features.some((f) => f.kind === "glass")).toBe(false);
   });
 });

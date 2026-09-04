@@ -662,6 +662,270 @@ interface PeakCandidate {
   enthalpy: number;
 }
 
+/** A local-extremum candidate that `classifyStepCandidate` identified as a
+ *  glass-transition step rather than a peak — see that function's doc
+ *  comment. Carries just enough to build the segment's glass `DscFeature`
+ *  (§3.6.5) without `detectPeakCandidates` needing to know about `DscFeature`
+ *  or the owning `DscSegment`. */
+interface StepCandidate {
+  peakIdx: number;
+  windowC: [number, number];
+  stepHeight: number; // signed, W/g — postLine(Tp) - preLine(Tp)
+}
+
+/** Minimum `|postLine - preLine|` at a step's center to count as a real
+ *  transition rather than noise. Shared by `classifyStepCandidate` (the
+ *  step-vs-peak discriminator, run on every `detectPeakCandidates` local
+ *  extremum) and `detectGlassCandidate` (the outside-every-peak fallback
+ *  search) so the two passes agree on what counts as "a step" at all. */
+const GLASS_STEP_HEIGHT_FLOOR_W_PER_G = 0.005;
+
+/**
+ * How small the WEAKER of the two same-neighbourhood derivative lobes must
+ * be, relative to the dominant one, for a candidate to be called a step
+ * (§3.6.2a). The physical distinction lives in the RAW (not
+ * baseline-subtracted) slope `dHF/dT` around the candidate's apex: a real
+ * peak is symmetric-ish — heat flow rises into it and falls back out, so
+ * `deriv` carries two comparable lobes of OPPOSITE sign flanking the apex
+ * (one for the rise, one for the fall). A step has only one — heat flow
+ * moves in a single direction and stays there, so `deriv` has one dominant
+ * lobe and nothing of consequence on the other side.
+ *
+ * Verified on `DAC1.tri` segment 2, a pure Tg with no melt at all, whose
+ * entire ramp was reported as a single "Melt" spanning [1.1, 253.1] °C with a
+ * bogus ΔH of -207.6 J/g before this discriminator existed: near its
+ * candidate apex, the dominant lobe measures |dHF/dT| ≈ 0.0089, the opposite-
+ * sign lobe only ≈ 0.0011 — a ratio of ~0.13, far below `0.4`. A synthetic
+ * Gaussian melt's two lobes come out within a percent of each other by
+ * construction (ratio ~1), sailing through untouched.
+ */
+const STEP_LOBE_DOMINANCE_RATIO = 0.4;
+
+/**
+ * How much bigger `|stepHeight|` must be than `|peakAmp|` for a candidate
+ * that passed the lobe-dominance test above to be treated as a step's window
+ * rather than discarded outright (§3.6.2a step 3). Across a real peak, heat
+ * flow returns to the SAME extrapolated baseline it left (`stepHeight -> 0`);
+ * across a step, the level is PERMANENTLY displaced (`peakAmp -> 0`, since
+ * the apex sits roughly midway between the two displaced levels rather than
+ * bulging off either one). DAC1's real Tg measures `stepHeight ≈ -0.049 W/g`
+ * against `peakAmp ≈ -0.032 W/g` — a ratio of ~1.5 — so `0.5` clears it with
+ * room to spare.
+ */
+const STEP_HEIGHT_TO_AMP_RATIO = 0.5;
+
+/**
+ * Minimum half-width, in °C, `classifyStepCandidate` and
+ * `detectGlassCandidate` both keep clear of a segment's own temperature
+ * extremes — a companion to `EDGE_REJECT_FRACTION`'s INDEX-based guard
+ * (below), but expressed in temperature because the two guards catch
+ * different things. `EDGE_REJECT_FRACTION` rejects a candidate whose own
+ * apex (`bestIdx`, the argmax of the baseline-subtracted deviation `d`)
+ * lands in the segment's first/last 2 % of POINTS; a step's apex can sit far
+ * from that (DAC2.tri's ramp-start artifact apex measured out at ~19 °C,
+ * well past a 2 %-of-~16 800-points margin of ~5.6 °C), while the artifact's
+ * actual CORE — the region `classifyStepCandidate` fits pre/post lines
+ * around — sits right where the instrument is still settling into the ramp
+ * rate. `STEP_EDGE_MARGIN_MIN_C` is the floor for that; see
+ * `STEP_EDGE_MARGIN_FRACTION` for the other half of the rule.
+ */
+const STEP_EDGE_MARGIN_MIN_C = 10;
+
+/**
+ * Fraction of a segment's own temperature span kept clear of a step's core,
+ * alongside the `STEP_EDGE_MARGIN_MIN_C` floor (the effective margin is
+ * `max(STEP_EDGE_MARGIN_MIN_C, STEP_EDGE_MARGIN_FRACTION * span)`). Verified
+ * against every real `.tri` segment 2 in the fixture set: DAC3.tri's
+ * legitimate Tg core sits at ~33 °C on a 0-278 °C span — margin ≈ 13.9 °C —
+ * so it clears with ~19 °C to spare, while DAC2.tri's and `1-2 S1.tri`'s
+ * ramp-start artifacts (core ≈ 2-6 °C) and every cooling segment's
+ * ramp-END artifact (core ≈ 277-278 °C, i.e. within the SAME margin of the
+ * segment's high end since a cooling `SegmentView` is reversed to ascending
+ * — acquisition starts at 280 °C) fall inside it and are rejected.
+ */
+const STEP_EDGE_MARGIN_FRACTION = 0.05;
+
+/** `true` when `centerC` (a step candidate's core midpoint) sits within
+ *  `max(STEP_EDGE_MARGIN_MIN_C, STEP_EDGE_MARGIN_FRACTION * span)` of either
+ *  end of `[tempLo, tempHi]` — ramp start/end thermal lag settling into rate,
+ *  not a transition (see the two constants' doc comments). Shared by
+ *  `classifyStepCandidate` and `detectGlassCandidate` so a step artifact
+ *  rejected on one path can't just resurface through the other. */
+function isNearSegmentTempEdge(centerC: number, tempLo: number, tempHi: number): boolean {
+  const marginC = Math.max(STEP_EDGE_MARGIN_MIN_C, STEP_EDGE_MARGIN_FRACTION * (tempHi - tempLo));
+  return centerC - tempLo < marginC || tempHi - centerC < marginC;
+}
+
+/**
+ * Plausible range for a glass transition's `|Δcp|`, J/(g·°C) — the last gate
+ * a step candidate must clear (§3.6.2a step 5), run AFTER the window is
+ * built by calling the real `glassTransition` on it and reading back its
+ * `deltaCp`. Catches the OTHER real-file failure mode the lobe/height tests
+ * above don't: on `DAC1.tri`'s and `DAC3.tri`'s FIRST heat (a curing epoxy,
+ * carrying a cure exotherm the global baseline partly absorbs alongside its
+ * own Tg), the step fit can land on the exotherm's flank instead of the
+ * actual glass step, reporting Δcp of 5.97 and 2.00 J/(g·°C) respectively —
+ * one to two orders of magnitude above any real polymer's heat-capacity
+ * jump at Tg (their genuine 2nd-heat Tg's measure 0.39 both times). `0.005`
+ * (the floor) reuses `GLASS_STEP_HEIGHT_FLOOR_W_PER_G`'s own noise floor
+ * intuition; `1.0` (the ceiling) is generous headroom above every real
+ * measurement in this fixture set. `deltaCp` is `null` whenever
+ * `SegmentView.normMode === "raw"` (no sample mass — see `glassTransition`'s
+ * §3.4 step 6) or the segment is effectively isothermal; NEITHER of those is
+ * grounds for rejecting the candidate, so the caller only applies this gate
+ * when `deltaCp` is non-null.
+ */
+const GLASS_DELTA_CP_MIN_J_PER_G_C = 0.005;
+const GLASS_DELTA_CP_MAX_J_PER_G_C = 1.0;
+
+/**
+ * Step-vs-peak discriminator, run on every `detectPeakCandidates` local
+ * extremum before it is accepted as a peak (§3.6.2a). Returns the step's
+ * window/height when the candidate at `peakIdx` (view index, with its
+ * 10 %-cutoff window `[lo, hi]` already computed by `candidateWindow`) looks
+ * like a permanent baseline displacement rather than a peak that returns to
+ * where it started; `null` when it doesn't (or there isn't enough runway on
+ * either flank to tell), in which case the caller proceeds exactly as before.
+ *
+ * 1. **Lobe search, near `p` only**: find the most positive and most
+ *    negative `dHF/dT` within a probe-sized neighbourhood of `p` — NOT the
+ *    candidate's full `[lo, hi]`, which can span almost the entire segment
+ *    for exactly the pathological candidates this function exists to catch
+ *    (DAC1.tri's spans indices 147-15270 of ~15500) and whose own extreme can
+ *    then be dominated by something with nothing to do with `p` at all —
+ *    DAC1's true `|dHF/dT|` maximum inside that full window sits at the very
+ *    first few points of the ramp (instrument thermal lag settling into
+ *    rate, the same artifact `EDGE_REJECT_FRACTION` guards against
+ *    elsewhere), nowhere near its Tg.
+ * 2. **Dominance gate**: see `STEP_LOBE_DOMINANCE_RATIO`. Passing this means
+ *    exactly one lobe matters; call its index `extremeIdx` and walk outward
+ *    from it while `|dHF/dT|` stays within 50 % of its own value — the
+ *    "core", `[c0, c1]` (the step's rise/fall itself, not its flatter
+ *    shoulders).
+ * 3. **Pre/post lines**: fit a line over a probe of points ending just before
+ *    the core and another starting just after it, ~8 % of the segment wide,
+ *    clamped inside the segment. These extend past `[lo, hi]` into the wider
+ *    segment when the core sits near a window edge (as DAC1's does) — a
+ *    step's TRUE pre/post baselines live outside the region the step itself
+ *    dominates.
+ * 4. **Discriminant** at the apex temperature: see `STEP_HEIGHT_TO_AMP_RATIO`.
+ */
+function classifyStepCandidate(
+  view: SegmentView,
+  deriv: Float64Array,
+  n: number,
+  peakIdx: number,
+  lo: number,
+  hi: number,
+): StepCandidate | null {
+  const probe = Math.max(10, Math.round(n * 0.08));
+  const nearLo = Math.max(lo, peakIdx - probe);
+  const nearHi = Math.min(hi, peakIdx + probe);
+
+  let maxPos = 0;
+  let maxPosIdx = -1;
+  let maxNeg = 0; // stored as a positive magnitude
+  let maxNegIdx = -1;
+  for (let i = nearLo; i <= nearHi; i += 1) {
+    const v = deriv[i];
+    if (!Number.isFinite(v)) continue;
+    if (v > maxPos) {
+      maxPos = v;
+      maxPosIdx = i;
+    }
+    if (-v > maxNeg) {
+      maxNeg = -v;
+      maxNegIdx = i;
+    }
+  }
+  const dominant = Math.max(maxPos, maxNeg);
+  const weak = Math.min(maxPos, maxNeg);
+  if (!(dominant > 0)) return null;
+  if (weak >= STEP_LOBE_DOMINANCE_RATIO * dominant) return null; // two comparable lobes — a real peak
+
+  const extremeIdx = maxPos >= maxNeg ? maxPosIdx : maxNegIdx;
+  const threshold = 0.5 * dominant;
+  let c0 = extremeIdx;
+  while (c0 > lo && Number.isFinite(deriv[c0 - 1]) && Math.abs(deriv[c0 - 1]) >= threshold) c0 -= 1;
+  let c1 = extremeIdx;
+  while (c1 < hi && Number.isFinite(deriv[c1 + 1]) && Math.abs(deriv[c1 + 1]) >= threshold) c1 += 1;
+
+  // Ramp start/end thermal lag (§ `isNearSegmentTempEdge`'s doc comment)
+  // rejected here, on the CORE's own center — not on `bestIdx`/`peakIdx`
+  // (that's what `EDGE_REJECT_FRACTION` already checks, in index space, and
+  // it isn't enough on its own: DAC2.tri's ramp-start artifact has its
+  // `d`-apex out at ~19 °C, past that 2 %-of-points margin, even though the
+  // artifact's actual core sits at ~2-6 °C) and not on the eventual window
+  // bounds either (a legitimate step's WINDOW can legitimately start close
+  // to a segment edge — DAC3.tri's real Tg window opens at 7.2 °C on a
+  // 0-278 °C span — only its CORE has to clear the margin).
+  const tempLo = view.tempC[0];
+  const tempHi = view.tempC[n - 1];
+  const rawCenterC = (view.tempC[c0] + view.tempC[c1]) / 2;
+  if (isNearSegmentTempEdge(rawCenterC, tempLo, tempHi)) return null;
+
+  const preHi = c0 - 1;
+  const preLo = Math.max(0, preHi - probe + 1);
+  const postLo = c1 + 1;
+  const postHi = Math.min(n - 1, postLo + probe - 1);
+  // Not enough runway on one flank (the core sits right at the segment's own
+  // edge) to fit a trustworthy pre/post baseline — bail to the current
+  // peak-candidate behaviour rather than guess.
+  if (preHi - preLo + 1 < 5 || postHi - postLo + 1 < 5) return null;
+
+  const preLine = fitLine(view.tempC, view.heatFlow, preLo, preHi);
+  const postLine = fitLine(view.tempC, view.heatFlow, postLo, postHi);
+  if (!Number.isFinite(preLine.slope) || !Number.isFinite(postLine.slope)) return null;
+
+  const Tp = view.tempC[peakIdx];
+  const stepHeight = evalLine(postLine, Tp) - evalLine(preLine, Tp);
+  const peakAmp = view.heatFlow[peakIdx] - (evalLine(preLine, Tp) + evalLine(postLine, Tp)) / 2;
+  if (Math.abs(stepHeight) < GLASS_STEP_HEIGHT_FLOOR_W_PER_G) return null;
+  if (Math.abs(stepHeight) < STEP_HEIGHT_TO_AMP_RATIO * Math.abs(peakAmp)) return null;
+
+  // Window centred on the core (the step's own rise/fall), not the apex —
+  // `peakIdx` (argmax of the baseline-subtracted deviation) can sit well off
+  // to one side of a step's actual midpoint, same as DAC1's apex (76.5 °C)
+  // sits well above its true Tg midpoint (67.9 °C). Half-width scales with
+  // how wide the rise itself is so a sharp step gets a tight window and a
+  // gradual one gets enough room for `glassTransition`'s 30 %-edge pre/post
+  // fit, floored at 10 °C for a razor-sharp core.
+  const coreWidthC = Math.abs(view.tempC[c1] - view.tempC[c0]);
+  const centerC = rawCenterC;
+  const halfWidthC = Math.max(10, 3 * coreWidthC);
+  const windowC: [number, number] = [
+    Math.max(tempLo, centerC - halfWidthC),
+    Math.min(tempHi, centerC + halfWidthC),
+  ];
+
+  // Last gate: does the window this function is ABOUT to hand back actually
+  // read as a plausible glass transition, per the real ASTM E1356 machinery
+  // (`glassTransition`) rather than just this function's own cheaper
+  // lobe/height heuristics? Catches the 1st-heat cure-exotherm-flank failure
+  // mode `GLASS_DELTA_CP_MIN_J_PER_G_C`'s doc comment describes — the lobe
+  // and height tests above are satisfied there too (the exotherm's flank IS
+  // a one-sided, permanently-displaced deviation), but the resulting Δcp is
+  // off by 1-2 orders of magnitude from anything physical.
+  const check = glassTransition(view, windowC);
+  if (check.midpointC == null || !Number.isFinite(check.midpointC)) return null;
+  if (
+    check.deltaCp != null &&
+    (!Number.isFinite(check.deltaCp) ||
+      Math.abs(check.deltaCp) < GLASS_DELTA_CP_MIN_J_PER_G_C ||
+      Math.abs(check.deltaCp) > GLASS_DELTA_CP_MAX_J_PER_G_C)
+  ) {
+    return null;
+  }
+  // Re-check the edge margin against `glassTransition`'s ACTUAL half-height
+  // midpoint, not just `rawCenterC` (this function's cheaper core-midpoint
+  // estimate, checked above before the pre/post lines were even fit) — see
+  // `detectGlassCandidate`'s matching re-check for why the two can disagree
+  // by more than the gap to the margin.
+  if (isNearSegmentTempEdge(check.midpointC, tempLo, tempHi)) return null;
+
+  return { peakIdx, windowC, stepHeight };
+}
+
 /** Fraction of a segment's points, at EITHER end, whose apex a candidate is
  *  rejected for landing inside. Pins a real bug seen on actual `.tri`
  *  files: a DSC ramp's first ~30 s (and, symmetrically, its last) is
@@ -672,15 +936,45 @@ interface PeakCandidate {
  *  bogus "cold crystallization" a fraction of a degree into the ramp. */
 const EDGE_REJECT_FRACTION = 0.02;
 
+/**
+ * Maximum fraction of a segment's OWN temperature span that an auto-detected
+ * peak candidate's window (`[lo, hi]` in temperature) may cover before it is
+ * rejected as baseline curvature rather than a resolvable transition
+ * (§3.6.2b). `detectPeakCandidates`' global baseline is a straight two-point
+ * line (step 1, above); it cannot represent the gentle curve a real DSC
+ * baseline actually has, so on a segment with no genuine peak or step at
+ * all — just curvature — the whole ramp reads as one enormous local extremum.
+ * Four real files exhibited exactly this before this gate existed: DAC2.tri
+ * heat 2's bogus "melt[1,250]" on a 0-278 °C segment (≈ 90 % of the span),
+ * `1-2 S1.tri` heat 2's "melt[2,236]" (≈ 99 %), DAC1.tri cool 1's
+ * "crystallization[36,279]" (≈ 87 %), and DAC1.tri heat 1's "melt[6,221]"
+ * (≈ 77 %) — none of them a transition; DAC2.tri heat 2 in particular is
+ * monotone and essentially linear over its whole range. A resolvable DSC
+ * transition, even a broad one, is a modest fraction of the ramp it sits
+ * on — this fixture set's own `BROAD_NOISY_MELT` (σ = 25 °C on a 280 °C
+ * segment) claims a window of ≈ 39 % of the span at its widest, comfortably
+ * under this gate. `0.75` sits well above every legitimate window measured
+ * here (real or synthetic) and well below every bogus one.
+ */
+const MAX_PEAK_SPAN_FRACTION = 0.75;
+
 /** §3.6 steps 1-3: global baseline, local-extrema candidates, enthalpy gate,
  *  minimum separation, cap at 6. Greedily picks the strongest remaining
  *  local extremum of either sign — via `localMaximumIndex`/
  *  `localMinimumIndex` over whatever unclaimed index ranges remain — so a
- *  weak/rejected candidate can't be re-picked forever. */
-function detectPeakCandidates(view: SegmentView, params: DscParams): { d: Float64Array; candidates: PeakCandidate[] } {
+ *  weak/rejected candidate can't be re-picked forever. Every candidate is run
+ *  through `classifyStepCandidate` before it is accepted as a peak; one
+ *  identified as a step (a glass transition the global baseline absorbed
+ *  whole — see that function's doc comment) is returned separately in
+ *  `steps` instead, with its territory claimed exactly like a peak's so the
+ *  greedy loop doesn't rediscover it. */
+function detectPeakCandidates(
+  view: SegmentView,
+  params: DscParams,
+): { d: Float64Array; candidates: PeakCandidate[]; steps: StepCandidate[] } {
   const n = Math.min(view.tempC.length, view.heatFlow.length);
   const d = new Float64Array(n);
-  if (n === 0) return { d, candidates: [] };
+  if (n === 0) return { d, candidates: [], steps: [] };
 
   // Step 1: global linear baseline, endpoints averaged over 2 % each.
   const edgeCount = Math.max(1, Math.round(n * 0.02));
@@ -702,6 +996,11 @@ function detectPeakCandidates(view: SegmentView, params: DscParams): { d: Float6
 
   const claimed = new Uint8Array(n);
   const candidates: PeakCandidate[] = [];
+  const steps: StepCandidate[] = [];
+  // Computed once up front (not lazily inside the loop) — `classifyStepCandidate`
+  // needs it for every candidate, and it doesn't depend on anything the loop
+  // mutates.
+  const deriv = computeDerivative(view, params.smoothWindow);
 
   for (let iter = 0; iter < 24 && candidates.length < 6; iter += 1) {
     let bestIdx = -1;
@@ -727,7 +1026,6 @@ function detectPeakCandidates(view: SegmentView, params: DscParams): { d: Float6
     if (bestIdx < 0 || bestAbs < peakFloor) break;
 
     const [lo, hi] = candidateWindow(d, bestIdx);
-    const enthalpy = integrateAgainstTime(view, d.subarray(lo, hi + 1), lo);
     // Claim out to wherever |d| drops below `peakFloor` — NOT just the
     // candidate's own `[lo, hi]` (10 % of ITS peak) or a `minSep` band.
     // `peakFloor` (5 % of the segment's global max) is a materially LOWER
@@ -749,13 +1047,36 @@ function detectPeakCandidates(view: SegmentView, params: DscParams): { d: Float6
     // it to be "rediscovered" next iteration.
     if (bestIdx < edgeMargin || bestIdx >= n - edgeMargin) continue;
 
+    // A step (glass transition) the global baseline absorbed whole reads as
+    // one enormous, one-sided "peak" here — reclassify it before the
+    // enthalpy gate below ever sees it, or DAC1.tri's entire Tg ends up
+    // reported as a "Melt" with a bogus few-hundred-J/g ΔH (see
+    // `classifyStepCandidate`'s doc comment).
+    const step = classifyStepCandidate(view, deriv, n, bestIdx, lo, hi);
+    if (step) {
+      steps.push(step);
+      continue;
+    }
+
+    // Full-span gate (`MAX_PEAK_SPAN_FRACTION`'s doc comment): a window this
+    // wide relative to the segment's own temperature range is baseline
+    // curvature the straight two-point global baseline couldn't cancel, not
+    // a resolvable transition. Checked here rather than folded into the
+    // enthalpy gate below because a huge bogus window also integrates to a
+    // huge bogus enthalpy — it clears `minPeakEnthalpy` easily and needs its
+    // own, independent rejection.
+    const segSpanC = Math.abs(view.tempC[n - 1] - view.tempC[0]);
+    const windowSpanC = Math.abs(view.tempC[hi] - view.tempC[lo]);
+    if (segSpanC > 0 && windowSpanC > MAX_PEAK_SPAN_FRACTION * segSpanC) continue;
+
+    const enthalpy = integrateAgainstTime(view, d.subarray(lo, hi + 1), lo);
     if (enthalpy != null && Math.abs(enthalpy) >= params.minPeakEnthalpy) {
       candidates.push({ peakIdx: bestIdx, lo, hi, enthalpy });
     }
   }
 
   candidates.sort((a, b) => a.peakIdx - b.peakIdx);
-  return { d, candidates };
+  return { d, candidates, steps };
 }
 
 /** §3.6.5 / §3.4.7: at most one glass-transition candidate, found after the
@@ -763,7 +1084,11 @@ function detectPeakCandidates(view: SegmentView, params: DscParams): { d: Float6
  *  jump where `|postLine - preLine|` at the midpoint exceeds 0.005 W/g while
  *  the baseline-subtracted area over the same span stays below 0.3 J/g (a
  *  real peak fails that area test; a pure baseline step passes it). The
- *  window half-width is `max(10 °C, 6 × the step's 10-90 % rise width)`. */
+ *  window half-width is `max(10 °C, 6 × the step's 10-90 % rise width)`.
+ *  Shares two guards with `classifyStepCandidate` so a step artifact
+ *  rejected on ITS path can't just resurface here instead: the
+ *  `isNearSegmentTempEdge` ramp-start/end margin, and the `glassTransition`
+ *  Δcp plausibility check (`GLASS_DELTA_CP_MIN_J_PER_G_C`'s doc comment). */
 function detectGlassCandidate(
   view: SegmentView,
   segment: DscSegment,
@@ -776,6 +1101,8 @@ function detectGlassCandidate(
 
   const margin = Math.max(5, Math.floor(n * 0.02));
   const insidePeak = (i: number) => peaks.some((p) => i >= p.lo - margin && i <= p.hi + margin);
+  const tempLo = view.tempC[0];
+  const tempHi = view.tempC[n - 1];
 
   let best: { height: number; windowC: [number, number] } | null = null;
 
@@ -783,6 +1110,11 @@ function detectGlassCandidate(
     if (!Number.isFinite(deriv[idx]) || insidePeak(idx)) continue;
     const av = Math.abs(deriv[idx]);
     if (!(av >= Math.abs(deriv[idx - 1]) && av >= Math.abs(deriv[idx + 1]))) continue; // local extremum of |deriv|
+    // Ramp start/end thermal lag — same guard `classifyStepCandidate` runs
+    // on its own core center, applied here to this loop's analogous anchor
+    // (`idx`, the local |deriv| extremum a step's pre/post probes are built
+    // around).
+    if (isNearSegmentTempEdge(view.tempC[idx], tempLo, tempHi)) continue;
 
     const probe = Math.max(10, Math.floor(n * 0.1));
     const preLo = Math.max(0, idx - probe);
@@ -797,7 +1129,7 @@ function detectGlassCandidate(
 
     const T = view.tempC[idx];
     const stepHeight = Math.abs(evalLine(postLine, T) - evalLine(preLine, T));
-    if (stepHeight <= 0.005) continue;
+    if (stepHeight <= GLASS_STEP_HEIGHT_FLOOR_W_PER_G) continue;
 
     const preVal = evalLine(preLine, view.tempC[preHi]);
     const postVal = evalLine(postLine, view.tempC[postLo]);
@@ -817,6 +1149,33 @@ function detectGlassCandidate(
     for (let i = wLo; i <= wHi; i += 1) dArea[i - wLo] = view.heatFlow[i] - evalLine(stepBaseline, view.tempC[i]);
     const area = integrateAgainstTime(view, dArea, wLo);
     if (area == null || Math.abs(area) >= 0.3) continue; // a real peak, not a step
+
+    // Same Δcp plausibility gate as `classifyStepCandidate` — a step-shaped
+    // deviation can still sit on a cure exotherm's flank rather than a real
+    // Tg (see `GLASS_DELTA_CP_MIN_J_PER_G_C`'s doc comment); `deltaCp` null
+    // (raw mode / isothermal) skips the check rather than rejecting.
+    const plausibility = glassTransition(view, [windowLo, windowHi]);
+    if (plausibility.midpointC == null || !Number.isFinite(plausibility.midpointC)) continue;
+    if (
+      plausibility.deltaCp != null &&
+      (!Number.isFinite(plausibility.deltaCp) ||
+        Math.abs(plausibility.deltaCp) < GLASS_DELTA_CP_MIN_J_PER_G_C ||
+        Math.abs(plausibility.deltaCp) > GLASS_DELTA_CP_MAX_J_PER_G_C)
+    ) {
+      continue;
+    }
+    // Re-check the edge margin against `glassTransition`'s ACTUAL half-height
+    // midpoint, not just this loop's `idx` anchor above. The two can
+    // disagree by more than the gap between `idx` and the margin: on
+    // DAC3.tri's first heat (a curing epoxy — same cure-exotherm-adjacent
+    // shape `GLASS_DELTA_CP_MIN_J_PER_G_C`'s doc comment describes), `idx`
+    // cleared the margin by a few hundredths of a degree, but the real
+    // tanh-crossing midpoint landed 0.5 °C further toward the edge, past it —
+    // reachable at all only once the full-span gate (`MAX_PEAK_SPAN_FRACTION`)
+    // stopped that whole region being swallowed inside a single rejected
+    // peak candidate, which used to hide this from `detectGlassCandidate`
+    // entirely.
+    if (isNearSegmentTempEdge(plausibility.midpointC, tempLo, tempHi)) continue;
 
     if (!best || stepHeight > best.height) best = { height: stepHeight, windowC: [windowLo, windowHi] };
   }
@@ -858,7 +1217,7 @@ export function autoDetectFeatures(view: SegmentView, segment: DscSegment, param
   const n = Math.min(view.tempC.length, view.heatFlow.length);
   if (n < 10) return [];
 
-  const { d, candidates } = detectPeakCandidates(view, params);
+  const { d, candidates, steps } = detectPeakCandidates(view, params);
 
   // §3.6.4: classify by segment kind and sign (exo-up convention: d > 0 exo).
   const meltTemps: number[] = [];
@@ -910,13 +1269,38 @@ export function autoDetectFeatures(view: SegmentView, segment: DscSegment, param
     });
   }
 
-  // §3.6.5: at most one glass feature, found AFTER the peaks.
-  const glass = detectGlassCandidate(
-    view,
-    segment,
-    params,
-    candidates.map((c) => ({ lo: c.lo, hi: c.hi })),
-  );
+  // §3.6.5: at most one glass feature, found AFTER the peaks. Prefer the
+  // strongest step the discriminator above pulled out of the peak-candidate
+  // pass itself (largest |stepHeight|) — a real Tg absorbed whole by
+  // `detectPeakCandidates`' global baseline never reaches
+  // `detectGlassCandidate` at all, since that fallback only searches OUTSIDE
+  // every peak window and the step consumed the entire segment as "inside"
+  // one (DAC1.tri, DAC3.tri). Only fall back to the outside-every-peak search
+  // when the discriminator found nothing — the pre-existing behaviour for
+  // every segment whose Tg is small enough that it never gets picked up as a
+  // `detectPeakCandidates` local extremum in the first place.
+  let glass: DscFeature | null = null;
+  if (steps.length > 0) {
+    const strongest = steps.reduce((a, b) => (Math.abs(b.stepHeight) > Math.abs(a.stepHeight) ? b : a));
+    glass = {
+      id: `${segment.id}:auto:glass:1`,
+      segmentId: segment.id,
+      kind: "glass",
+      label: "Glass transition",
+      window: strongest.windowC,
+      baseline: null,
+      baselineMode: "linear",
+      auto: true,
+      visible: true,
+    };
+  } else {
+    glass = detectGlassCandidate(
+      view,
+      segment,
+      params,
+      candidates.map((c) => ({ lo: c.lo, hi: c.hi })),
+    );
+  }
   if (glass) features.push(glass);
 
   return features;

@@ -51,19 +51,24 @@ function Segmented<T extends string>({
   value,
   options,
   onChange,
+  disabled,
+  title,
 }: {
   value: T;
   options: { value: T; label: string }[];
   onChange: (v: T) => void;
+  disabled?: boolean;
+  title?: string;
 }) {
   return (
-    <div className="inline-flex overflow-hidden rounded-md border border-border/60">
+    <div className="inline-flex overflow-hidden rounded-md border border-border/60" title={title}>
       {options.map((o) => (
         <Button
           key={o.value}
           type="button"
           variant="ghost"
           size="sm"
+          disabled={disabled}
           onClick={() => onChange(o.value)}
           className={`h-7 rounded-none px-2.5 text-xs ${
             value === o.value ? "bg-primary/10 font-semibold text-primary" : "text-muted-foreground"
@@ -101,6 +106,11 @@ export interface MarkersPanelProps {
   onShowMarkerLabelsChange: (v: boolean) => void;
   markers: DscMarkerToggles;
   onMarkersChange: (m: DscMarkerToggles) => void;
+  /** Maps every drawn trace onto its own 0..1 span (`buildDscPlotTraces`'s
+   *  matching flag). Page-level state, shared verbatim with the Figure
+   *  tab's own "Normalize" toggle — see `Dsc.tsx`. */
+  normalizeTraces: boolean;
+  onNormalizeTracesChange: (v: boolean) => void;
 }
 
 export function MarkersPanel({
@@ -116,6 +126,8 @@ export function MarkersPanel({
   onShowMarkerLabelsChange,
   markers,
   onMarkersChange,
+  normalizeTraces,
+  onNormalizeTracesChange,
 }: MarkersPanelProps) {
   // Every feature kind except OIT lives on the temperature axis; OIT lives on
   // the time axis. Disable (not silently ignore) whichever set the current
@@ -141,12 +153,20 @@ export function MarkersPanel({
         <Segmented<DscPlotYAxis>
           value={yAxis}
           onChange={onYAxisChange}
+          disabled={normalizeTraces}
+          title={normalizeTraces ? "W/g vs mW is meaningless once every trace is normalized to 0..1" : undefined}
           options={[
             { value: "wattsPerGram", label: "W/g" },
             { value: "milliwatts", label: "mW" },
           ]}
         />
       </div>
+      <Toggle
+        label="Normalize"
+        checked={normalizeTraces}
+        onChange={onNormalizeTracesChange}
+        title="Map every trace onto its own 0..1 range, to compare shapes across runs of different amplitude"
+      />
       <div className="flex items-center gap-2">
         <span className="text-[11px] font-medium text-muted-foreground">Segments</span>
         <Segmented<DscPlotSegmentMode>
@@ -198,6 +218,12 @@ export function MarkersPanel({
         label="ΔH"
         checked={markers.enthalpyLabels}
         onChange={(v) => onMarkersChange({ ...markers, enthalpyLabels: v })}
+      />
+      <Toggle
+        label="Marker lines"
+        checked={markers.verticals}
+        onChange={(v) => onMarkersChange({ ...markers, verticals: v })}
+        title="Turn off to keep every Tg/Tm/… label without the vertical lines"
       />
       <Toggle label="Labels" checked={showMarkerLabels} onChange={onShowMarkerLabelsChange} />
     </div>
