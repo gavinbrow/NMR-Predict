@@ -84,14 +84,37 @@ export type DscPlotSegmentMode = "active" | "all";
  *  see. `verticals` defaults to `true` — the pre-existing behaviour — since
  *  it is the toggle a user reaches for AFTER seeing the plot, to declutter
  *  the marker lines while keeping every "Tg …"/"Tm …"/… label exactly where
- *  it was (the user's "remove the Tg line, keep just the Tg label, for all
- *  of them" request). Mirrors `lib/dsc/figure.ts`'s `DscMarkerToggles`,
- *  which carries the same four (see that file's own doc comment). */
+ *  it was.
+ *
+ *  `glassOnset`/`glassEndset`/`peakOnset`/`peakEndset` refine `verticals`
+ *  ONE LEVEL FURTHER, down to the individual onset/endset drop-lines a
+ *  single glass or peak feature draws alongside its midpoint/apex line — the
+ *  "get rid of all the extra lines that are not the Tg lines" request: a
+ *  glass feature used to always draw THREE verticals (onset, midpoint,
+ *  endset) and a peak-shaped one always drew three too (onset, apex,
+ *  endset), when only the midpoint/apex is the line most workflows actually
+ *  want on screen. Each still requires `verticals` itself to be on — they
+ *  narrow what `verticals` draws, they don't bypass it — and each governs
+ *  BOTH glass/endset (`peakOnset`/`peakEndset` cut across every peak-shaped
+ *  kind: melt, crystallization, cold crystallization, cure, custom — there
+ *  is no per-kind onset/endset split, same as `lib/dsc/figure.ts`'s
+ *  identically-named toggles, which this mirrors exactly; see that file's
+ *  own doc comment). The midpoint/apex line has no such sub-toggle — it
+ *  stays governed by `verticals` and the feature's own kind toggle alone,
+ *  since it is the one line every workflow wants to keep. Neither pair
+ *  affects labels: no onset/endset callout has ever existed separately from
+ *  the midpoint/apex "Tg …"/"T… …" one (see `pushGlassMarkers`/
+ *  `pushPeakMarkers`), so turning either off only removes a line, never
+ *  text. */
 export type DscMarkerToggles = Record<Exclude<DscFeatureKind, "custom">, boolean> & {
   baselines: boolean;
   tangents: boolean;
   enthalpyLabels: boolean;
   verticals: boolean;
+  glassOnset: boolean;
+  glassEndset: boolean;
+  peakOnset: boolean;
+  peakEndset: boolean;
 };
 
 /** Point budget per decimated series before the min/max-envelope
@@ -495,14 +518,18 @@ function pushGlassMarkers(
   // `preLine`/`postLine` evaluated AT onsetC/endsetC lands essentially on the
   // curve itself (that's how onset/endset are defined: where preLine/postLine
   // cross the inflection tangent), so it would draw a near-zero-length line
-  // rather than the "span the transition" geometry the midpoint fix below
-  // needs. Every `kind: "vertical"` push here is gated on `markers.verticals`
-  // — the "keep the label, drop the line" toggle — while the labels further
-  // down stay unconditional, so turning it off leaves a clean labelled plot.
-  if (markers.verticals && glass.onsetC != null) {
+  // rather than the "span the transition" geometry the midpoint below needs.
+  // Gated on `markers.verticals` (the "keep the label, drop every line"
+  // toggle) AND their own `glassOnset`/`glassEndset` sub-toggle (the "get rid
+  // of all the extra lines that are not the Tg lines" request — these two
+  // default `false` in `Dsc.tsx`'s `DEFAULT_PLOT_MARKERS`, so a fresh
+  // analysis draws only the midpoint below), while the labels further down
+  // stay unconditional either way, so turning either off leaves a clean
+  // labelled plot.
+  if (markers.verticals && markers.glassOnset && glass.onsetC != null) {
     out.push({ id: `${id}:v:onset`, kind: "vertical", sub: "onset", color, x: glass.onsetC, y: curveAt(glass.onsetC) });
   }
-  if (markers.verticals && glass.endsetC != null) {
+  if (markers.verticals && markers.glassEndset && glass.endsetC != null) {
     out.push({ id: `${id}:v:endset`, kind: "vertical", sub: "endset", color, x: glass.endsetC, y: curveAt(glass.endsetC) });
   }
   if (glass.midpointC != null) {
@@ -603,9 +630,15 @@ function pushPeakMarkers(
     }
   }
   // Every `kind: "vertical"` push below is gated on `markers.verticals` — the
-  // "keep the label, drop the line" toggle — while the "T… …"/"ΔH …" labels
-  // stay unconditional, so turning it off leaves a clean labelled plot.
-  if (markers.verticals && peak.onsetC != null) {
+  // "keep the label, drop every line" toggle — AND its own `peakOnset`/
+  // `peakEndset` sub-toggle (shared across every peak-shaped kind — melt,
+  // crystallization, cold crystallization, cure, custom — mirroring
+  // `lib/dsc/figure.ts`'s identically-named, identically-scoped toggles; see
+  // this file's `DscMarkerToggles` doc comment). Both default `false` in
+  // `Dsc.tsx`'s `DEFAULT_PLOT_MARKERS`, so a fresh analysis draws only the
+  // apex vertical below. The "T… …"/"ΔH …" labels stay unconditional either
+  // way, so turning either off leaves a clean labelled plot.
+  if (markers.verticals && markers.peakOnset && peak.onsetC != null) {
     out.push({
       id: `${id}:v:onset`,
       kind: "vertical",
@@ -616,7 +649,7 @@ function pushPeakMarkers(
       y2: baselineY(peak.onsetC),
     });
   }
-  if (markers.verticals && peak.endsetC != null) {
+  if (markers.verticals && markers.peakEndset && peak.endsetC != null) {
     out.push({
       id: `${id}:v:endset`,
       kind: "vertical",

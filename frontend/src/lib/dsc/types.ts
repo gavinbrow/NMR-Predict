@@ -93,6 +93,21 @@ export interface DscFeature {
   baselineMode: "linear";
   auto: boolean; // true until the user edits it (§3.6.6)
   visible: boolean;
+  /**
+   * User-typed Tg override, °C — meaningful only when `kind === "glass"`;
+   * `null` on every other kind and on a glass feature that hasn't been
+   * hand-corrected. Auto-detection and the ASTM E1356 fit are a starting
+   * point, not always the answer: a noisy segment can pull the half-height
+   * crossing off the real step, or miss one on a segment that visibly has
+   * one. When set, `computeDscAnalysis` overrides the fitted
+   * `GlassResult.midpointC` with this value (and recomputes `deltaCp` at
+   * it — see that function's doc comment) instead of discarding the user's
+   * correction the next time parameters change or re-detection runs. Setting
+   * it goes through `UPDATE_FEATURE` like any other field, which already
+   * clears `auto` (§3.6.6) so a hand-set Tg survives exactly like a
+   * hand-edited window does.
+   */
+  manualMidpointC: number | null;
 }
 
 /** A DSC run in the store — a parsed run plus the per-run display state

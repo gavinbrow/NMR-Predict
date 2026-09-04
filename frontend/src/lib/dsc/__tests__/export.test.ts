@@ -95,6 +95,7 @@ function makeRun(id: string, points = 41): DscRunAnalyzed {
         baselineMode: "linear",
         auto: true,
         visible: true,
+        manualMidpointC: null,
       },
     ],
   };
@@ -227,6 +228,34 @@ describe("dscproj round trip", () => {
     // on load anyway, and `serializeRun` picks fields explicitly to avoid it.
     const text = serializeDscProject(state, null);
     expect(text).not.toContain('"analysis"');
+  });
+
+  it("preserves a hand-set Tg (manualMidpointC) through the round trip", () => {
+    // `serializeRun` picks fields explicitly rather than spreading (see the
+    // "does not carry the derived analysis" test above) — but `features` is
+    // passed through as a whole array, so a NEW `DscFeature` field survives
+    // automatically as long as the runtime object actually carries it. This
+    // pins that a hand-set Tg isn't silently dropped by a `.dscproj` save/
+    // load, which a field-by-field feature serializer (if one existed) could
+    // easily miss.
+    const runWithManualTg = makeRun("B");
+    runWithManualTg.features = [
+      {
+        id: "B:seg0:glass1",
+        segmentId: runWithManualTg.segments[0].id,
+        kind: "glass",
+        label: "Tg",
+        window: [60, 100],
+        baseline: null,
+        baselineMode: "linear",
+        auto: false,
+        visible: true,
+        manualMidpointC: 65.4,
+      },
+    ];
+    const stateWithGlass: DscState = { ...state, runs: [runWithManualTg] };
+    const restored = deserializeDscProject(serializeDscProject(stateWithGlass, null));
+    expect(restored.state.runs[0].features[0].manualMidpointC).toBe(65.4);
   });
 
   it("rejects a file that isn't a DSC project", () => {

@@ -471,6 +471,60 @@ export function glassTransition(view: SegmentView, window: [number, number]): Gl
   return { onsetC, midpointC, endsetC, inflectionC, deltaCp, preLine, postLine, inflLine };
 }
 
+/**
+ * Overlays a user-typed Tg (`DscFeature.manualMidpointC`) onto a fitted
+ * `GlassResult` — the "manually set the Tg" feature. `manualMidpointC`
+ * (`null` or non-finite) leaves `glass` untouched, so every existing caller
+ * that never sets the field gets back exactly the fit it passed in.
+ *
+ * Only `midpointC` and `deltaCp` change:
+ *  - `midpointC` becomes the manual value outright — the user is asserting
+ *    "the step is centred HERE", overriding wherever the half-height
+ *    crossing (step 5 above) landed.
+ *  - `deltaCp` is Δcp's own definition — the pre-line/post-line gap AT the
+ *    midpoint, divided by the scan rate (step 6 above) — re-evaluated at the
+ *    MANUAL midpoint. That is the physically correct Δcp for the transition
+ *    the user just told the tool about, not an approximation of the fit's
+ *    Δcp: Δcp is a function of temperature (the two lines diverge across the
+ *    window), so leaving the fit's value in place would silently report the
+ *    step height at the WRONG temperature the moment the user moves Tg.
+ * `onsetC`/`endsetC`/`inflectionC` and the fitted lines themselves are left
+ * exactly as the fit produced them — the user is correcting where the step's
+ * centre reads, not re-running the ASTM E1356 fit. A fit with no pre/post
+ * line (too little data in the window, or `glassTransition` bailed out
+ * early) still honours the manual midpoint but leaves `deltaCp` null: with
+ * no fitted lines there is nothing to evaluate the gap against.
+ */
+function applyManualMidpoint(
+  glass: GlassResult,
+  view: SegmentView,
+  manualMidpointC: number | null,
+): GlassResult {
+  if (manualMidpointC == null || !Number.isFinite(manualMidpointC)) return glass;
+  let deltaCp: number | null = null;
+  if (glass.preLine && glass.postLine && view.normMode !== "raw" && view.rateCPerSec >= 1e-6) {
+    const step = Math.abs(evalLine(glass.postLine, manualMidpointC) - evalLine(glass.preLine, manualMidpointC));
+    deltaCp = step / view.rateCPerSec;
+  }
+  return { ...glass, midpointC: manualMidpointC, deltaCp };
+}
+
+/**
+ * `glassTransition` + `applyManualMidpoint` in one call — the single place
+ * every caller that needs a glass feature's FINAL result (fit, with any
+ * manual Tg overlaid) should go through, rather than calling
+ * `glassTransition` directly and forgetting the overlay. `computeDscAnalysis`
+ * uses this for the active segment; `export.ts`'s transitions-CSV builder
+ * uses it too, for every OTHER segment (`computeDscAnalysis` only ever
+ * analyzes the active one) — see that file's own doc comment.
+ */
+export function resolveGlassResult(
+  view: SegmentView,
+  feature: Pick<DscFeature, "window" | "manualMidpointC">,
+): GlassResult {
+  return applyManualMidpoint(glassTransition(view, feature.window), view, feature.manualMidpointC);
+}
+
 // ---------------------------------------------------------------------------
 // §3.5 Peaks — melting, crystallization, cold crystallization, cure
 // ---------------------------------------------------------------------------
@@ -1191,6 +1245,7 @@ function detectGlassCandidate(
     baselineMode: "linear",
     auto: true,
     visible: true,
+    manualMidpointC: null, // auto-detected: no user override yet
   };
 }
 
@@ -1266,6 +1321,7 @@ export function autoDetectFeatures(view: SegmentView, segment: DscSegment, param
       baselineMode: "linear",
       auto: true,
       visible: true,
+      manualMidpointC: null, // peak-shaped kinds never read this field, but it's part of every DscFeature
     });
   }
 
@@ -1292,6 +1348,7 @@ export function autoDetectFeatures(view: SegmentView, segment: DscSegment, param
       baselineMode: "linear",
       auto: true,
       visible: true,
+      manualMidpointC: null, // auto-detected: no user override yet
     };
   } else {
     glass = detectGlassCandidate(
@@ -1477,7 +1534,12 @@ export function computeDscAnalysis(run: DscRun, params: DscParams): DscAnalysis 
     const results: Record<string, DscFeatureResult> = {};
     for (const feature of features) {
       if (feature.kind === "glass") {
-        results[feature.id] = { kind: "glass", glass: glassTransition(view, feature.window) };
+        // Overlays `feature.manualMidpointC` onto the fit (a no-op when it's
+        // null) — the single place this analysis's `results`/`glass` fields
+        // get a glass result from, so every downstream reader (the plot/
+        // figure callouts, TransitionTable, SummaryTable, compare metrics)
+        // sees the user's hand-set Tg without having to know it exists.
+        results[feature.id] = { kind: "glass", glass: resolveGlassResult(view, feature) };
       } else if (feature.kind === "oit") {
         results[feature.id] = { kind: "oit", oit: oxidativeInductionTime(view, feature.window[0]) };
       } else {

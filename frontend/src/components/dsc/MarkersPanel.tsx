@@ -225,6 +225,43 @@ export function MarkersPanel({
         onChange={(v) => onMarkersChange({ ...markers, verticals: v })}
         title="Turn off to keep every Tg/Tm/… label without the vertical lines"
       />
+      {/* Refine `verticals` down to the individual onset/endset drop-lines —
+       *  disabled (not hidden) whenever `verticals` itself is off, matching
+       *  the per-kind toggles' disabled-not-hidden treatment above, since
+       *  "on but verticals is off" is a real, non-default state a user can
+       *  still be in. Mirrors `DscFigurePanel.tsx`'s four figure-tab
+       *  switches — same labels, same order — but these only ever drop a
+       *  LINE (no onset/endset callout has ever existed separately from the
+       *  midpoint/apex one on the plot; see `pushGlassMarkers`'s doc
+       *  comment), unlike their figure-tab counterparts. */}
+      <Toggle
+        label="Tg onset"
+        checked={markers.glassOnset}
+        onChange={(v) => onMarkersChange({ ...markers, glassOnset: v })}
+        disabled={!markers.verticals}
+        title={!markers.verticals ? "Turn on Marker lines to show this" : undefined}
+      />
+      <Toggle
+        label="Tg endset"
+        checked={markers.glassEndset}
+        onChange={(v) => onMarkersChange({ ...markers, glassEndset: v })}
+        disabled={!markers.verticals}
+        title={!markers.verticals ? "Turn on Marker lines to show this" : undefined}
+      />
+      <Toggle
+        label="Peak onset"
+        checked={markers.peakOnset}
+        onChange={(v) => onMarkersChange({ ...markers, peakOnset: v })}
+        disabled={!markers.verticals}
+        title={!markers.verticals ? "Turn on Marker lines to show this" : undefined}
+      />
+      <Toggle
+        label="Peak endset"
+        checked={markers.peakEndset}
+        onChange={(v) => onMarkersChange({ ...markers, peakEndset: v })}
+        disabled={!markers.verticals}
+        title={!markers.verticals ? "Turn on Marker lines to show this" : undefined}
+      />
       <Toggle label="Labels" checked={showMarkerLabels} onChange={onShowMarkerLabelsChange} />
     </div>
   );

@@ -100,6 +100,7 @@ function draftFeature(run: DscRunAnalyzed, segmentId: string, ordinal: number): 
     baselineMode: "linear",
     auto: false,
     visible: true,
+    manualMidpointC: null, // "Add transition" always starts from the auto-fit / blank
   };
 }
 
@@ -323,6 +324,36 @@ export function FeaturePanel({
                 >
                   Reset anchors to window ends
                 </button>
+              )}
+
+              {feature.kind === "glass" && (
+                <div className="mt-2 grid gap-0.5">
+                  <span className="text-[10px] text-muted-foreground">Tg (°C)</span>
+                  <Input
+                    type="number"
+                    step={0.1}
+                    value={feature.manualMidpointC ?? ""}
+                    // The fitted midpoint, so the empty state visibly reads
+                    // "use the fit" rather than a bare blank — when there is
+                    // no override yet, `result.glass.midpointC` IS the pure
+                    // fit (the override only diverges from it once one
+                    // exists, at which point the input shows that value
+                    // instead and the placeholder is moot).
+                    placeholder={result?.kind === "glass" ? fmt(result.glass.midpointC) : "—"}
+                    onClick={(e) => e.stopPropagation()}
+                    onChange={(e) => {
+                      const raw = e.target.value;
+                      // Clearing the box reverts to the fit (§ "manually set
+                      // the Tg if needed") — `UPDATE_FEATURE` still clears
+                      // `auto` on this patch even though the value goes back
+                      // to `null`, same as clearing any other field would.
+                      onUpdateFeature(feature.id, {
+                        manualMidpointC: raw === "" ? null : Number(raw),
+                      });
+                    }}
+                    className="h-7 text-xs"
+                  />
+                </div>
               )}
 
               <div className="mt-2 text-[11px] text-muted-foreground">

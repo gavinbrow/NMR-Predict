@@ -38,9 +38,9 @@ import {
 import {
   computeDerivative,
   exoDisplaySign,
-  glassTransition,
   oxidativeInductionTime,
   peakTransition,
+  resolveGlassResult,
   segmentView,
   type SegmentView,
 } from "./compute";
@@ -197,9 +197,13 @@ export function downloadCurvesCsv(runs: DscRunAnalyzed[], params: DscParams, bas
 /**
  * Every run's transitions (user + auto features, across EVERY segment — not
  * just the active one) as CSV rows. Each feature's result is recomputed with
- * `segmentView` + the same pure analyzer the store uses
- * (`glassTransition`/`peakTransition`/`oxidativeInductionTime`), because the
- * store's cached `analysis.results` only covers the run's active segment.
+ * `segmentView` + the same pure analyzers the store uses
+ * (`resolveGlassResult`/`peakTransition`/`oxidativeInductionTime`), because
+ * the store's cached `analysis.results` only covers the run's active
+ * segment. Glass goes through `resolveGlassResult` rather than
+ * `glassTransition` directly — a bare `glassTransition` call here would
+ * silently drop a hand-set `manualMidpointC` from the CSV/Excel/PDF exports
+ * (all three reuse this builder) even though the on-screen Tg reads it.
  *
  * An OIT feature has no window/onset in °C — its `window`/onset are minutes
  * on an isothermal hold. The fixed column schema has no dedicated OIT
@@ -242,7 +246,7 @@ export function buildTransitionsCsvRows(
       let fwhmC: number | null = null;
 
       if (feature.kind === "glass") {
-        const g = glassTransition(view, feature.window);
+        const g = resolveGlassResult(view, feature);
         onset = g.onsetC;
         mid = g.midpointC;
         endset = g.endsetC;

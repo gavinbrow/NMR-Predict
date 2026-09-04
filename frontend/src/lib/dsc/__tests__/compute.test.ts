@@ -21,7 +21,7 @@ import {
   segmentView,
   toWattsPerGram,
 } from "../compute";
-import { DEFAULT_PARAMS, type DscRun, type DscSegment } from "../types";
+import { DEFAULT_PARAMS, type DscFeature, type DscRun, type DscSegment } from "../types";
 
 // ---------------------------------------------------------------------------
 // Synthetic curve builder
@@ -891,6 +891,118 @@ describe("compute engine", () => {
     expect(analysis.melt).toBeNull();
     expect(analysis.glass).toBeNull();
     expect(analysis.view.tempC.length).toBe(0);
+  });
+
+  // -------------------------------------------------------------------------
+  // Manual Tg override (`DscFeature.manualMidpointC`) — "allow me to
+  // manually set the Tg if needed".
+  // -------------------------------------------------------------------------
+
+  /** A glass feature on `COMBINED`'s heat segment, at `GLASS_WINDOW`, with
+   *  `manualMidpointC` set from the caller. */
+  function makeGlassFeature(segmentId: string, manualMidpointC: number | null, window = GLASS_WINDOW): DscFeature {
+    return {
+      id: "manualGlass",
+      segmentId,
+      kind: "glass",
+      label: "Tg",
+      window,
+      baseline: null,
+      baselineMode: "linear",
+      auto: manualMidpointC == null,
+      visible: true,
+      manualMidpointC,
+    };
+  }
+
+  it("overrides the fitted midpoint with a manual Tg and recomputes deltaCp at that temperature", () => {
+    const run = makeRun("heat", COMBINED);
+    // Overwrite COMBINED's curve with one whose pre/post baseline slopes
+    // genuinely differ (`sampleMassMg` is 1, so raw mW === the W/g value
+    // below). COMBINED itself shares ONE global `baselineSlope` on both
+    // sides of the step, so its fitted `preLine`/`postLine` come out nearly
+    // PARALLEL — a stale (un-recomputed) Δcp would then coincidentally match
+    // the recomputed-at-manual-T value anyway, defeating the point of this
+    // test. Piecewise slopes make Δcp a genuine function of where along the
+    // step it's evaluated.
+    const stepCenterC = COMBINED.stepCenterC;
+    const stepWidthC = COMBINED.stepWidthC;
+    const preSlope = 0.0002;
+    const postSlope = 0.0014;
+    for (let i = 0; i < run.tempC.length; i += 1) {
+      const T = run.tempC[i];
+      const step = (COMBINED.stepHeightWPerG / 2) * (1 + Math.tanh((T - stepCenterC) / stepWidthC));
+      const slope = T < stepCenterC ? preSlope : postSlope;
+      run.heatFlowMw[i] = 0.02 + slope * (T - stepCenterC) + step;
+    }
+
+    const view = segmentView(run, run.segments[0], DEFAULT_PARAMS);
+    const fit = glassTransition(view, GLASS_WINDOW);
+    expect(fit.preLine).not.toBeNull();
+    expect(fit.postLine).not.toBeNull();
+    expect(fit.midpointC).not.toBeNull();
+
+    // A manual Tg a couple of degrees off the fit's own midpoint — far enough
+    // that preLine(T) - postLine(T) genuinely differs from its value at the
+    // fit's midpoint, so a STALE (un-recomputed) Δcp would fail this test.
+    const manualT = fit.midpointC! + 2;
+    run.features = [makeGlassFeature(run.segments[0].id, manualT)];
+
+    const analysis = computeDscAnalysis(run, { ...DEFAULT_PARAMS, autoDetect: false });
+    const glass = analysis.glass!;
+    expect(glass).not.toBeNull();
+    expect(glass.midpointC).toBeCloseTo(manualT, 10);
+
+    // Δcp's own definition (`glassTransition`'s step 6): the pre/post-line
+    // gap AT the midpoint, divided by the scan rate — evaluated here at the
+    // MANUAL midpoint, not the fit's.
+    const rateCPerSec = COMBINED.rateCPerMin / 60;
+    const preAtManual = fit.preLine!.slope * manualT + fit.preLine!.intercept;
+    const postAtManual = fit.postLine!.slope * manualT + fit.postLine!.intercept;
+    const expectedDeltaCp = Math.abs(postAtManual - preAtManual) / rateCPerSec;
+    expect(glass.deltaCp).not.toBeNull();
+    expect(glass.deltaCp!).toBeCloseTo(expectedDeltaCp, 8);
+    // Not the fit's own Δcp — pins the "recompute, don't just move the
+    // label" requirement: a stale Δcp would coincidentally pass the
+    // assertion above only if the two lines were parallel, which they are
+    // not here.
+    expect(Math.abs(glass.deltaCp! - fit.deltaCp!)).toBeGreaterThan(1e-6);
+
+    // Onset/endset/inflection and the fitted lines themselves are untouched
+    // — the user is correcting where the step's centre reads, not re-running
+    // the ASTM E1356 fit.
+    expect(glass.onsetC).toBe(fit.onsetC);
+    expect(glass.endsetC).toBe(fit.endsetC);
+    expect(glass.inflectionC).toBe(fit.inflectionC);
+    expect(glass.preLine).toEqual(fit.preLine);
+    expect(glass.postLine).toEqual(fit.postLine);
+  });
+
+  it("still honours a manual Tg when the fit found no pre/post lines, but leaves deltaCp null", () => {
+    const run = makeRun("heat", COMBINED);
+    // A window far too narrow (<15 points, §`glassTransition` step 1) for a
+    // fit at all — `glassTransition` bails out to all-null. Pins
+    // `applyManualMidpoint`'s "nothing to evaluate Δcp against" branch.
+    const tinyWindow: [number, number] = [COMBINED.stepCenterC - 0.1, COMBINED.stepCenterC + 0.1];
+    run.features = [makeGlassFeature(run.segments[0].id, COMBINED.stepCenterC, tinyWindow)];
+
+    const analysis = computeDscAnalysis(run, { ...DEFAULT_PARAMS, autoDetect: false });
+    const glass = analysis.glass!;
+    expect(glass).not.toBeNull();
+    expect(glass.midpointC).toBe(COMBINED.stepCenterC);
+    expect(glass.deltaCp).toBeNull();
+    expect(glass.preLine).toBeNull();
+    expect(glass.postLine).toBeNull();
+  });
+
+  it("manualMidpointC: null reproduces the pure fit exactly", () => {
+    const run = makeRun("heat", COMBINED);
+    const view = segmentView(run, run.segments[0], DEFAULT_PARAMS);
+    const fit = glassTransition(view, GLASS_WINDOW);
+    run.features = [makeGlassFeature(run.segments[0].id, null)];
+
+    const analysis = computeDscAnalysis(run, { ...DEFAULT_PARAMS, autoDetect: false });
+    expect(analysis.glass).toEqual(fit);
   });
 
   // -------------------------------------------------------------------------

@@ -46,6 +46,27 @@ const ALL_MARKERS: DscMarkerToggles = {
   verticals: true,
 };
 
+/** Mirrors `Dsc.tsx`'s `DEFAULT_FIGURE_MARKERS` exactly — the "one mark (and
+ *  one callout) per transition" fresh-figure state, per the same "get rid of
+ *  all the extra lines that are not the Tg lines" fix that changed the plot
+ *  tab's defaults. Unlike the plot tab's toggles, `glassOnset`/`glassEndset`/
+ *  `peakOnset`/`peakEndset` here gate BOTH the mark line and its "Tg onset
+ *  …"/"… endset …" text callout (`pushMark` only runs at all when its own
+ *  toggle is on) — so this default state drops those callouts too, not just
+ *  their lines. */
+const DEFAULT_MARKERS: DscMarkerToggles = {
+  glassOnset: false,
+  glassMid: true,
+  glassEndset: false,
+  peakTemp: true,
+  peakOnset: false,
+  peakEndset: false,
+  baselines: false,
+  tangents: false,
+  enthalpyLabels: false,
+  verticals: true,
+};
+
 /**
  * A synthetic run: a heating ramp (30 -> 200 °C, seg0) carrying a glass step
  * near 80 °C and an endothermic melt peak near 150 °C, followed by a cooling
@@ -120,6 +141,7 @@ function makeRun(
       baselineMode: "linear",
       auto: false,
       visible: true,
+      manualMidpointC: null,
     },
     {
       id: `${id}:melt1`,
@@ -131,6 +153,7 @@ function makeRun(
       baselineMode: "linear",
       auto: false,
       visible: true,
+      manualMidpointC: null,
     },
   ];
 
@@ -701,6 +724,61 @@ describe("buildDscFigureData", () => {
     const labelsWithout = (noVerticals.peakLabels ?? []).map((p) => p.text).sort();
     expect(labelsWithout).toEqual(labelsWith);
     expect(labelsWith.length).toBeGreaterThan(0);
+  });
+
+  it("under the new DEFAULT_FIGURE_MARKERS, only the glass mid and peak apex marks (and callouts) are drawn", () => {
+    // Pins `Dsc.tsx`'s `DEFAULT_FIGURE_MARKERS`: onset/endset default off for
+    // both glass and peak-shaped features, so a fresh figure carries exactly
+    // one mark line — and one text callout — per transition.
+    const run = makeRun("A", "#2563eb");
+    const data = buildDscFigureData({
+      runs: [run],
+      xAxis: "temperature",
+      yAxis: "wattsPerGram",
+      y2: "none",
+      segmentMode: "active",
+      labelFeatures: true,
+      stackRuns: false,
+      markers: DEFAULT_MARKERS,
+    });
+    const marks = data.series.filter((s) => s.id.startsWith("mark:"));
+    expect(marks).toHaveLength(2); // one glass ":mid" + one peak ":peak"
+    expect(marks.some((s) => s.id.endsWith(":mid"))).toBe(true);
+    expect(marks.some((s) => s.id.endsWith(":peak"))).toBe(true);
+    expect(marks.some((s) => s.id.endsWith(":onset"))).toBe(false);
+    expect(marks.some((s) => s.id.endsWith(":endset"))).toBe(false);
+
+    const labels = data.peakLabels ?? [];
+    expect(labels).toHaveLength(2);
+    expect(labels.some((p) => p.text.startsWith("Tg "))).toBe(true);
+    expect(labels.some((p) => p.text.startsWith("Tm "))).toBe(true);
+    expect(labels.some((p) => p.text.includes("onset"))).toBe(false);
+    expect(labels.some((p) => p.text.includes("endset"))).toBe(false);
+  });
+
+  it("turning glassOnset/glassEndset/peakOnset/peakEndset back on restores both their marks and their onset/endset callouts", () => {
+    // Unlike the plot tab's toggles (lines only), these four gate the mark
+    // AND its "Tg onset …"/"Tm endset …" text together — see
+    // `DEFAULT_MARKERS`'s doc comment above.
+    const run = makeRun("A", "#2563eb");
+    const data = buildDscFigureData({
+      runs: [run],
+      xAxis: "temperature",
+      yAxis: "wattsPerGram",
+      y2: "none",
+      segmentMode: "active",
+      labelFeatures: true,
+      stackRuns: false,
+      markers: { ...DEFAULT_MARKERS, glassOnset: true, glassEndset: true, peakOnset: true, peakEndset: true },
+    });
+    const marks = data.series.filter((s) => s.id.startsWith("mark:"));
+    expect(marks).toHaveLength(6); // glass onset/mid/endset + peak onset/peak/endset
+
+    const labels = (data.peakLabels ?? []).map((p) => p.text);
+    expect(labels.some((t) => t.startsWith("Tg onset"))).toBe(true);
+    expect(labels.some((t) => t.startsWith("Tg endset"))).toBe(true);
+    expect(labels.some((t) => t.startsWith("Tm onset"))).toBe(true);
+    expect(labels.some((t) => t.startsWith("Tm endset"))).toBe(true);
   });
 });
 

@@ -87,12 +87,17 @@ import type { DscColumnMap, ParsedDscFile } from "@/lib/dsc/types";
 
 /** Per-feature-kind callout toggles for the on-screen plot's overlay, keyed
  *  by every `DscFeatureKind` except "custom" (a user-placed feature is
- *  always shown — there is no kind-level toggle for it), plus the three
- *  marker-family toggles (`baselines`/`tangents`/`enthalpyLabels`). Those
- *  three default OFF: a fresh analysis should show the transition callouts
- *  (Tg/Tm/…) without also cluttering the plot with every fitted baseline,
- *  tangent, and ΔH label the user hasn't asked to see — see
- *  `lib/dsc/plot.ts`'s `DscMarkerToggles` doc comment. */
+ *  always shown — there is no kind-level toggle for it), plus the seven
+ *  marker-family toggles. `baselines`/`tangents`/`enthalpyLabels` default
+ *  OFF: a fresh analysis should show the transition callouts (Tg/Tm/…)
+ *  without also cluttering the plot with every fitted baseline, tangent, and
+ *  ΔH label the user hasn't asked to see. `glassOnset`/`glassEndset`/
+ *  `peakOnset`/`peakEndset` ALSO default OFF — the "get rid of all the extra
+ *  lines that are not the Tg lines" request: with these off and `verticals`
+ *  on, a fresh analysis draws exactly ONE line per transition (the midpoint
+ *  for glass, the apex for a peak) instead of the pre-fix three (onset +
+ *  midpoint/apex + endset). See `lib/dsc/plot.ts`'s `DscMarkerToggles` doc
+ *  comment for the full toggle hierarchy. */
 const DEFAULT_PLOT_MARKERS: DscPlotMarkerToggles = {
   glass: true,
   melt: true,
@@ -107,18 +112,35 @@ const DEFAULT_PLOT_MARKERS: DscPlotMarkerToggles = {
   // toggle a user reaches for AFTER seeing the marker lines, to drop them
   // while keeping every Tg/Tm/… label right where it was.
   verticals: true,
+  // Off by default (§ "get rid of all the extra lines" fix) — only the
+  // midpoint/apex line shows until the user asks for onset/endset back.
+  glassOnset: false,
+  glassEndset: false,
+  peakOnset: false,
+  peakEndset: false,
 };
 
 /** Marker-family toggles for the Figure tab. A different shape from the
  *  plot's toggles above (per marker family, not per feature kind) — kept as
  *  genuinely separate state, per §WP6. */
 const DEFAULT_FIGURE_MARKERS: DscFigureMarkerToggles = {
-  glassOnset: true,
+  // Off by default (§ "get rid of all the extra lines" fix, mirroring the
+  // plot tab's `glassOnset`/`glassEndset`/`peakOnset`/`peakEndset` above) —
+  // a fresh figure draws only the midpoint/apex mark per transition.
+  // `glassOnset`/`glassEndset`/`peakOnset`/`peakEndset` gate BOTH the mark
+  // line and its "Tg onset …"/"Tg endset …"/"… onset …"/"… endset …" text
+  // callout (`pushMark` only runs when the caller's own toggle is on — see
+  // `lib/dsc/figure.ts`'s `DscMarkerToggles` doc comment), unlike the plot
+  // tab's `verticals`-only toggle, which never touched labels — so turning
+  // these off removes those onset/endset callouts from the figure too,
+  // not just their lines. That is the intended reading for an exported
+  // figure: the same declutter the user asked for on-screen.
+  glassOnset: false,
   glassMid: true,
-  glassEndset: true,
+  glassEndset: false,
   peakTemp: true,
-  peakOnset: true,
-  peakEndset: true,
+  peakOnset: false,
+  peakEndset: false,
   // Off by default — same reasoning as the plot's `DEFAULT_PLOT_MARKERS`:
   // the Tg/Tm/… callouts should appear without also drawing every fitted
   // baseline/tangent/ΔH label unasked.

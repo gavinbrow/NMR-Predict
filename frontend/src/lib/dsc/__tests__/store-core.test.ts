@@ -91,6 +91,7 @@ function makeFeature(overrides: Partial<DscFeature> = {}): DscFeature {
     baselineMode: "linear",
     auto: true,
     visible: true,
+    manualMidpointC: null,
     ...overrides,
   };
 }

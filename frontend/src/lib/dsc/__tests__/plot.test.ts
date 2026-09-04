@@ -35,6 +35,25 @@ const ALL_MARKERS: DscMarkerToggles = {
   tangents: true,
   enthalpyLabels: true,
   verticals: true,
+  glassOnset: true,
+  glassEndset: true,
+  peakOnset: true,
+  peakEndset: true,
+};
+
+/** Mirrors `Dsc.tsx`'s `DEFAULT_PLOT_MARKERS` exactly: every kind toggle on,
+ *  `verticals` on, but the four onset/endset sub-toggles and the
+ *  baseline/tangent/ΔH families all off — the "one line per transition"
+ *  fresh-analysis state (§ "get rid of all the extra lines" fix). */
+const DEFAULT_MARKERS: DscMarkerToggles = {
+  ...ALL_MARKERS,
+  baselines: false,
+  tangents: false,
+  enthalpyLabels: false,
+  glassOnset: false,
+  glassEndset: false,
+  peakOnset: false,
+  peakEndset: false,
 };
 
 // ---------------------------------------------------------------------------
@@ -142,6 +161,7 @@ function makeRun(
     baselineMode: "linear",
     auto: false,
     visible: true,
+    manualMidpointC: null,
   };
   const meltFeature: DscFeature = {
     id: `${id}:melt1`,
@@ -153,6 +173,7 @@ function makeRun(
     baselineMode: "linear",
     auto: false,
     visible: true,
+    manualMidpointC: null,
   };
 
   const run: DscRun = {
@@ -237,6 +258,7 @@ function makeOitRun(): DscRunAnalyzed {
     baselineMode: "linear",
     auto: false,
     visible: true,
+    manualMidpointC: null,
   };
   const run: DscRun = {
     label: id,
@@ -750,6 +772,95 @@ describe("buildDscPlotMarkers", () => {
       .sort();
     expect(noVerticalLabels).toEqual(withLabels);
     expect(withLabels.length).toBeGreaterThan(0);
+  });
+
+  it("with the default toggles, a glass feature draws only its midpoint vertical and one label", () => {
+    // Pins `Dsc.tsx`'s `DEFAULT_PLOT_MARKERS`: `glassOnset`/`glassEndset`
+    // default false, so a fresh analysis shows ONE line at Tg instead of the
+    // pre-fix three (onset + midpoint + endset) — the user's "get rid of all
+    // the extra lines that are not the Tg lines" request.
+    const out = buildDscPlotMarkers({
+      runs: [makeRun()],
+      params: DEFAULT_PARAMS,
+      xAxis: "temperature",
+      yAxis: "wattsPerGram",
+      markers: DEFAULT_MARKERS,
+    });
+    const glassVerticals = out.filter((m) => m.kind === "vertical" && m.id.includes(":glass1:"));
+    expect(glassVerticals).toHaveLength(1);
+    expect((glassVerticals[0] as Extract<(typeof glassVerticals)[number], { kind: "vertical" }>).sub).toBe(
+      "midpoint",
+    );
+    const glassLabels = out.filter((m) => m.kind === "label" && m.id.includes(":glass1"));
+    expect(glassLabels).toHaveLength(1);
+  });
+
+  it("with the default toggles, a peak feature draws only its apex vertical and one label", () => {
+    const out = buildDscPlotMarkers({
+      runs: [makeRun()],
+      params: DEFAULT_PARAMS,
+      xAxis: "temperature",
+      yAxis: "wattsPerGram",
+      markers: DEFAULT_MARKERS,
+    });
+    const peakVerticals = out.filter((m) => m.kind === "vertical" && m.id.includes(":melt1:"));
+    expect(peakVerticals).toHaveLength(1);
+    expect((peakVerticals[0] as Extract<(typeof peakVerticals)[number], { kind: "vertical" }>).sub).toBe(
+      "peak",
+    );
+    const peakLabels = out.filter((m) => m.kind === "label" && m.id.includes(":melt1:label:peak"));
+    expect(peakLabels).toHaveLength(1);
+  });
+
+  it("turning glassOnset/glassEndset back on restores those verticals, leaving the peak feature untouched", () => {
+    const out = buildDscPlotMarkers({
+      runs: [makeRun()],
+      params: DEFAULT_PARAMS,
+      xAxis: "temperature",
+      yAxis: "wattsPerGram",
+      markers: { ...DEFAULT_MARKERS, glassOnset: true, glassEndset: true },
+    });
+    const glassVerticals = out.filter((m) => m.kind === "vertical" && m.id.includes(":glass1:")) as Extract<
+      (typeof out)[number],
+      { kind: "vertical" }
+    >[];
+    expect(glassVerticals.map((m) => m.sub).sort()).toEqual(["endset", "midpoint", "onset"]);
+    // The peak feature's own toggles are still off — unaffected by glass's.
+    const peakVerticals = out.filter((m) => m.kind === "vertical" && m.id.includes(":melt1:"));
+    expect(peakVerticals).toHaveLength(1);
+  });
+
+  it("turning peakOnset/peakEndset back on restores those verticals, leaving the glass feature untouched", () => {
+    const out = buildDscPlotMarkers({
+      runs: [makeRun()],
+      params: DEFAULT_PARAMS,
+      xAxis: "temperature",
+      yAxis: "wattsPerGram",
+      markers: { ...DEFAULT_MARKERS, peakOnset: true, peakEndset: true },
+    });
+    const peakVerticals = out.filter((m) => m.kind === "vertical" && m.id.includes(":melt1:")) as Extract<
+      (typeof out)[number],
+      { kind: "vertical" }
+    >[];
+    expect(peakVerticals.map((m) => m.sub).sort()).toEqual(["endset", "onset", "peak"]);
+    // The glass feature's own toggles are still off — unaffected by peak's.
+    const glassVerticals = out.filter((m) => m.kind === "vertical" && m.id.includes(":glass1:"));
+    expect(glassVerticals).toHaveLength(1);
+  });
+
+  it("glassOnset/glassEndset/peakOnset/peakEndset still require verticals — the master switch stays on top", () => {
+    // The sub-toggles narrow what `verticals` draws; they never bypass it.
+    const out = buildDscPlotMarkers({
+      runs: [makeRun()],
+      params: DEFAULT_PARAMS,
+      xAxis: "temperature",
+      yAxis: "wattsPerGram",
+      markers: { ...ALL_MARKERS, verticals: false },
+    });
+    expect(out.some((m) => m.kind === "vertical")).toBe(false);
+    // Every label survives regardless — same "keep the label, drop the
+    // line" contract as the master `verticals` toggle alone.
+    expect(out.some((m) => m.kind === "label")).toBe(true);
   });
 });
 
